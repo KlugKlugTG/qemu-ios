@@ -1,4 +1,5 @@
 #include "hw/arm/ipod_touch_lcd.h"
+#include "hw/arm/panel-gamma.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
 #include "ui/pixel_ops.h"
@@ -236,6 +237,73 @@ static void lcd_gather(IPodTouchLCDState *s, uint8_t *buf)
     lcd_bus_read(s, s->scanout_va, buf, s->pw * s->ph * 4);
 }
 
+#define LCD_GAMMA_CTRL  0x400   /* bit0: the output gamma on */
+#define LCD_LUT_ADDR    0x408
+#define LCD_LUT_WDATA   0x40c
+#define LCD_LUT_RDATA   0x410
+#define LCD_LUT_GAMMA   4       /* tables 4, 5, 6 */
+
+/* The output gamma as the panel shows it, 8 bits in and out. A change repaints the whole panel. */
+static void lcd_gamma_update(IPodTouchLCDState *s)
+{
+    s->gamma_identity = panel_gamma(s->lut + LCD_LUT_GAMMA, s->calib, s->gamma_ctrl & 1, s->gamma8);
+    s->invalidate = 1;
+}
+
+/*
+ * The tables out of reset, as the n72's iBoot loads them: a straight line, f(i) = 4i. Under kboot (fb-base) the
+ * gamma is on, as iBoot leaves it; otherwise iBoot turns it on itself.
+ */
+static void lcd_gamma_reset(IPodTouchLCDState *s)
+{
+    memset(s->lut, 0, sizeof(s->lut));
+    s->lut_addr = 0;
+    s->gamma_ctrl = s->fb_base ? 1 : 0;
+    for (int c = 0; c < 3; c++) {
+        for (int i = 0; i < 256; i++) {
+            s->lut[LCD_LUT_GAMMA + c][i] = MAX(i - 1, 0) * 4 << 10 | i * 4;
+        }
+    }
+    panel_gamma_reset(s->calib);
+    lcd_gamma_update(s);
+}
+
+static uint32_t lcd_lut_read(const IPodTouchLCDState *s, hwaddr addr)
+{
+    switch (addr) {
+    case LCD_GAMMA_CTRL:
+        return s->gamma_ctrl;
+    case LCD_LUT_ADDR:
+        return s->lut_addr;
+    default:
+        return s->lut[(s->lut_addr >> 12) & 7][s->lut_addr & 0xff];
+    }
+}
+
+static void lcd_lut_write(IPodTouchLCDState *s, hwaddr addr, uint32_t val)
+{
+    unsigned t = (s->lut_addr >> 12) & 7;
+
+    if (addr == LCD_GAMMA_CTRL) {
+        s->gamma_ctrl = val;
+        lcd_gamma_update(s);
+        return;
+    }
+    if (addr == LCD_LUT_ADDR) {
+        s->lut_addr = val;
+        return;
+    }
+    if (!(s->lut_addr & 0x10000)) {
+        return;
+    }
+    s->lut[t][s->lut_addr & 0xff] = val & 0xfffff;
+    /* The entry steps: the n72's iBoot loads a table from one address write, bit 31 on each entry. */
+    s->lut_addr = (s->lut_addr & ~0xffu) | ((s->lut_addr + 1) & 0xff);
+    if (t >= LCD_LUT_GAMMA && t < LCD_LUT_GAMMA + 3) {
+        lcd_gamma_update(s);
+    }
+}
+
 static void lcd_update_irq(IPodTouchLCDState *s)
 {
     qemu_set_irq(s->irq, (s->irq_status & s->irq_enable) != 0);
@@ -328,6 +396,10 @@ static uint64_t ipod_touch_lcd_read(void *opaque, hwaddr addr, unsigned size)
     }
     switch(addr)
     {
+        case LCD_GAMMA_CTRL:
+        case LCD_LUT_ADDR:
+        case LCD_LUT_RDATA:
+            return lcd_lut_read(s, addr);
         case 0x0:
             /*
              * ctrl-readback: 4.2.1's AppleM2CLCD (N18) powers the controller
@@ -419,6 +491,13 @@ static void ipod_touch_lcd_write(void *opaque, hwaddr addr, uint64_t val, unsign
         addr = lcd_s5l8900_offset(addr);
     }
     switch(addr) {
+        case LCD_GAMMA_CTRL:
+        case LCD_LUT_ADDR:
+        case LCD_LUT_WDATA:
+            if (!s->s5l8900) {          /* the S5L8720's port; the S5L8900's H1 CLCD has none modeled */
+                lcd_lut_write(s, addr, val);
+            }
+            break;
         case 0x4:
             s->lcd_con = val;
             break;
@@ -496,20 +575,15 @@ void it_display_set_orientation(uint32_t orientation)
  * pixel -- 153,600 pixels a frame, up to ninety frames a second, on the
  * iothread with the BQL held. The arithmetic only has 256 possible answers.
  */
-static uint8_t lcd_bright_lut[256];
-static int lcd_bright_lut_for = -1;
+static uint8_t lcd_bright_lut[3][256];     /* R, G, B: the panel's gamma, then the backlight */
 
-static void lcd_bright_lut_sync(int bri)
+static void lcd_bright_lut_sync(const IPodTouchLCDState *s, int bri)
 {
-    int i;
-
-    if (lcd_bright_lut_for == bri) {
-        return;
+    for (int c = 0; c < 3; c++) {
+        for (int i = 0; i < 256; i++) {
+            lcd_bright_lut[c][i] = (uint8_t)lround(s->gamma8[c][i] * (double)bri / 255.0);
+        }
     }
-    for (i = 0; i < 256; i++) {
-        lcd_bright_lut[i] = (uint8_t)lround(i * (double)bri / 255.0);
-    }
-    lcd_bright_lut_for = bri;
 }
 
 static void lcd_invalidate(void *opaque)
@@ -538,8 +612,8 @@ static void draw_line32_32(void *opaque, uint8_t *d, const uint8_t *s, int width
 
     /* The LUT is synchronized once per frame by lcd_refresh(). */
     do {
-        *dp++ = rgb_to_pixel32(lcd_bright_lut[s[2]], lcd_bright_lut[s[1]],
-                               lcd_bright_lut[s[0]]);
+        *dp++ = rgb_to_pixel32(lcd_bright_lut[0][s[2]], lcd_bright_lut[1][s[1]],
+                               lcd_bright_lut[2][s[0]]);
         s += 4;
     } while (-- width != 0);
 }
@@ -737,7 +811,7 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
     int dstride = surface_stride(surface);
     int bri = lcd_bright_effective();
 
-    lcd_bright_lut_sync(bri);
+    lcd_bright_lut_sync(lcd, bri);
     lcd->last_bright = bri;   /* keeps the duplicate-frame test in lcd_refresh honest */
     int sx, sy;
 
@@ -749,7 +823,7 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
      * the steady-state path for landscape games, which stay rotated the whole
      * session, so it is not the "rare state" the comment above once assumed.
      */
-    bool fast_copy = (bri == 255 &&
+    bool fast_copy = (bri == 255 && lcd->gamma_identity &&
                       surface_format(surface) == PIXMAN_x8r8g8b8);
 
     if (surface_width(surface) != dw || surface_height(surface) != dh) {
@@ -795,9 +869,9 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
             }
         } else {
             for (sx = 0; sx < sw; sx++, s += 4, d += step) {
-                *(uint32_t *)d = rgb_to_pixel32(lcd_bright_lut[s[2]],
-                                                lcd_bright_lut[s[1]],
-                                                lcd_bright_lut[s[0]]);
+                *(uint32_t *)d = rgb_to_pixel32(lcd_bright_lut[0][s[2]],
+                                                lcd_bright_lut[1][s[1]],
+                                                lcd_bright_lut[2][s[0]]);
             }
         }
     }
@@ -951,11 +1025,11 @@ static void lcd_refresh(void *opaque)
             lcd->invalidate = 1;
         }
     }
-    lcd_bright_lut_sync(bri);
+    lcd_bright_lut_sync(lcd, bri);
 
     /* See draw_line32_32(). x8r8g8b8 is what qemu_default_pixman_format() hands
      * out here, but a frontend is free to ask for something else. */
-    lcd_line_is_copy = (bri == 255 &&
+    lcd_line_is_copy = (bri == 255 && lcd->gamma_identity &&
                         surface_format(surface) == PIXMAN_x8r8g8b8);
 
     framebuffer_update_display(surface, &lcd->fbsection,
@@ -1230,6 +1304,7 @@ static void ipod_touch_lcd_reset(DeviceState *dev)
 
     memset(s->plane_regs, 0, sizeof(s->plane_regs));
     memset(s->plane_scanout, 0, sizeof(s->plane_scanout));
+    lcd_gamma_reset(s);
     s->lcd_con = 0;
     s->render = 0;
     s->irq_enable = 0;
@@ -1378,8 +1453,23 @@ static int ipod_touch_lcd_post_load(void *opaque, int version_id)
     /* scanout_base is re-latched by the next frame interrupt anyway, but a
      * repaint can be asked for before that and would otherwise draw black. */
     s->scanout_base = lcd_scanout_base(s);
+    lcd_gamma_update(s);
     return 0;
 }
+
+/* The lookup tables; a subsection, so saves from before them load with the boot tables. */
+static const VMStateDescription vmstate_ipod_touch_lcd_lut = {
+    .name = "ipod_touch_lcd/lut",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32(gamma_ctrl, IPodTouchLCDState),
+        VMSTATE_UINT32(lut_addr, IPodTouchLCDState),
+        VMSTATE_UINT32_2DARRAY(lut, IPodTouchLCDState, 8, 256),
+        VMSTATE_UINT32_2DARRAY(calib, IPodTouchLCDState, 3, 256),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static const VMStateDescription vmstate_ipod_touch_lcd = {
     .name = "ipod_touch_lcd",
@@ -1402,6 +1492,10 @@ static const VMStateDescription vmstate_ipod_touch_lcd = {
         VMSTATE_UINT32_V(irq_status, IPodTouchLCDState, 3),
         VMSTATE_BOOL_V(saved_planes_enabled, IPodTouchLCDState, 4),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_ipod_touch_lcd_lut,
+        NULL
     }
 };
 

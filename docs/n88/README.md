@@ -70,6 +70,10 @@ the card. What 3.x needed:
   Australia, Location off, new iPhone, Apple ID skipped, terms, diagnostics), the home screen composites
   through the GL bridge, the Harness installs and launches and its GLES row draws, and an AFC marker
   survives power-off and reboot.
+- Accessibility (issue 54): White on Black (Invert Colors on 6.x) goes through the M2 CLCD's output gamma,
+  which AppleM2CLCD reads back through +0x408/+0x410, mirrors and writes through +0x40c; the model keeps the
+  tables (iBoot's straight line at reset) and shows the panel through them. Zoom has CoreAnimation render the
+  visible crop and the scaler blow it up into the framebuffer, reading the source at the stride the driver programs.
 
 ## How to boot
 

@@ -1,5 +1,8 @@
 /* Actual LCD control MMIO: stock rotation RMW, option independence, N45 map and panel= size.
  *
+ * SLICE include/hw/arm/panel-gamma.h file
+ * SLICE hw/arm/ipod_touch_lcd.c define (LCD_LUT_|LCD_GAMMA_CTRL)
+ * SLICE hw/arm/ipod_touch_lcd.c fn lcd_gamma_update lcd_lut_read lcd_lut_write
  * SLICE hw/arm/ipod_touch_lcd.c fn lcd_panel_is_native lcd_s5l8900_offset ipod_touch_lcd_read ipod_touch_lcd_write
  */
 #include <stdint.h>
@@ -18,6 +21,10 @@ typedef struct {
     uint32_t pw, ph;
     bool ctrl_readback;
     uint32_t fb_base;
+    int invalidate;
+    uint32_t gamma_ctrl, lut_addr, lut[8][256], calib[3][256];
+    uint8_t gamma8[3][256];
+    bool gamma_identity;
 } IPodTouchLCDState;
 #define LCD_FB_WIDTH  320
 #define LCD_FB_HEIGHT 480
