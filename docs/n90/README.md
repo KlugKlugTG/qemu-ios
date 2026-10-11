@@ -204,14 +204,15 @@ What differs from 7.1.2:
   Beta ReleaseType. Past it the state is Expired, the brick goes on, and `expiration_callback` ("This milk smells
   bad") makes installation_proxy answer ServiceProhibited. `rtc-epoch` pins the D1815 clock and the agent's clock
   offset (op 0x165), as on 6.0 beta 1.
-- **timed.** timed took NTP over Wi-Fi to 2026. FirmwareKit seeds com.apple.timed for a dated recipe:
-  `TMAutomaticTimeEnabled` and `TMAutomaticTimeOnlyEnabled` false (Settings' switch, 6.x's and 7.x's key) and
-  `DisableAutomaticTime` true. The switch alone is not enough: timed (6.0b1 CoreTime-77) honors it only once its
-  cache says the clock was set (TMSystemTimeSet), so a fresh unit took NTP at Setup's TMSetupTime regardless;
-  `DisableAutomaticTime` is checked before every change. Measured on 6.0 beta 1 (N90 and N81, guest agent off, NTP
-  answered with 2026 by a host responder): seeded, timed fetches and leaves the clock at 2012-06-16; without the
-  seed it sets 2026. With the agent running its clock sync (op 0x165, about once a second) puts the pinned date
-  back, which had hidden this.
+- **timed.** timed took NTP over Wi-Fi to 2026. On a machine with `rtc-epoch` the user netdev answers every NTP
+  client request itself (net/slirp.c `slirp_ntp_reply`, any server, IPv4 or IPv6) with the pinned clock running
+  from power-on, as the PMU's RTC and the baseband's NITZ tell it, so timed keeps automatic time on and the date
+  holds. FirmwareKit used to seed com.apple.timed instead (`TMAutomaticTimeEnabled` and `TMAutomaticTimeOnlyEnabled`
+  false, `DisableAutomaticTime` true; the switch alone was not enough, since timed (6.0b1 CoreTime-77) honors it
+  only once its cache says the clock was set). That kept the date but made timed drop every time-zone change,
+  lockdown's included: 6.0b1 applies a zone only when `TMAutomaticTimeEnabled && !DisableAutomaticTime`, 7.x when
+  `TMAutomaticTimeZoneEnabled && !DisableAutomaticTime`. With the agent running, its clock sync (op 0x165, about
+  once a second) puts the pinned date back as well, which had hidden the 2026 jump.
 - **Activation.** lockdownd turns the brick state on for a data ark without `-BrickState` and lifts it only for a
   valid activation record ("not a valid product for Factory Action"); Setup's `isBricked` then sends it online to
   activate. FirmwareKit seeds `-BrickState` false for a dated recipe ("factoryactivation unbricks by default").

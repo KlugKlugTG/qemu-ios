@@ -31,8 +31,10 @@
 #include <pwd.h>
 #include <sys/wait.h>
 #endif
+#include "net/checksum.h"
 #include "net/eth.h"
 #include "net/net.h"
+#include "qom/object.h"
 #include "clients.h"
 #include "hub.h"
 #include "monitor/monitor.h"
@@ -96,6 +98,11 @@ typedef struct SlirpState {
     gchar *smb_dir;
 #endif
     GSList *fwd;
+    bool restricted;
+    /* A dated machine's network clock (its "rtc-epoch"): seconds from the
+     * host's clock, and whether there is one (slirp_ntp_reply). */
+    int64_t ntp_offset;
+    bool ntp;
 } SlirpState;
 
 static struct slirp_config_str *slirp_configs;
@@ -130,10 +137,124 @@ static ssize_t net_slirp_send_packet(const void *pkt, size_t pkt_len,
     return qemu_send_packet(&s->nc, pkt, pkt_len);
 }
 
+#define NTP_LEN 48
+#define NTP_UNIX_EPOCH 2208988800ULL    /* 1900-01-01 to 1970-01-01, seconds */
+
+static void ntp_stamp(uint8_t *p, uint64_t unix_us)
+{
+    stl_be_p(p, unix_us / 1000000 + NTP_UNIX_EPOCH);
+    stl_be_p(p + 4, ((unix_us % 1000000) << 32) / 1000000);
+}
+
+/*
+ * A time server's answer to the guest's NTP request, from the machine's own
+ * clock. A dated machine (a beta before its expiry, a set date) keeps its
+ * clock, but iOS's timed sets the clock from NTP, and the internet's servers
+ * tell the host's year; so the network answers in the device's time, as the
+ * baseband's NITZ does. Any server: time.apple.com, time-ios.apple.com, a
+ * pool name or an address. `in` is the guest's Ethernet frame; the reply
+ * frame goes to `out` (14 + 40 + 8 + NTP_LEN bytes at most). Returns its
+ * length, or 0 when `in` is not an NTP client request (mode 3, UDP to port
+ * 123 over unfragmented IPv4 or over IPv6 without extension headers).
+ */
+static size_t slirp_ntp_reply(const uint8_t *in, size_t len, uint64_t unix_us,
+                              uint8_t *out)
+{
+    const uint8_t *ip = in + 14, *udp;
+    uint8_t *oip = out + 14, *oudp, *ntp;
+    size_t iplen;
+    uint32_t sum;
+
+    if (len < 14) {
+        return 0;
+    }
+    switch (lduw_be_p(in + 12)) {
+    case 0x0800:
+        iplen = len >= 14 + 20 ? (ip[0] & 0xf) * 4 : 0;
+        if (iplen < 20 || (ip[0] >> 4) != 4 || ip[9] != 17 ||
+            (lduw_be_p(ip + 6) & 0x3fff) || lduw_be_p(ip + 2) > len - 14 ||
+            lduw_be_p(ip + 2) < iplen + 8 + NTP_LEN) {
+            return 0;
+        }
+        break;
+    case 0x86dd:
+        iplen = 40;
+        if (len < 14 + 40 || (ip[0] >> 4) != 6 || ip[6] != 17 ||
+            lduw_be_p(ip + 4) > len - 14 - 40 || lduw_be_p(ip + 4) < 8 + NTP_LEN) {
+            return 0;
+        }
+        break;
+    default:
+        return 0;
+    }
+    udp = ip + iplen;
+    if (lduw_be_p(udp + 2) != 123 || lduw_be_p(udp + 4) < 8 + NTP_LEN ||
+        (udp[8] & 7) != 3) {
+        return 0;
+    }
+
+    memcpy(out, in + 6, 6);                     /* back to the guest */
+    memcpy(out + 6, in, 6);                     /* from the router it sent to */
+    memcpy(out + 12, in + 12, 2);
+    if (iplen == 40) {
+        memset(oip, 0, 40);
+        oip[0] = 0x60;
+        stw_be_p(oip + 4, 8 + NTP_LEN);
+        oip[6] = 17;
+        oip[7] = 64;
+        memcpy(oip + 8, ip + 24, 16);
+        memcpy(oip + 24, ip + 8, 16);
+        sum = net_checksum_add(32, oip + 8);
+    } else {
+        iplen = 20;
+        memset(oip, 0, 20);
+        oip[0] = 0x45;
+        stw_be_p(oip + 2, 20 + 8 + NTP_LEN);
+        oip[8] = 64;
+        oip[9] = 17;
+        memcpy(oip + 12, ip + 16, 4);
+        memcpy(oip + 16, ip + 12, 4);
+        stw_be_p(oip + 10, net_raw_checksum(oip, 20));
+        sum = net_checksum_add(8, oip + 12);
+    }
+    oudp = oip + iplen;
+    stw_be_p(oudp, 123);
+    memcpy(oudp + 2, udp, 2);
+    stw_be_p(oudp + 4, 8 + NTP_LEN);
+    stw_be_p(oudp + 6, 0);
+
+    ntp = oudp + 8;
+    memset(ntp, 0, NTP_LEN);
+    ntp[0] = (udp[8] & 0x38) | 4;               /* no leap warning, the client's version, server */
+    ntp[1] = 1;                                 /* stratum 1, as Apple's servers are */
+    ntp[2] = udp[8 + 2];                        /* the client's poll */
+    ntp[3] = (uint8_t)-20;                      /* precision: about a microsecond */
+    memcpy(ntp + 12, "GPSs", 4);
+    ntp_stamp(ntp + 16, unix_us);               /* reference */
+    memcpy(ntp + 24, udp + 8 + 40, 8);          /* originate: the client's transmit */
+    ntp_stamp(ntp + 32, unix_us);               /* receive */
+    ntp_stamp(ntp + 40, unix_us);               /* transmit */
+
+    /* the pseudo-header's addresses (above), protocol and length, then UDP */
+    sum += 17 + 8 + NTP_LEN + net_checksum_add(8 + NTP_LEN, oudp);
+    stw_be_p(oudp + 6, net_checksum_finish_nozero(sum));
+    return 14 + iplen + 8 + NTP_LEN;
+}
+
 static ssize_t net_slirp_receive(NetClientState *nc, const uint8_t *buf, size_t size)
 {
     SlirpState *s = DO_UPCAST(SlirpState, nc, nc);
 
+    if (s->ntp && !s->restricted) {
+        uint8_t reply[14 + 40 + 8 + NTP_LEN];
+        size_t n = slirp_ntp_reply(buf, size,
+                                   g_get_real_time() + s->ntp_offset * 1000000,
+                                   reply);
+        if (n) {
+            net_slirp_send_packet(reply, n, s);
+            return size;
+        }
+    }
     slirp_input(s->slirp, buf, size);
 
     return size;
@@ -640,6 +761,16 @@ static int net_slirp_init(NetClientState *peer, const char *model,
                       restricted ? "on" : "off");
 
     s = DO_UPCAST(SlirpState, nc, nc);
+    s->restricted = restricted;
+    {
+        /* A dated machine's clock, pinned at power-on and running on as its
+         * PMU's RTC does: its network's time servers tell the same. */
+        Object *m = object_resolve_path_component(object_get_root(), "machine");
+        uint64_t epoch = m && object_property_find(m, "rtc-epoch")
+                         ? object_property_get_uint(m, "rtc-epoch", NULL) : 0;
+        s->ntp = epoch != 0;
+        s->ntp_offset = epoch ? (int64_t)epoch - time(NULL) : 0;
+    }
 
     cfg.version =
          SLIRP_CHECK_VERSION(4, 9, 0) ? 6 :
@@ -778,6 +909,7 @@ int net_slirp_set_restrict(const char *id, bool restricted)
     }
 
     slirp_set_restricted(s->slirp, restricted);
+    s->restricted = restricted;
     /* Keep "info network" truthful: net_slirp_init wrote "net=...,restrict=..." */
     char *r = strstr(s->nc.info_str, "restrict=");
     if (r) {
