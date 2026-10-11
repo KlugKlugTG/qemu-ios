@@ -194,12 +194,13 @@ static bool scaler_read_bus(IPodScalerState *s, uint32_t va, void *buf, unsigned
 }
 
 /*
- * NV12 to NV12, turned 90 degrees when the destination's width is the source's height: how 4.x puts a
+ * NV12 to NV12, turned 90 degrees when the destination's orientation is the source's turned: how 4.x puts a
  * decoded movie frame (VXD's 480x270 at stride 512) upright for the iPhone 4's portrait panel
  * (270x480 at stride 320), formats +0x10/+0x30 both 0, planes at +0x14/+0x18 and +0x34/+0x38, plane
- * strides in bytes at +0x1c and +0x3c (UV << 16 | Y).
- * ponytail: unscaled only, and one turning direction (the movie came out upright with it); +0x58 (3
- * here) likely selects it.
+ * strides in bytes at +0x1c and +0x3c (UV << 16 | Y). The camera's viewfinder takes the same path scaled
+ * down: the ISP's 2592x1936 frame to 640x852, turned.
+ * ponytail: nearest sampling where the hardware has polyphase taps, and one turning direction (the movie
+ * came out upright with it); +0x58 (3 here) likely selects it.
  */
 static bool scaler_nv12(IPodScalerState *s)
 {
@@ -208,10 +209,10 @@ static bool scaler_nv12(IPodScalerState *s)
     unsigned dw = (r[0x40 / 4] >> 16) & 0x1fff, dh = r[0x40 / 4] & 0x1fff;
     unsigned sys = r[0x1c / 4] & 0xffff, suvs = r[0x1c / 4] >> 16;
     unsigned dys = r[0x3c / 4] & 0xffff, duvs = r[0x3c / 4] >> 16;
-    bool rot = dw == sh && dh == sw && sw != sh;
+    bool rot = sw != sh && dw != dh && (sw > sh) != (dw > dh);
 
-    if ((r[0x10 / 4] & 7) || (r[0x30 / 4] & 7) || !sw || !sh || sw > 2048 || sh > 2048 || (sw | sh) & 1 ||
-        (!rot && (dw != sw || dh != sh)) || sys < sw || suvs < sw || dys < dw || duvs < dw) {
+    if ((r[0x10 / 4] & 7) || (r[0x30 / 4] & 7) || !sw || !sh || sw > 4096 || sh > 4096 || (sw | sh) & 1 ||
+        !dw || !dh || (dw | dh) & 1 || sys < sw || suvs < sw || dys < dw || duvs < dw) {
         return false;
     }
     g_autofree uint8_t *y = g_malloc((size_t)sw * sh), *uv = g_malloc((size_t)sw * sh / 2);
@@ -222,9 +223,11 @@ static bool scaler_nv12(IPodScalerState *s)
             return false;
         }
     }
-    for (unsigned j = 0; j < dh; j++) {          /* luma: destination (x, j) is source row sh - 1 - x, column j */
+    /* Destination (x, j) samples source row sh - 1 - x, column j when turned, scaled to the source's size. */
+    for (unsigned j = 0; j < dh; j++) {
         for (unsigned x = 0; x < dw; x++) {
-            row[x] = rot ? y[(size_t)(sh - 1 - x) * sw + j] : y[(size_t)j * sw + x];
+            row[x] = rot ? y[(size_t)(sh - 1 - (uint64_t)x * sh / dw) * sw + (uint64_t)j * sw / dh]
+                         : y[(size_t)((uint64_t)j * sh / dh) * sw + (uint64_t)x * sw / dw];
         }
         if (!scaler_write_bus(s, r[0x34 / 4] + j * dys, row, dw)) {
             return false;
@@ -232,7 +235,9 @@ static bool scaler_nv12(IPodScalerState *s)
     }
     for (unsigned j = 0; j < dh / 2; j++) {      /* chroma pairs, the same turn at half size */
         for (unsigned x = 0; x < dw / 2; x++) {
-            const uint8_t *c = rot ? uv + (size_t)(sh / 2 - 1 - x) * sw + 2 * j : uv + (size_t)j * sw + 2 * x;
+            const uint8_t *c = rot ? uv + (size_t)(sh / 2 - 1 - (uint64_t)x * sh / dw) * sw
+                                         + 2 * ((uint64_t)j * sw / dh)
+                                   : uv + (size_t)((uint64_t)j * sh / dh) * sw + 2 * ((uint64_t)x * sw / dw);
             row[2 * x] = c[0];
             row[2 * x + 1] = c[1];
         }

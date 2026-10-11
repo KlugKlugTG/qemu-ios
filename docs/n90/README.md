@@ -254,7 +254,7 @@ What differs from 7.1.2:
    - The GPS (bcm4750 on uart4): a measurement engine whose binary protocol Broadcom's GLL, linked into
      locationd, drives down to correlator data; out of reach for now (docs/baseband/gps.md). The 3GS's
      receiver, inside its modem, is modeled.
-   - The cameras and ISP. `camera=off` (default) unmatches the DT's `isp` node, as on N81 (its debt 4).
+   - The cameras: `camera=on` has the ISP model (viewfinder and photos on 4.2.1), off by default; N81's debt 4.
 3. ~~Compass~~ (2026-10-10): the unit's AK8975B (0x0c) is modeled in place of the AK8973 that stood in for it,
    and the accelerometer's z no longer reads -z (debt 4). CoreLocation reads 90 and 200 within 2 degrees face up
    and upright on 4.2.1 (the compass scenario of LightTouchMac `sessions phone`). The stand-in had also put 4.2.1

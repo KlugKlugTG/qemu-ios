@@ -218,7 +218,8 @@ documented quirk/patch, S stub.
 | Codec CS42L59 | the CS42L58 register file | shared | H |
 | BCM4329 | the iPod's dongle model, `P=N81`, n81.bin version | variant (board data) | H |
 | Gyro (ap3gdl @0x68, INT1 0x21 / INT2 0x05) | ST L3G4200D (WHO_AM_I 0xd3): registers, 32-slot FIFO and its modes, INT2 levels, ODR timer; zero rate at rest, the turn's rate while the host changes the attitude (`gyro_mount`, the DT orientation inverted). The kboot DT's `gyro-sensitivity-calibration` (iBoot fills it from syscfg) gets a nominal identity at reset | new | R (calibration P) |
-| Cameras / ISP | none; `camera=off` (default) unmatches the DT's `isp` node | absent (see debts) | P |
+| Cameras / ISP | `camera=on`: `s5l8930.isp` (`hw/arm/s5l8930_isp.c`): the ISP CPU's mailbox in front of a model of its firmware's register file, the output DMA and frame interrupt the kext programs, a test-pattern sensor; checked on the iPhone 4's 4.2.1 and this board's 6.1.6, back camera. `camera=off` (default) unmatches the DT's `isp` node | shared | H (sensor P) |
+| JPEG codec (0x88200000, IRQ 0x73) | `s5l8920.jpeg` (`hw/arm/s5l8920_jpeg.c`, every A4 board): Samsung's JPEG block; encodes 'yuvs' to a JFIF stream over the tables the driver programs (the camera's stills, SpringBoard's snapshots); decode answers "corrupt", so callers fall back to software | shared | H |
 | VXD (H.264 decoder, 0x85000000, IRQ 0x30) | `s5l8920.vxd` (`hw/arm/s5l8920_vxd.c`, every A4 board): the MSVDX's DXVA firmware played at its comms area and message rings; each render's slice decoded on the host (`s5l8920_vxd_h264.c`, libavcodec) with its SPS and PPS rebuilt from the registers and the slice header's fit; a picture completes once, at its last slice, after its decode time; the M2 scaler turns NV12 frames upright and the display pipe shows its video layer, alone or under the UI. Movies play on 4.2.1 (n90ap-8C148), 5.1.1 (k48ap-9B206), 6.1.6 (n81ap-10B500) and 7.1.2 (n90ap-11D257, letterboxed as it asks); MPEG-4 renders complete without a picture | shared | H |
 
 ## Guest debugging
@@ -242,11 +243,12 @@ documented quirk/patch, S stub.
    values are unmeasured.
 3. ~~**No FirmwareKit recipe.**~~ `n81ap-8C148` has a catalog entry and a kboot recipe (LightTouchMac branch
    `a4-n81`, experimental).
-4. **Cameras.** No ISP model. AppleH3CamIn loaded the ISP CPU's firmware and then timed out on its mailbox
-   a dozen times per boot (mediaserverd's sensor detection). The machine's `camera` property (default off) now
-   unmatches the kboot DT's `isp` node at reset, the way `baseband` does, so the board reads as camera-less:
-   no H3CamIn lines, and Camera.app opens to its closed shutter without crashing (N90 8C148, 2026-10-05).
-   A real ISP model (the ISP CPU running its firmware, the sensors on i2c/MIPI) is what `camera=on` waits for.
+4. **Cameras.** `camera=on` has the ISP model (2026-10-10): on the iPhone 4's 4.2.1 and this board's 6.1.6
+   Camera.app shows a live test-pattern viewfinder (640x480 here) and its photos (960x720) land in the Camera
+   Roll (the design and the protocol: device-expansion-handoff/autonomy-10-09/camera.md). Off by default until
+   it is checked on the other versions and with the front camera; IT_CAMERA=1 turns it on for a session the app
+   starts. Off, the kboot DT's `isp` node is unmatched at reset, as `baseband` does, and the board reads as
+   camera-less.
 5. ~~**Gyro**~~ (2026-10-05): AppleAP3GDL attaches and streams. `contrib/it-gyro` (spawned through the agent)
    reads CoreMotion at about 100 Hz, `gyroAvailable 1`, every rate 0 at rest. Since 2026-10-09 an attitude change
    (accel-orientation, the attitude properties) is a turn the gyro sees: the accelerometer swings to the new pose

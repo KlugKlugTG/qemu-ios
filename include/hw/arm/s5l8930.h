@@ -259,6 +259,13 @@ extern const MemoryRegionOps s5l8930_dart_ops;     /* opaque: S5L8930Dart * */
 /* `va` for stream `sid` -> PA: `va` itself if its segment has no table, -1 on an invalid PTE. */
 hwaddr s5l8930_dart_xlate(S5L8930Dart *d, unsigned sid, uint32_t va);
 #define TYPE_S5L8930_DART "s5l8930.dart"
+/* A TYPE_S5L8930_DART's translation (dart1's clients: ISP sid 1, JPEG sid 0, VENC sids 2 and 3). */
+hwaddr s5l8930_dart_dev_xlate(DeviceState *dart, unsigned sid, uint32_t va);
+#define TYPE_S5L8930_ISP "s5l8930.isp"
+/* The JPEG codec (hw/arm/s5l8920_jpeg.c, "s5l8920.jpeg"), its buffers behind an IOMMU (stream 0). */
+void s5l8920_jpeg_set_iommu(DeviceState *dev, hwaddr (*xlate)(void *opaque, unsigned sid, uint32_t va), void *opaque);
+/* The ISP's output DMA goes through dart1 (DT mapper-isp, stream 1). */
+void s5l8930_isp_set_dart(DeviceState *isp, DeviceState *dart);
 /* dart2 translation of `va` for stream ID `sid`; -1 if unmapped. */
 hwaddr s5l8930_dart2_xlate(void *display, uint32_t va, unsigned sid);
 /* The iPod scaler model (hw/arm/ipod_touch_scaler.c) behind an IOMMU. */

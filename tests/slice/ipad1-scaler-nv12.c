@@ -1,6 +1,7 @@
 /* The scaler's NV12-to-NV12 path (scaler_nv12): a decoded movie frame turned upright for the iPhone 4's portrait
- * panel (480x270 at stride 512 to 270x480 at stride 320 on a 4.2.1 device; small sizes here), both planes. And its
- * NV12-to-RGB path (scaler_convert) behind a DART, as the 3GS uses it.
+ * panel (480x270 at stride 512 to 270x480 at stride 320 on a 4.2.1 device; small sizes here), both planes, and
+ * the camera viewfinder's turn scaled down. And its NV12-to-RGB path (scaler_convert) behind a DART, as the 3GS
+ * uses it.
  *
  * SLICE hw/arm/ipod_touch_scaler.c range typedef struct { | static const MemoryRegionOps
  * PKG glib-2.0
@@ -67,9 +68,21 @@ int main(void)
             assert(ram[DUV - 0x100000 + j * DYS + 2 * x] == cb(j, SH / 2 - 1 - x));
             assert(ram[DUV - 0x100000 + j * DYS + 2 * x + 1] == cr(j, SH / 2 - 1 - x));
         }
-    /* Neither a scaled transfer nor an RGB one is this path's. */
-    r[0x40/4] = SH / 2 << 16 | SW / 2;
-    assert(!scaler_nv12(&s));
+    /* Turned and scaled down, as the camera's viewfinder (2592x1936 to 640x852): 12x6 to 4x8, every destination
+     * sample the source's nearest at the size ratio (1.5 both ways). */
+    enum { DW = 4, DH = 8 };
+    memset(&ram[DY - 0x100000], 0, 0x2000);
+    r[0x40/4] = DW << 16 | DH;
+    assert(scaler_nv12(&s));
+    for (unsigned j = 0; j < DH; j++)
+        for (unsigned x = 0; x < DW; x++)
+            assert(ram[DY - 0x100000 + j * DYS + x] == luma(j * SW / DH, SH - 1 - x * SH / DW));
+    for (unsigned j = 0; j < DH / 2; j++)
+        for (unsigned x = 0; x < DW / 2; x++) {
+            assert(ram[DUV - 0x100000 + j * DYS + 2 * x] == cb(j * SW / DH, SH / 2 - 1 - x * SH / DW));
+            assert(ram[DUV - 0x100000 + j * DYS + 2 * x + 1] == cr(j * SW / DH, SH / 2 - 1 - x * SH / DW));
+        }
+    /* An RGB destination is not this path's. */
     r[0x40/4] = SH << 16 | SW; r[0x30/4] = 6;
     assert(!scaler_nv12(&s));
 

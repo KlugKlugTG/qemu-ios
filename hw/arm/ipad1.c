@@ -369,6 +369,7 @@ struct IPad1MachineState {
     uint64_t rtc_epoch;                  /* rtc-epoch: the PMU clock at power-on (Unix seconds), 0 = the host's */
     bool baseband;                       /* leave the kboot DT's baseband node matchable (default off) */
     DeviceState *bb_modem;               /* the ios-baseband behind spi2 (baseband=on, radio boards) */
+    DeviceState *dart1;
     bool camera;                         /* leave the kboot DT's isp node matchable (default off) */
     bool ring_silent;                    /* ring-switch: the side switch at silent (default off: ring) */
     uint8_t wifi_mac[6];                 /* BCM4329 CIS MAC (wifi-mac) */
@@ -414,6 +415,11 @@ static uint32_t s5l8930_usb_hwcfg[] = { 0, 0x7a8f60d0, 0x082000e8, 0x01f08024 };
 static void ipad1_amc_port_kick(void *cdma)
 {
     s5l8930_cdma_kick(cdma);
+}
+
+static hwaddr ipad1_dart1_xlate(void *dart, unsigned sid, uint32_t va)
+{
+    return s5l8930_dart_dev_xlate(dart, sid, va);
 }
 
 static qemu_irq ipad1_irq(IPad1MachineState *s, int irq)
@@ -764,10 +770,9 @@ static void ipad1_cpu_reset(void *opaque)
                    &(A4DTEdit){ "baseband", "device-imei", imei, strlen(imei) });
     }
     /*
-     * No ISP model either: AppleH3CamIn loads the ISP CPU's firmware and then
-     * waits on its mailbox, which nothing answers (two timeouts per command,
-     * a dozen per boot, from mediaserverd's sensor detection). Unmatched, the
-     * board reads as camera-less, as K48 is.
+     * The camera (s5l8930_isp.c) is off by default until it is checked past
+     * 4.2.1 and on the iPod touch 4G: unmatched, the board reads as
+     * camera-less, as K48 is.
      */
     if (!s->camera) {
         a4_dt_unmatch((uint8_t *)data, image_len, load_pa, bootargs_pa, "isp");
@@ -1218,6 +1223,9 @@ static void ipad1_init(MachineState *machine)
     int i;
 
     s->board = IPAD1_MACHINE_GET_CLASS(s)->board;
+    if (g_strcmp0(getenv("IT_CAMERA"), "1") == 0) {   /* camera=on for a session the app starts (no camera= yet) */
+        s->camera = true;
+    }
     if (!!s->kboot_path + !!s->iboot_path + !!s->bootrom_path != 1) {
         error_report("ipad1: specify exactly one of iboot=, bootrom=, or kboot=");
         exit(1);
@@ -1392,10 +1400,10 @@ static void ipad1_init(MachineState *machine)
 
     /*
      * dart1: the IOMMU in front of the ISP, JPEG and video-encoder blocks
-     * (DT dart1 mappers). No client is modeled; its driver programs it at
-     * every boot (smoke #29) the way it does dart2.
+     * (DT dart1 mappers); the JPEG and ISP models translate through it. Its
+     * driver programs it at every boot (smoke #29) the way it does dart2.
      */
-    sysbus_create_simple(TYPE_S5L8930_DART, S5L8930_DART1_BASE, NULL);
+    s->dart1 = sysbus_create_simple(TYPE_S5L8930_DART, S5L8930_DART1_BASE, NULL);
 
     /* Display pipe, CLCD, DART2, RGBOUT, TV-out; scanout starts at iBoot's FB. */
     dev = qdev_new(TYPE_S5L8930_DISPLAY);
@@ -1716,6 +1724,22 @@ static void ipad1_init(MachineState *machine)
 
     /* VXD, the H.264 decoder (DT vxd: reg 0x85000000, interrupt 0x30). */
     sysbus_create_simple("s5l8920.vxd", 0x85000000, ipad1_irq(s, 0x30));
+
+    /* The JPEG codec (DT jpeg: reg 0x88200000, interrupt 0x73), through dart1 (mapper-jpeg, stream 0). */
+    dev = sysbus_create_simple("s5l8920.jpeg", 0x88200000, ipad1_irq(s, 0x73));
+    s5l8920_jpeg_set_iommu(dev, ipad1_dart1_xlate, s->dart1);
+
+    /* The camera ISP (DT isp: reg 0x88300000 and the ISP CPU's 0x88100000, interrupts 8 and 9). */
+    if (s->camera) {
+        dev = qdev_new(TYPE_S5L8930_ISP);
+        s5l8930_isp_set_dart(dev, s->dart1);
+        sbd = SYS_BUS_DEVICE(dev);
+        sysbus_realize_and_unref(sbd, &error_fatal);
+        sysbus_mmio_map(sbd, 0, 0x88300000);
+        sysbus_mmio_map(sbd, 1, 0x88100000);
+        sysbus_connect_irq(sbd, 0, ipad1_irq(s, 8));
+        sysbus_connect_irq(sbd, 1, ipad1_irq(s, 9));
+    }
 
     /* SWI: backlight and DPSM core voltage; only the busy bit matters, and the backlight level is reported. */
     {

@@ -83,6 +83,11 @@ struct S5L8930DartState {
     S5L8930Dart dart;
 };
 
+hwaddr s5l8930_dart_dev_xlate(DeviceState *dart, unsigned sid, uint32_t va)
+{
+    return s5l8930_dart_xlate(&S5L8930_DART(dart)->dart, sid, va);
+}
+
 static void s5l8930_dart_reset(DeviceState *dev)
 {
     S5L8930DartState *s = S5L8930_DART(dev);
