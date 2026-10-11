@@ -133,6 +133,13 @@ What it took beyond the 8C148 bring-up:
 5. **Setup Assistant** (5.x) walked by label (OCR of the upright panel); the bottom edge of the digitizer reads
    a little high (debt 7), so a link there is retapped lower.
 
+Accessibility (issue 54), on every A4 board: White on Black (Invert Colors from 6.0) is the CLCD's output gamma.
+AppleCLCD reads the R, G and B tables back (+0x34/+0x3c), mirrors them and loads them from its frame interrupt
+(+0x08/+0x64/+0x68, CLCD IRQ 0x29); the model keeps the tables, raises that interrupt and, while +0x2c bit0 is on
+(as iBoot leaves it), shows the panel through them as a panel calibrated for the last ascending table would
+(`include/hw/arm/panel-gamma.h`: the iPad's 5.x loads a calibration curve at boot). Zoom has CoreAnimation render the visible crop and the M2 scaler blow it up into the framebuffer; the source is
+read at the stride the driver programs (+0x1c).
+
 ### iOS 6
 
 Every 6.x build (6.0-6.1.6) is prepared by FirmwareKit (`firmwarekit create` with the catalog's n81ap entries,
