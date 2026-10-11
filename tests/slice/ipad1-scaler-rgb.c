@@ -1,5 +1,8 @@
 /* The scaler's 32-bit RGB path (scaler_rgb) behind a fake DART: a 1x iPhone app turned onto the iPad's landscape
- * panel, and its 2x destination mapped in 64 KiB windows of packed rows (issue 47).
+ * panel, and its 2x destination mapped in 64 KiB windows of packed rows (issue 47); Zoom's source, linear at the
+ * stride 4.x programs (issue 54) and, on the iPad 3.2, in the same windows.
+ *
+ * Mutation (must fail this test): read the source as rows packed at ALIGN(w, 64) (the gather before issue 54).
  *
  * SLICE hw/arm/ipod_touch_scaler.c range typedef struct { | static const MemoryRegionOps
  * PKG glib-2.0
@@ -32,12 +35,15 @@ static void timer_del(QEMUTimer *t) { (void)t; }
 static bool timer_pending(QEMUTimer *t) { (void)t; return false; }
 #include "slice.h"
 
-/* The source at IOVA 0x100000 maps straight to RAM 0; the destination at IOVA 0x200000 maps, in each 64 KiB window,
- * only the first `dst_pages` pages, onto packed RAM from 0x80000. */
-static unsigned dst_pages = 16;
+/* The source at IOVA 0x100000 maps straight to RAM 0, at 0x300000 in 64 KiB windows of `src_pages` pages onto packed
+ * RAM from 0; the destination at IOVA 0x200000 maps, in each 64 KiB window, only the first `dst_pages` pages, onto
+ * packed RAM from 0x80000. */
+static unsigned dst_pages = 16, src_pages = 16;
 static hwaddr dart(void *opaque, uint32_t va, unsigned sid)
 {
     if (va >= 0x100000 && va < 0x180000) return va - 0x100000;
+    if (va >= 0x300000 && va < 0x380000 && ((va & 0xffff) >> 12) < src_pages)
+        return ((va - 0x300000) >> 16) * src_pages * 0x1000 + (va & 0xffff);
     if (va >= 0x200000 && va < 0x300000 && ((va & 0xffff) >> 12) < dst_pages)
         return 0x80000 + ((va - 0x200000) >> 16) * dst_pages * 0x1000 + (va & 0xffff);
     return (hwaddr)-1;
@@ -45,16 +51,24 @@ static hwaddr dart(void *opaque, uint32_t va, unsigned sid)
 static uint32_t src_px(unsigned u, unsigned v) { return 0xff000000u | v << 8 | u; }
 static uint32_t at(uint64_t a) { uint32_t x; memcpy(&x, ram + a, 4); return x; }
 
-static void go(IPodScalerState *s, unsigned sw, unsigned sh, unsigned dw, unsigned dh, unsigned stride, unsigned step)
+/* The source packed in RAM at `pitch` pixels a row and programmed at `sstride` pixels from IOVA `sbase`. */
+static void go_src(IPodScalerState *s, unsigned sw, unsigned sh, unsigned dw, unsigned dh, unsigned stride,
+                   unsigned step, uint32_t sbase, unsigned pitch, unsigned sstride)
 {
     uint32_t *r = s->regs;
     memset(ram, 0, sizeof(ram));
     for (unsigned v = 0; v < sh; v++)
-        for (unsigned u = 0; u < sw; u++) memcpy(ram + (v * ROUND_UP(sw, 64) + u) * 4, &(uint32_t){src_px(u, v)}, 4);
-    r[0x10/4] = 6; r[0x30/4] = 0x406; r[0x14/4] = 0x100000; r[0x34/4] = 0x200000;
+        for (unsigned u = 0; u < sw; u++) memcpy(ram + (v * pitch + u) * 4, &(uint32_t){src_px(u, v)}, 4);
+    r[0x10/4] = 6; r[0x30/4] = 0x406; r[0x14/4] = sbase; r[0x34/4] = 0x200000;
+    r[0x1c/4] = sstride << 16 | sstride;
     r[0x24/4] = sw << 16 | sh; r[0x40/4] = dw << 16 | dh; r[0x3c/4] = stride / 4 << 16 | stride / 4;
     r[0x50/4] = r[0x54/4] = step;
     assert(scaler_rgb(s));
+}
+
+static void go(IPodScalerState *s, unsigned sw, unsigned sh, unsigned dw, unsigned dh, unsigned stride, unsigned step)
+{
+    go_src(s, sw, sh, dw, dh, stride, step, 0x100000, ROUND_UP(sw, 64), ROUND_UP(sw, 64));
 }
 
 int main(void)
@@ -78,5 +92,16 @@ int main(void)
     dst_pages = 16;
     go(&s, 64, 32, 64, 32, 256, 0x10000);
     for (unsigned y = 0; y < 32; y++) assert(at(0x80000 + y * 256 + 4) == src_px(1, y));
-    puts("PASS: turned 1x destination, 2x destination in packed 64 KiB windows, linear destination");
+    /* Zoom on 4.x: a 27-wide crop at the 32-pixel stride it is programmed with (427 at 432 on the iPhone 4), not
+     * packed at ALIGN(27, 64) = 64, blown up 2x. */
+    go_src(&s, 27, 20, 54, 40, 256, 0x8000, 0x100000, 32, 32);
+    for (unsigned y = 0; y < 40; y++)
+        for (unsigned x = 0; x < 54; x += 5) assert(at(0x80000 + y * 256 + x * 4) == src_px(x / 2, y / 2));
+    /* Zoom on the iPad 3.2: the source programmed at a stride of 256 pixels and mapped in 64 KiB windows of 64 rows
+     * packed at ALIGN(w, 64), 4 of 16 pages each (11 of 16 at 683 wide on the device), here across two windows. */
+    src_pages = 4;
+    go_src(&s, 27, 80, 27, 40, 256, 0x20000, 0x300000, 64, 256);
+    for (unsigned y = 0; y < 40; y++) assert(at(0x80000 + y * 256 + 26 * 4) == src_px(26, y * 2));
+    puts("PASS: turned 1x destination, 2x destination in packed 64 KiB windows, linear destination, "
+         "Zoom's source linear at its stride and in 64 KiB windows");
 }
