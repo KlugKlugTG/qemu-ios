@@ -1,6 +1,5 @@
 #!/bin/bash
-# macOS sibling of contrib/ios-app/make-dylib.sh: relink the emulator as a
-# dylib a Mac app links directly. Same trick -- take ninja's own link line for
+# Relink the emulator as a dylib a Mac app links directly: take ninja's own link line for
 # qemu-system-arm, swap system/main.c (whose main() wants the main thread for
 # CFRunLoopRun) for qemu-ios-entry.c, and emit a dylib exporting only the app
 # ABI. The app calls qemu_ios_main() on a background thread.
