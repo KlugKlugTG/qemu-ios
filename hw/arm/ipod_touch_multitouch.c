@@ -268,6 +268,26 @@ static void prepare_short_control_response(IPodTouchMultitouchState *s, uint8_t 
 }
 
 /*
+ * Both packets of a frame read start with the command the driver read them
+ * with: 0xEA, or 0xEB, which 3.1.3 always uses and 2.x after re-reading the
+ * device properties (Martijn de Vos found the 2.x and 3.0 drivers check it).
+ * Frames are built with 0xEA; this restamps one and keeps the length packet's
+ * u16 sum and the frame packet's sum-to-zero pad right.
+ */
+static void mt_stamp_frame_cmd(MTFrame *f, uint8_t cmd)
+{
+    int delta = cmd - f->frame_length.cmd;
+    uint16_t sum = f->frame_length.checksum1 | f->frame_length.checksum2 << 8;
+
+    sum += delta;
+    f->frame_length.cmd = cmd;
+    f->frame_length.checksum1 = sum & 0xff;
+    f->frame_length.checksum2 = sum >> 8;
+    f->frame_packet.cmd = cmd;
+    f->frame_packet.checksum_pad -= delta;
+}
+
+/*
  * N1 frame read (AppleMultitouchN1SPI, 8C148 0x80584bb0 and 0x80583fe0). The
  * driver clocks 0xEE twice: a 16-byte length query (tx[2] = 0), answered
  * {0xEA, len lo, len hi, 0..., sum of bytes 0-13 as u16 LE}; then a read of
@@ -518,6 +538,7 @@ static uint32_t ipod_touch_multitouch_transfer(SSIPeripheral *dev, uint32_t valu
                 s->out_buffer = (uint8_t *) mt_build_frame(s, NULL, &len);
                 s->buf_size = len;
             }
+            mt_stamp_frame_cmd((MTFrame *) s->out_buffer, value);
         }
         else if(value == 0x00) {
             /* SPI idle byte, not a command. */
