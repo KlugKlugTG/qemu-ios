@@ -94,6 +94,7 @@ typedef struct A4Board {
     uint64_t dram_size;                  /* also mirrored right above itself (iBoot) */
     uint32_t chipid[2];                  /* ChipID fuse words 0-1 */
     uint8_t board_id;                    /* PMGR POWER_ID[23:16] */
+    const uint8_t *product_id;           /* /product product-id (20 bytes) as iBoot fills it; NULL: left zero */
     /* Panel: scan-out size, the DSI ID read, lanes. */
     uint16_t width, height;
     uint32_t panel_id;
@@ -269,6 +270,12 @@ static const A4Board a4_n81 = {
     .wifi_mac = { 0x02, 0x00, 0x00, 0x81, 0x00, 0x01 },  /* synthetic, locally administered */
 };
 
+/* The iPhone 4's product-id, as iBoot for n90ap carries it (10B329 and 11D257, just ahead of "DEVICEINFOBBT"). */
+static const uint8_t a4_n90_product_id[20] = {
+    0x1e, 0xdd, 0x21, 0x60, 0x59, 0x20, 0x2d, 0x7c, 0xf2, 0x6c,
+    0x0e, 0x50, 0x98, 0x97, 0x7a, 0x6c, 0xf5, 0x44, 0x36, 0xd9,
+};
+
 /*
  * iPhone 4 (N90AP, GSM): 512 MiB, the portrait 640x960 panel and N1 digitizer
  * N81 has, the iPad's CS42L61 + Mikey, HDQ gauge, BT on uart3. No NOR
@@ -281,6 +288,7 @@ static const A4Board a4_n90 = {
     .dram_size = 0x20000000,
     .chipid = { 0x31800387, 0x80758000 },    /* same die as K48 */
     .board_id = 0x00,
+    .product_id = a4_n90_product_id,
     .width = 640, .height = 960,
     .panel_id = 0x0969e5a1,                  /* ponytail: K48's, as N81's */
     .dsi_lanes = 4,
@@ -796,6 +804,19 @@ static void ipad1_cpu_reset(void *opaque)
                    &(A4DTEdit){ "gyro", "gyro-sensitivity-calibration", cal, sizeof(cal) });
         a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
                    &(A4DTEdit){ "accelerometer", "accel-sensitivity-calibration", cal, sizeof(cal) });
+    }
+    /*
+     * iBoot fills /product product-id too (6.0 on reserves it zeroed): the
+     * device type MobileGestalt's MGIsDeviceOfType compares. Left zero, 7.x
+     * CoreMotion places the device on no platform and so gives it no gyro
+     * (isGyroAvailable 0), and CoreLocation's orientation detector, which on a
+     * gyro device needs one, never starts ("No gyro; not detecting
+     * orientation!"): backboardd's device orientation stops following the
+     * accelerometer and apps never turn.
+     */
+    if (s->board->product_id) {
+        a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
+                   &(A4DTEdit){ "product", "product-id", s->board->product_id, 20 });
     }
     if (address_space_write(&address_space_memory, load_pa,
                             MEMTXATTRS_UNSPECIFIED, data, image_len) != MEMTX_OK) {
