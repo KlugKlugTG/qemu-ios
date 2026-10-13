@@ -69,6 +69,8 @@ void tb_htable_init(void)
     unsigned int mode = QHT_MODE_AUTO_RESIZE;
 
     qht_init(&tb_ctx.htable, tb_cmp, CODE_GEN_HTABLE_SIZE, mode);
+    tb_ctx.io_insn_limits = g_hash_table_new(NULL, NULL);
+    qemu_mutex_init(&tb_ctx.io_insn_lock);
 }
 
 typedef struct PageDesc PageDesc;
