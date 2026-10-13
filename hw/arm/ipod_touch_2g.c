@@ -3846,6 +3846,7 @@ static void ipod_touch_machine_class_init(ObjectClass *klass, const void *data)
     mc->init = ipod_touch_machine_init;
     mc->max_cpus = 1;
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm1176");
+    mc->minimum_page_bits = 12;   /* the CPUs never map a page under 4K */
 }
 
 static const TypeInfo ipod_touch_machine_info = {
