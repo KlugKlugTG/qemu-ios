@@ -74,9 +74,6 @@ serial and verbose boot.
 
 ## September reliability fixes
 
-The September 5 continuation, frontend changes, verification evidence, and
-remaining master-plan priorities are recorded in [UI reliability](archive/ipod-ui-reliability.md) (archived).
-
 - GLES pixel format/type and alignment validation precedes host calls. PACK
   and UNPACK are independent. Query output cardinalities are explicit; compressed
   format queries describe the emulator's decoders rather than host GL formats.
@@ -178,8 +175,6 @@ machine still needs separate validation.
 - Idle wake, self-reboot, debugger attach and remote-name DNS have historical
   open notes. Those 2.1.1 observations are not a current 3.1.3 failure list;
   reproduce each before changing hardware models.
-- `docs/archive/app-compatibility.md` is an August 5 survey. Its static import/missing-slot
-  lists predate later GLES implementation and do not represent current coverage.
 - The salvage directory under `qemu-ios-files/worktree-salvage-2026-08-03` holds
   old uncommitted experiments. Preserve it as evidence; do not blindly apply
   those diffs over subsequent fixes.

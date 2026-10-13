@@ -162,9 +162,8 @@ matched by name to `include/hw/arm/guest-services/gles-names.h`, the table the h
 are what the wire carries (3.1.3's slot numbers below 822, assigned above). A firmware without the @encode gets
 its layout from OpenGLES's exported trampolines instead, decoded in place (the slot is loaded straight into pc,
 `mov lr, pc; ldr pc, [ip, #off]`, or tail-called after a conditional early return, `popeq`/`bxeq lr`; 4.x's
-`glIs*` call it with `blxne`), which is also the cross-check `gles-debug=on` runs. `contrib/ipad1-gles/glitsv.py`
-still derives a `gli-dispatch-<BUILD>.tsv` offline, as research: `docs/ipod/gli-dispatch-*.tsv` are what the
-discovered tables were checked against, not build inputs.
+`glIs*` call it with `blxne`), which is also the cross-check `gles-debug=on` runs. The offline
+`gli-dispatch-<BUILD>.tsv` tables the discovered ones were first checked against are in git history.
 
 What 4.2.1 changed, read from the 8C148 cache: EAGL still loads `MBXGLEngine.bundle` through `GLESGetEGLInterface`
 when `AppleMBXDevice` matches (`eagl_init` 0x34ff870c; no libGFXShared or gld plugin on the MBX path), and the

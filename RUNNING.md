@@ -2,13 +2,12 @@
 
 This file contains the instructions on how to run the iPod Touch 2G emulator using QEMU.
 Note that this is an experimental release and the functionality of the device is still limited.
-Linux compatibility is currently unstable. Efforts are underway to improve it.
 
 **This file documents the generic build/run path and predates this fork's
 current target.** This fork's day-to-day device is an iOS **3.1.3** image, run
 headless by LightTouchMac (`sessions single`) — see the top-level
-`README.md`. The build instructions, USB device mode, shutdown, and offline
-filesystem-editing sections below are still accurate; the specific example
+`README.md`. The build instructions, USB device mode and shutdown sections below
+are still accurate; the specific example
 output (`ProductVersion: 2.1.1`, `BuildVersion: 5F138`) reflects the 2.1.1
 image they were captured against, not necessarily what a 3.1.3 boot reports.
 
@@ -30,16 +29,6 @@ Make sure you have the required libraries installed to compile QEMU:
 ```
 # On MacOS
 brew install glib ninja meson pixman pkg-config sdl2 openssl@3
-
-# On Linux (Ubuntu)
-sudo apt install make ninja-build pkg-config libssl-dev libsdl2-dev libpixman-1-dev libpixman-1-0 libglib2.0-dev
-
-# On Linux (Arch)
-sudo pacman -S --needed make ninja pkgconf openssl sdl2 pixman glib2
-
-# On Windows (MSYS2/mingw64)
-pacman -S base-devel mingw-w64-x86_64-toolchain git python ninja mingw-w64-x86_64-glib2 mingw-w64-x86_64-pixman python-setuptools mingw-w64-x86_64-SDL2
-
 ```
 Compile QEMU by running the following commands from the root directory:
 
@@ -52,12 +41,6 @@ cd build
 
 # On Apple Silicon Macs
 ../configure --enable-sdl --target-list=arm-softmmu --disable-capstone --disable-pie --disable-slirp --disable-fuse --extra-cflags=-I/opt/homebrew/opt/openssl@3/include --extra-ldflags='-L/opt/homebrew/opt/openssl@3/lib -lcrypto'
-
-# On Linux
-../configure --enable-sdl --disable-cocoa --target-list=arm-softmmu --disable-capstone --disable-slirp --extra-cflags=-I/usr/include/openssl --extra-ldflags='-lcrypto' --disable-werror --enable-pie
-
-# On Microsoft Windows (with MINGW64)
-../configure --enable-sdl --disable-cocoa --target-list=arm-softmmu --disable-capstone --disable-slirp --disable-pie --extra-cflags=-I/mingw64/include/openssl --extra-ldflags='-L/mingw64/lib -lcrypto' --disable-stack-protector --disable-werror
 
 make
 ```
@@ -206,114 +189,3 @@ machine reboots in place.
 `IT_PWROFF_TRACE=1` logs the gesture; `IT_PMU_TRACE=1` logs every PMU register
 access with the guest PC/LR that made it (noisy — the battery gauge is polled
 continuously).
-
-## Editing the guest filesystem offline
-
-The emulator serves NAND pages straight out of `cs<N>/<page>.page` with no ECC or
-spare-area validation, and the guest volume is a single unjournaled HFSX. So the
-filesystem can be edited from the host without going through the emulator's
-flash write path at all. `imgtools/editimg.py` did the whole round trip (retired; see git history at
-5508b504b8). It reassembled the volume into a flat image, attached and mounted it read-write,
-ran a script with `$MNT` pointing at the mount, unmounted, checked the result
-with `fsck_hfs`, and wrote only the changed blocks back.
-
-This is what makes offline app injection work. A bundle dropped into
-`/Applications` is discovered and launches; the installation cache does not need
-forging, because there is no separate data partition and `installd` rebuilds the
-cache from a directory scan on every boot. Bundles under
-`/var/mobile/Applications/<UUID>/` appear on the home screen but do not launch,
-so use `/Applications`.
-
-App Store binaries must be **decrypted** (`cryptid 0`) and, more importantly,
-built against a 2.x SDK — check `DTSDKName`, not `MinimumOSVersion`. Several
-period IPAs declare `MinimumOSVersion 2.0` but were built with the iOS 4 SDK and
-silently fail to launch.
-
-## Building a NAND image from an IPSW root filesystem
-
-`nand=` is not a dump of real flash. It is a synthetic image: one HFSX volume
-laid across the four chip-selects by the closed-form formula in
-`imgtools/ftlmap.py` (retired), plus the GPT and a handful of FTL/VFL bookkeeping pages
-that the formula does not cover. Devices are now made by LightTouchMac's `firmwarekit create`; the
-`imgtools/build_nand.py` generator described below is retired (see git history at 5508b504b8).
-
-Apple ships the root filesystem DMG as a *bare* HFSX volume — no partition map,
-4096-byte allocation blocks — which is exactly the shape `dumpvol.py` and
-`packvol.py` expect, so the build never formats a volume of its own. It grows
-that volume to the block count the formula addresses, mounts it read-write,
-applies the build edits, checks it with `fsck_hfs -n`, and writes the pages.
-It refuses to overwrite an existing page directory: always build to a new name.
-
-Volume parameters, and why:
-
-| Parameter | Value | Why |
-| --- | --- | --- |
-| allocation block size | 4096 | Apple's own; also what the layout formula and every imgtool assume. |
-| allocation blocks | 128000 | `NAND_GENERATED_TOTAL_BLOCKS` in `ipod_touch_fmss.c`. The formula is a bijection onto pages 256–32256, so this is not a free choice. |
-| volume name | whatever the IPSW shipped (`SUNorthstarTwo7E18.N72OS` for 7E18) | Nothing reads it — the kernel is told `rd=disk0s1`. Leaving it alone keeps the image traceable to its IPSW. |
-| partitions | one | Follows the existing 2.1.1 image. See below. |
-| signature | HFSX (case-sensitive), unjournaled | Inherited from the IPSW; iOS requires case sensitivity. |
-
-Two deliberate deviations from a real device:
-
-- **One partition, read-write root.** Stock 3.x `/etc/fstab` is
-  `/dev/disk0s1 / hfs ro` plus `/dev/disk0s2 /private/var hfs rw`. The synthetic
-  image has no `disk0s2`, so the build rewrites fstab to
-  `/dev/disk0s1 / hfs rw 0 1` (`--no-fstab` keeps the stock one). Modeling two
-  partitions would invalidate the closed-form layout and every tool built on it.
-  The rootfs already ships an empty `/private/var` skeleton, which is what the
-  restore process would have copied onto the data partition anyway.
-- **The kernelcache is a build artifact.** The shipped rootfs leaves
-  `/System/Library/Caches/com.apple.kernelcaches/` empty; restore writes it. The
-  build copies the IPSW's `kernelcache.release.s5l8720x` there **unmodified and
-  still encrypted** — the emulated AES engine decrypts it in-guest, so no key
-  and no re-signing are involved.
-
-macOS will not let a non-root user `chown` inside the mounted image, so files
-the build creates land as uid/gid 99; their catalog records are patched to
-uid/gid 0 offline afterwards.
-
-## Injecting code into SpringBoard, and getting output back
-
-`imgtools/patch_launchd_env.py` (retired, like `itdrive.py` below; see git history at 5508b504b8) edited a
-launchd job's plist inside the image: `--set` adds `EnvironmentVariables` entries, `--set-key` sets top-level keys.
-
-Setting `DYLD_INSERT_LIBRARIES` on SpringBoard works — dyld loads the library
-immediately after the main executable and runs its initializers, which is the
-mechanism a MobileSubstrate-style tweak relies on. (Injecting a library that
-does something *useful* still needs an armv6 dylib, which current toolchains
-cannot produce: `ld` refuses armv6, and armv7 output carries load commands that
-2.1's dyld cannot parse.)
-
-Because the device has no shell, the way to see a job's output is to redirect it
-to a file and read that file back off the host:
-
-```
-# retired tools, as they were used; see git history at 5508b504b8
-python3 imgtools/patch_launchd_env.py --nand <copy> \
-    --plist com.apple.SpringBoard.plist \
-    --set DYLD_INSERT_LIBRARIES=/usr/lib/libstdc++.6.dylib \
-    --set DYLD_PRINT_LIBRARIES=1 --set DYLD_PRINT_INITIALIZERS=1 \
-    --set-key StandardErrorPath=/tmp/sbdyld.log \
-    --set-key StandardOutPath=/tmp/sbdyld.log --apply
-
-python3 imgtools/itdrive.py --nand <copy> --qmp 4510 --out <dir> \
-    --boot-wait 105 --nandrw <overlay dir>
-# then wait, and search the overlay:
-grep -rl 'calling initializer' <overlay dir>
-```
-
-Three things make the difference between this working and returning nothing:
-
-- **Use a path the job's user can write.** SpringBoard runs as `mobile`, so
-  `/var/log` (root-owned, 0755) silently produces no file. `/tmp` works.
-- **Wait at least three minutes** before searching. The guest buffers the write
-  and only flushes it to flash on a periodic sync. Measured by polling a live
-  overlay every 30 s: nothing at 150 s, present at 180 s. Searching at 60 s or
-  140 s finds an overlay with only FTL and system pages in it, which looks
-  exactly like the injection having failed.
-- **Search the whole overlay, not a fixed page.** Which physical page the log
-  lands on varies between runs.
-
-The overlay is a normal copy-on-write directory, so the captured output survives
-killing the emulator afterwards.
