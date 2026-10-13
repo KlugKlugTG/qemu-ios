@@ -1379,6 +1379,7 @@ static void n45_machine_class_init(ObjectClass *klass, const void *data)
     mc->init = n45_machine_init;
     mc->max_cpus = 1;
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("arm1176");
+    mc->minimum_page_bits = 12;   /* the CPUs never map a page under 4K */
     /*
      * Windows the 1.x firmware touches that no model claims read as zero
      * rather than data-aborting the guest. Debt: log them (-d guest_errors)

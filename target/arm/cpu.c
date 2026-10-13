@@ -1920,28 +1920,22 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
 #ifndef CONFIG_USER_ONLY
     {
         int pagebits;
-        if (arm_feature(env, ARM_FEATURE_V7) &&
-            !arm_feature(env, ARM_FEATURE_M) &&
-            !arm_feature(env, ARM_FEATURE_PMSA)) {
+        if (!arm_feature(env, ARM_FEATURE_M) &&
+            (arm_feature(env, ARM_FEATURE_PMSA) ?
+             !arm_feature(env, ARM_FEATURE_V6) :
+             arm_feature(env, ARM_FEATURE_V6))) {
             /*
-             * v7VMSA drops support for the old ARMv5 tiny pages,
-             * so we can use 4K pages.
+             * VMSAv6 and v7 drop the old ARMv5 fine page tables and with
+             * them the 1K tiny pages, and a PMSAv5 MPU region is at least
+             * 4K, so we can use 4K pages.
              */
             pagebits = 12;
         } else {
             /*
              * For CPUs which might have tiny 1K pages, or which have an
              * MPU and might have small region sizes, stick with 1K pages.
-             *
-             * "Might" is doing a lot of work there: this sizes every softmmu
-             * TLB entry at 1 KB, so a guest that never maps a tiny page still
-             * pays four times the TLB misses -- and under a TCG interpreter a
-             * miss is a full helper call. XNU on ARMv6 sets SCTLR.XP, which
-             * routes it through the v6 walker that cannot produce anything
-             * smaller than 4 KB. IT_PAGE_BITS_12 lets such a guest say so.
-             * The tiny-page path in ptw.c warns if that promise is broken.
              */
-            pagebits = getenv("IT_PAGE_BITS_12") ? 12 : 10;
+            pagebits = 10;
         }
         if (!set_preferred_target_page_bits(pagebits)) {
             /*
