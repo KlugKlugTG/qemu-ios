@@ -33,36 +33,18 @@
 // It lands in the same GPIO interrupt group the button code already drives.
 #define PMU_WAKE_IRQ 0x61
 
-#define VMSTATE_IT2G_CPREG(name) \
-        VMSTATE_UINT64(IT2G_CPREG_VAR_NAME(name), IPodTouchMachineState)
-
-#define IT2G_CPREG_DEF(p_name, p_op0, p_op1, p_crn, p_crm, p_op2, p_access, p_reset) \
-    {                                                                              \
-        .cp = 15,                                              \
-        .name = #p_name, .opc0 = p_op0, .crn = p_crn, .crm = p_crm,                \
-        .opc1 = p_op1, .opc2 = p_op2, .access = p_access, .resetvalue = p_reset,   \
-        .state = ARM_CP_STATE_AA32, .type = ARM_CP_OVERRIDE,                       \
-        .fieldoffset = offsetof(IPodTouchMachineState, IT2G_CPREG_VAR_NAME(p_name))           \
-                       - offsetof(ARMCPU, env)                                     \
-    }
-
-#define IT2G_CPREG_DEF_QEMU_CALL \
-    {                            \
-        .cp = 15,                \
-        .name = "QEMU_CALL",     \
-        .opc0 = 0,               \
-        .opc1 = 3,               \
-        .crn = 15,               \
-        .crm = 15,               \
-        .opc2 = 0,               \
-        .access = PL0_RW,        \
-        .resetvalue = 0,         \
-        .state = ARM_CP_STATE_AA32, \
-        .type = ARM_CP_IO | ARM_CP_RAISES_EXC, /* gles_guest_rw */ \
-        .fieldoffset = offsetof(IPodTouchMachineState, IT2G_CPREG_VAR_NAME(QEMU_CALL)) \
-                       - offsetof(ARMCPU, env), \
-        .readfn = qemu_call_status, \
-        .writefn = qemu_call,     \
+/*
+ * ARM1176 c7 whole-cache maintenance and the c15 peripheral port remap, which
+ * the CPU model doesn't define: nothing to model, so no state. They used to
+ * carry a .fieldoffset into this machine's state, but fieldoffset is an
+ * offset into CPUARMState: every write, and every reset, stored into the CPU's
+ * victim TLB (d[8].vtable[6] on this build).
+ */
+#define IT2G_CP_NOP(p_name, p_crn, p_crm, p_op2)                                \
+    {                                                                          \
+        .cp = 15, .name = p_name, .opc1 = 0, .crn = p_crn, .crm = p_crm,       \
+        .opc2 = p_op2, .access = PL1_RW, .state = ARM_CP_STATE_AA32,           \
+        .type = ARM_CP_NOP | ARM_CP_OVERRIDE,                                  \
     }
 
 const int S5L8900_GPIO_IRQS[5] = { S5L8900_GPIO_G0_IRQ, S5L8900_GPIO_G1_IRQ, S5L8900_GPIO_G2_IRQ, S5L8900_GPIO_G3_IRQ, S5L8900_GPIO_G4_IRQ };
@@ -936,11 +918,14 @@ static void host_gmt_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t v)
 }
 
 static const ARMCPRegInfo it2g_cp_reginfo_tcg[] = {
-    IT2G_CPREG_DEF(REG0, 0, 0, 7, 6, 0, PL1_RW, 0),
-    IT2G_CPREG_DEF(REG1, 0, 0, 15, 2, 4, PL1_RW, 0),
-    IT2G_CPREG_DEF(REG1, 0, 0, 7, 14, 0, PL1_RW, 0),
-    IT2G_CPREG_DEF(REG1, 0, 0, 7, 10, 0, PL1_RW, 0),
-    IT2G_CPREG_DEF_QEMU_CALL,
+    IT2G_CP_NOP("DCIALL", 7, 6, 0),
+    IT2G_CP_NOP("PPMRR", 15, 2, 4),
+    IT2G_CP_NOP("DCCIALL", 7, 14, 0),
+    IT2G_CP_NOP("DCCALL", 7, 10, 0),
+    { .cp = 15, .name = "QEMU_CALL", .opc1 = 3, .crn = 15, .crm = 15, .opc2 = 0,
+      .access = PL0_RW, .state = ARM_CP_STATE_AA32,
+      .type = ARM_CP_IO | ARM_CP_NO_RAW | ARM_CP_RAISES_EXC, /* gles_guest_rw */
+      .readfn = qemu_call_status, .writefn = qemu_call },
     { .cp = 15, .name = "HOST_GMT_SECONDS",
       .opc0 = 0, .opc1 = 3, .crn = 15, .crm = 15, .opc2 = 1,
       .access = PL0_RW, .state = ARM_CP_STATE_AA32, .type = ARM_CP_IO,
