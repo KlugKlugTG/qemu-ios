@@ -2,7 +2,8 @@
  * panel, and its 2x destination mapped in 64 KiB windows of packed rows (issue 47); Zoom's source, linear at the
  * stride 4.x programs (issue 54) and, on the iPad 3.2, in the same windows.
  *
- * Mutation (must fail this test): read the source as rows packed at ALIGN(w, 64) (the gather before issue 54).
+ * Mutations (must fail this test): read the source as rows packed at ALIGN(w, 64) (the gather before issue 54);
+ * turn every quarter turn counterclockwise, whatever +0x58 asks for (Smash Hit upside down, issue 47).
  *
  * SLICE hw/arm/ipod_touch_scaler.c range typedef struct { | static const MemoryRegionOps
  * PKG glib-2.0
@@ -81,6 +82,13 @@ int main(void)
     go(&s, 4, 6, 6, 4, 256, 0x10000);
     for (unsigned y = 0; y < 4; y++)
         for (unsigned x = 0; x < 6; x++) assert(at(0x80000 + y * 256 + x * 4) == src_px(3 - y, x));
+    /* +0x58 = 3 turns it the other way, clockwise: a landscape-right app's 960x640 layer onto the iPhone 4's
+     * portrait panel (here 6x4 -> 4x6), destination (x, y) is source column y, row sh - 1 - x. */
+    s.regs[0x58 / 4] = 3;
+    go(&s, 6, 4, 4, 6, 256, 0x10000);
+    for (unsigned y = 0; y < 6; y++)
+        for (unsigned x = 0; x < 4; x++) assert(at(0x80000 + y * 256 + x * 4) == src_px(y, 3 - x));
+    s.regs[0x58 / 4] = 0;
     /* 2x into rows of 128 pixels at a programmed stride of 1024 bytes: 64 rows per 64 KiB window, packed at 512
      * bytes, 8 pages of each mapped (960x640 at 4096: 16 rows, 15 pages). Every row lands; none is dropped at the
      * first unmapped page. */
@@ -102,6 +110,7 @@ int main(void)
     src_pages = 4;
     go_src(&s, 27, 80, 27, 40, 256, 0x20000, 0x300000, 64, 256);
     for (unsigned y = 0; y < 40; y++) assert(at(0x80000 + y * 256 + 26 * 4) == src_px(26, y * 2));
-    puts("PASS: turned 1x destination, 2x destination in packed 64 KiB windows, linear destination, "
+    puts("PASS: turned 1x destination, a clockwise turn by +0x58, 2x destination in packed 64 KiB windows, "
+         "linear destination, "
          "Zoom's source linear at its stride and in 64 KiB windows");
 }
