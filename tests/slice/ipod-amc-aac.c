@@ -481,7 +481,7 @@ int main(void) {
     assert(amc_aac_rate(alac_block) == -1);
     block[0] = 1; assert(amc_aac_rate(block) == -1);                             /* MP3's */
     /* iOS 6's AAC program (n90ap-10B329, n88ap-10B500): its own windows, the rate in Hz, 8 KiB slots
-     * of which a frame fills half. It decodes, and a frame goes to the slot its job names. */
+     * that a frame of 32-bit samples fills. It decodes, and a frame goes to the slot its job names. */
     memset(aperture, 0, sizeof(aperture));
     IPodTouchAMCState b = {.buf_base = AMC_BUF_BASE, .rev21 = true, .codec_decode = true,
                            .result_offset = AMC_RESULT_OFFSET_21, .dma_done = AMC_DMA_DONE_21};
@@ -508,7 +508,15 @@ int main(void) {
     amc_decode_tick(&b);
     assert(!b.xfers && b.port_len == 0x2000);                  /* the whole second slot */
     assert(lduw_le_p(aperture+0x18000+0x10) == frame/2);       /* its count: one frame */
-    assert(!memcmp(b.port, aperture+0x1a100, frame) && d->cursor == frame);
+    assert(!memcmp(b.port, aperture+0x1a100, 0x2000) && d->cursor == frame);
+    /* The program's samples are 32 bits, 24-bit values sign-extended: the frame fills the slot. */
+    unsigned loud6=0;
+    for (unsigned i=0;i<frame/2;i++) {
+        int16_t v = (int16_t)lduw_le_p(d->pcm->data+2*i);
+        assert((int32_t)ldl_le_p(b.port+4*i) == v*256);
+        loud6 += v != 0;
+    }
+    assert(loud6>100);
     amc_decoder_close(&b);
     /* 3.1 on the 3GS (n88ap-7E18) runs AMC 2.1 without engine 0: it enables the DE's completion and
      * takes each frame from its slot, as AMC 2.0 does. */
@@ -525,7 +533,7 @@ int main(void) {
     d=b.decoder; assert(d && d->pcm->len && (b.pending & 4) && !b.port_len);
     assert(lduw_le_p(aperture+0x18000+0xa) == 1 && lduw_le_p(aperture+0x18000+0xc));
     amc_decoder_close(&b);
-    puts("PASS: iOS 6's AAC program by its parameter block, slots of its jobs' size; 3.1's AMC 2.1 collection");
+    puts("PASS: iOS 6's AAC program by its parameter block, 32-bit samples in slots of its jobs' size; 3.1's AMC 2.1 collection");
     puts("PASS: AMC 2.1 layout, engine-local input and engine 0 collection into the output port");
     puts("PASS: exact AMC replay, pending frames/PCM/slot/completion and bounded history");
     puts("PASS: AAC-LC/HE-AAC/MP3/ALAC, PCM layout/backpressure, DMA bounds and stream restart");
