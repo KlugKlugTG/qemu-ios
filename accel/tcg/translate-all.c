@@ -283,6 +283,17 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         max_insns = TCG_MAX_INSNS;
     }
     QEMU_BUILD_BUG_ON(CF_COUNT_MASK + 1 != TCG_MAX_INSNS);
+    if (phys_pc != -1) {
+        int limit;
+
+        qemu_mutex_lock(&tb_ctx.io_insn_lock);
+        limit = GPOINTER_TO_INT(g_hash_table_lookup(tb_ctx.io_insn_limits,
+                                                    (gpointer)(uintptr_t)phys_pc));
+        qemu_mutex_unlock(&tb_ctx.io_insn_lock);
+        if (limit) {
+            max_insns = MIN(max_insns, limit);
+        }
+    }
 
  buffer_overflow:
     assert_no_pages_locked();
@@ -585,6 +596,25 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
                   (void *)retaddr);
     }
     cpu_restore_state_from_tb(cpu, tb, retaddr);
+
+    /*
+     * The access was not the TB's last insn.  A device polled in a loop
+     * would bring us here on every pass, so retranslate the TB to end at
+     * the access: remember how far it may go, and drop this translation.
+     */
+    if (!(tb_cflags(tb) & CF_COUNT_MASK) && tb_page_addr0(tb) != -1) {
+        uint64_t data[INSN_START_WORDS];
+        int left = cpu_unwind_data_from_tb(tb, retaddr, data);
+
+        if (left > 1) {
+            qemu_mutex_lock(&tb_ctx.io_insn_lock);
+            g_hash_table_insert(tb_ctx.io_insn_limits,
+                                (gpointer)(uintptr_t)tb_page_addr0(tb),
+                                GINT_TO_POINTER(tb->icount - left + 1));
+            qemu_mutex_unlock(&tb_ctx.io_insn_lock);
+            tb_phys_invalidate(tb, -1);
+        }
+    }
 
     /*
      * Some guests must re-execute the branch when re-executing a delay
