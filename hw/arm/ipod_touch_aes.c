@@ -626,6 +626,19 @@ static void aes_s5l8900_compat_go(IPodTouchAESState *aesop)
     aes_update_irq(aesop);
 }
 
+/*
+ * Merges a write of `size` bytes at byte offset `off` into the key or IV words.
+ * A write replaces what it covers; OR-ing it in kept bits from the previous key.
+ * Adapted from Martijn de Vos's ipod_touch_aes_write_words.
+ */
+static void aes_write_word(uint32_t *words, hwaddr off, uint64_t value, unsigned size)
+{
+    unsigned shift = (off & 3) * 8;
+    uint32_t mask = size >= 4 ? 0xffffffffu : ((1u << (size * 8)) - 1) << shift;
+
+    words[off / 4] = (words[off / 4] & ~mask) | (((uint32_t)value << shift) & mask);
+}
+
 static void ipod_touch_aes_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
 {
     struct IPodTouchAESState *aesop = (struct IPodTouchAESState *)opaque;
@@ -810,17 +823,11 @@ static void ipod_touch_aes_write(void *opaque, hwaddr offset, uint64_t value, un
             aesop->keytype = value;
             break;
         case AES_KEY_REG ... ((AES_KEY_REG + AES_KEYSIZE) - 1):
-            {
-                uint8_t idx = (offset - AES_KEY_REG) / 4;
-                aesop->custkey[idx] |= value;
-                break;
-            }
+            aes_write_word(aesop->custkey, offset - AES_KEY_REG, value, size);
+            break;
         case AES_IV_REG ... ((AES_IV_REG + AES_IVSIZE) -1 ):
-            {
-                uint8_t idx = (offset - AES_IV_REG) / 4;
-                aesop->ivec[idx] |= value;
-                break;
-            }
+            aes_write_word(aesop->ivec, offset - AES_IV_REG, value, size);
+            break;
         default:
             //fprintf(stderr, "%s: UNMAPPED AES_ADDR @ offset 0x%08x - 0x%08x\n", __FUNCTION__, offset, value);
             break;

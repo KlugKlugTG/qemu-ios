@@ -142,7 +142,18 @@ static void restore_size(void) {
  flat=NULL;free(mem);free(ref);
  puts("PASS: complete restore-sized CBC encrypt/decrypt beyond 16 MiB with partial tail");
 }
+/* A key or IV write replaces the word (or the bytes it covers). */
+static void registers(void) {
+ IPodTouchAESState s={0};
+ W(AES_KEY_REG+0x10,0xffffffff);W(AES_KEY_REG+0x10,0x12345678);
+ assert(s.custkey[4]==0x12345678);
+ W(AES_IV_REG+4,0xffffffff);ipod_touch_aes_write(&s,AES_IV_REG+5,0x00,1);
+ assert(s.ivec[1]==0xffff00ff);
+ ipod_touch_aes_write(&s,AES_IV_REG+6,0x1234,2);
+ assert(s.ivec[1]==0x123400ff);
+}
 int main(void) {
+ registers();
  segmented();
  restore_size();
  unsigned addresses[]={0x220100ac,0x0bf08468,0x0fb9bcdc};
