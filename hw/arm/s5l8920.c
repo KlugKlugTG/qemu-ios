@@ -1652,6 +1652,7 @@ static void s5l8920_class_init(ObjectClass *klass, const void *data)
     mc->max_cpus = 2;        /* the AP and the IOP core */
     mc->default_cpus = 2;
     mc->default_cpu_type = ARM_CPU_TYPE_NAME("cortex-a8");
+    mc->minimum_page_bits = 12;   /* the CPUs never map a page under 4K */
     mc->default_ram_size = 0x10000000;
     object_class_property_add_str(klass, "kboot", s5l8920_get_kboot, s5l8920_set_kboot);
     object_class_property_set_description(klass, "kboot",
