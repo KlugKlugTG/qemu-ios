@@ -1,12 +1,14 @@
 #!/bin/bash
-# The iPod's translations run on 4K pages.
+# The iPod's translations: 4K pages, and a polled device read that ends its block instead of rewinding it.
 #
 # The ARM1176 can't map a page under 4K (VMSAv6 has no tiny pages), so the iPod machine runs on 4K target pages: a
-# block may run on past a 1K boundary, and a branch within 4K chains.
+# block may run on past a 1K boundary, and a branch within 4K chains. And an MMIO load must be a block's last insn;
+# one found mid-block is rewound (cpu_io_recompile) and run alone, which a device polled in a loop (the kernel's
+# timebase read) paid on every pass until the block is retranslated to end at the load.
 #
-# A bare-metal program as the iPod's bootrom (staged at 0, MMU off) runs nine NOPs across 0x400 and a short loop,
-# then spins. Under -d exec, no block may start at 0x400 (the page boundary of a 1K page). QEMU= selects the binary
-# (default build/qemu-system-arm).
+# A bare-metal program as the iPod's bootrom (staged at 0, MMU off) runs nine NOPs across 0x400, then reads CHIPID
+# a thousand times mid-block, and spins. Under -d exec, no block may start at 0x400 (the page boundary of a 1K page)
+# and at most a few loads may be rewound. QEMU= selects the binary (default build/qemu-system-arm).
 set -u
 QEMU="${QEMU:-$(cd "$(dirname "$0")/../.." && pwd)/build/qemu-system-arm}"
 [ -x "$QEMU" ] || { echo "FAIL no emulator at $QEMU: build it or set QEMU="; exit 1; }
@@ -29,7 +31,16 @@ pid=$!
 for _ in $(seq 50); do grep -q '/0000000000000418/' "$TMP/exec.log" 2>/dev/null && break; sleep 0.2; done
 kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 grep -q '/0000000000000418/' "$TMP/exec.log" || { echo "FAIL the program never reached its end"; exit 1; }
+rewound=$(grep -c 'cpu_io_recompile: rewound' "$TMP/exec.log")
+fail=0
 if grep -q '/0000000000000400/' "$TMP/exec.log"; then
-    echo "FAIL a block starts at 0x400: the iPod runs on 1K pages"; exit 1
+    echo "FAIL a block starts at 0x400: the iPod runs on 1K pages"; fail=1
+else
+    echo "PASS no block starts at 0x400 (4K pages)"
 fi
-echo "PASS no block starts at 0x400 (4K pages)"
+if [ "$rewound" -gt 4 ]; then
+    echo "FAIL $rewound of 1000 polled reads rewound their block"; fail=1
+else
+    echo "PASS $rewound of 1000 polled reads rewound their block"
+fi
+exit $fail
