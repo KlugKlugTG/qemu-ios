@@ -101,8 +101,6 @@
 
 extern const int S5L8900_GPIO_IRQS[5];
 
-#define IT2G_CPREG_VAR_NAME(name) cpreg_##name
-#define IT2G_CPREG_VAR_DEF(name) uint64_t IT2G_CPREG_VAR_NAME(name)
 
 #define TYPE_IPOD_TOUCH_MACHINE   MACHINE_TYPE_NAME(TYPE_IPOD_TOUCH)
 #define IPOD_TOUCH_MACHINE(obj) \
@@ -257,9 +255,6 @@ typedef struct {
 	bool usb_patch_mux_gate;  /* retired option, always false */
 	bool wifi;                /* present a BCM4325 on the SDIO bus */
 	bool gles_debug;          /* paint what the GL bridge refuses magenta (tests) */
-	IT2G_CPREG_VAR_DEF(REG0);
-	IT2G_CPREG_VAR_DEF(REG1);
-	IT2G_CPREG_VAR_DEF(QEMU_CALL);
 
 	/*
 	 * Host keyboard -> guest text input (see ipod_touch_kbd_event). Bare
