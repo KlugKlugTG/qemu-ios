@@ -1118,7 +1118,7 @@ A stock 3.1.3 (7E18) erase restore now runs to "Status: Restore Finished" inside
 a NOR with only its superblock, SysCfg and nvram, onto an empty NAND directory, in about 130 s on the Mac mini. The
 emulator formats nothing: the restore kernel finds a blank NAND, production-formats it itself (it scans for initial
 bad blocks, writes its own BBT and NANDDRIVERSIGN, VSVFL and YAFTL), takes the filesystem over asr and writes the NOR
-with the NORData images.
+with the NORData images. The tools and the exact commands are in contrib/ipod-restore/ (README.md there).
 
 ### What it needed
 
@@ -1132,8 +1132,8 @@ with the NORData images.
     left set until the next read, a following write or erase run read it as clean and the restore stopped at
     "nand status = failed" (wait_for_storage_device).
 - No new host protocol code. Host side: upstream idevicerestore (4b3e847) linked against the libirecovery QEMU
-  transport and usb_recovery_bridge.py from the retired tree (git 5508b504b8), and the usbmuxd fork for restore mode.
-  The run script lives outside the repo.
+  transport and usb_recovery_bridge.py, back from the retired tree (git 5508b504b8) in contrib/ipod-restore/, and the
+  usbmuxd fork for restore mode. contrib/ipod-restore/run-restore.sh is the run, run-boot.sh the cold boot.
 - Personalization: idevicerestore asks Apple's TSS for 3.x (build major <= 8 looks for a local record first).
   A local SHSH record that is an empty dictionary (`cache/shsh/<ecid>-iPod2,1-3.1.3.shsh`) makes it send every
   component unpersonalized ("Not personalizing component ..."). The emulated SecureROM 240.4, iBSS and the restore
@@ -1184,7 +1184,7 @@ So a restored device reaching Home needs, in order:
   (no serial output, PID stays 1227, "Device did not reconnect in recovery mode"). Not investigated further: whether
   the 240.4 ROM requires a personalized 4.x iBSS or the emulated ROM path misses something is open.
 
-### Run log (Mac mini, ~/ltm-runner/n72r, 2026-10-13)
+### Run log (Mac mini, 2026-10-13)
 
 | run | binary | NAND mode | result |
 |---|---|---|---|
