@@ -231,6 +231,21 @@ void page_init(void)
     page_table_config_init();
 }
 
+/* A physical address can have TBs with different instruction modes/counts. */
+static void tb_remember_io_insn_limit(tb_page_addr_t phys_pc, int limit)
+{
+    gpointer key = (gpointer)(uintptr_t)phys_pc;
+    int previous;
+
+    assert(limit > 0);
+    qemu_mutex_lock(&tb_ctx.io_insn_lock);
+    previous = GPOINTER_TO_INT(g_hash_table_lookup(tb_ctx.io_insn_limits, key));
+    if (!previous || limit < previous) {
+        g_hash_table_insert(tb_ctx.io_insn_limits, key, GINT_TO_POINTER(limit));
+    }
+    qemu_mutex_unlock(&tb_ctx.io_insn_lock);
+}
+
 /*
  * Isolate the portion of code gen which can setjmp/longjmp.
  * Return the size of the generated code, or negative on error.
@@ -607,11 +622,7 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
         int left = cpu_unwind_data_from_tb(tb, retaddr, data);
 
         if (left > 1) {
-            qemu_mutex_lock(&tb_ctx.io_insn_lock);
-            g_hash_table_insert(tb_ctx.io_insn_limits,
-                                (gpointer)(uintptr_t)tb_page_addr0(tb),
-                                GINT_TO_POINTER(tb->icount - left + 1));
-            qemu_mutex_unlock(&tb_ctx.io_insn_lock);
+            tb_remember_io_insn_limit(tb_page_addr0(tb), tb->icount - left + 1);
             tb_phys_invalidate(tb, -1);
         }
     }
