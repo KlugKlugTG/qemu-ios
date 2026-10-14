@@ -2,11 +2,7 @@
  *
  * SLICE hw/arm/ipod_touch_pke.c range static const uint8_t sha1_digestinfo | static const MemoryRegionOps
  * PKG openssl
- * PKG libgcrypt
- * PKG gpg-error
  * CFLAGS -I$ROOT/include
- * VARIANT
- * VARIANT -DQEMU_IOS_PORTABLE_CRYPTO
  */
 #include <stdint.h>
 #include <stdbool.h>
@@ -52,10 +48,6 @@ static void exponentiate(IPodTouchPKEState *s,unsigned exponent, BIGNUM *mod) {
     BN_free(r);BN_CTX_free(ctx);
 }
 int main(void) {
-#ifdef QEMU_IOS_PORTABLE_CRYPTO
-    assert(gcry_check_version(NULL));
-    gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
-#endif
     for(unsigned length=64;length<=256;length*=2) {
         IPodTouchPKEState s={0};
         ipod_touch_pke_write(&s,REG_PKE_SEG_SIZE,length==64 ? 129:length==128 ? 65:1,4);
