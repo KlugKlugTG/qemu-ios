@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Run frozen probes on an already allocated emulator-5554; never launch an AVD."""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--adb', required=True, type=Path)
+parser.add_argument('--frozen', required=True, type=Path)
+parser.add_argument('--output', required=True, type=Path)
+parser.add_argument('--core-diagnostic', action='store_true')
+args = parser.parse_args()
+args.output.mkdir(parents=True, exist_ok=False)
+manifest = json.loads((args.frozen / 'manifest.json').read_text())
+adb = [str(args.adb), '-s', 'emulator-5554']
+
+
+def call(arguments, timeout=20):
+    return subprocess.run(adb + arguments, capture_output=True, text=True, timeout=timeout)
+
+
+probes = ['render', 'pixels']
+if args.core_diagnostic:
+    probes.insert(0, 'core-fbo')
+receipt = {'serial': 'emulator-5554', 'frozen': str(args.frozen), 'binaries': {}}
+for key, command in [('page_size', ['shell', 'getconf', 'PAGE_SIZE']),
+                     ('fingerprint', ['shell', 'getprop', 'ro.build.fingerprint'])]:
+    result = call(command)
+    if result.returncode or not result.stdout.strip():
+        raise RuntimeError(f'Missing target identity: {key}')
+    receipt[key] = result.stdout.strip()
+for probe in probes:
+    binary_name = f'egl-{probe}-x86_64'
+    source = args.frozen / 'bin' / binary_name
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    if not source.stat().st_size or digest != manifest['binaries'][binary_name]:
+        raise RuntimeError(f'Local frozen binary mismatch: {binary_name}')
+    remote = f'/data/local/tmp/lt-egl-{probe}'
+    for operation in [['push', str(source), remote], ['shell', 'chmod', '755', remote]]:
+        result = call(operation)
+        if result.returncode:
+            raise RuntimeError(result.stdout + result.stderr)
+    result = call(['shell', 'sha256sum', remote])
+    if result.returncode or not result.stdout.split() or result.stdout.split()[0] != digest:
+        raise RuntimeError(f'Remote binary mismatch: {remote}: {result.stdout}{result.stderr}')
+    receipt['binaries'][binary_name] = digest
+result = call(['shell', 'sync'])
+if result.returncode:
+    raise RuntimeError(result.stdout + result.stderr)
+(args.output / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+
+jobs = [(probe, '') for probe in probes]
+if args.core_diagnostic:
+    jobs.insert(1, ('core-fbo', '--oes'))
+results = []
+for probe, option in jobs:
+    label = probe + ('-oes' if option else '')
+    command = f'/data/local/tmp/lt-egl-{probe} {option}; probe_rc=$?; echo ACTUAL_PROBE_EXIT=$probe_rc; exit "$probe_rc"'
+    try:
+        result = call(['shell', command], timeout=45)
+        text = result.stdout + result.stderr
+        expected = {'render': 'PASS private object names, packed depth/stencil',
+                    'pixels': 'PASS multirow RGB stride+alignment',
+                    'core-fbo': 'PASS real GLES1 fixed-function pixel'}[probe]
+        passed = result.returncode == 0 and expected in text and 'ACTUAL_PROBE_EXIT=0' in text
+        record = {'probe': label, 'adb_exit': result.returncode, 'passed': passed}
+        if result.returncode == 0 and not passed:
+            record['reason'] = 'Missing real probe PASS output or explicit exit marker'
+        (args.output / f'{label}.log').write_text(text + f'\nADB_SHELL_EXIT={result.returncode}\n')
+    except subprocess.TimeoutExpired as error:
+        record = {'probe': label, 'passed': False, 'reason': '45-second transport deadline'}
+        (args.output / f'{label}.log').write_bytes((error.stdout or b'') + (error.stderr or b''))
+    results.append(record)
+    print(json.dumps(record), flush=True)
+(args.output / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
+# Experimental core failures are diagnostic; both complete production probes must pass.
+raise SystemExit(0 if all(item['passed'] for item in results if item['probe'] in ('render', 'pixels')) else 2)
