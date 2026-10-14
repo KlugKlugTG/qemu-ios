@@ -104,3 +104,26 @@ interval; steady Notes samples are not app-loading evidence.
 
 If results are inconclusive, regress guest behavior or show no repeatable benefit,
 retain API28 as the default and preserve both candidate and failure receipts.
+
+A three-ABI candidate can be operated with `run-candidate.py --plan PLAN.json`.
+Preflight hashes the pinned source/tool/dependency inputs, checks tool versions
+and fresh private destinations, and performs no configure or compilation.
+Only an explicit allocation permits the second form:
+`run-candidate.py --plan PLAN.json --execute-approved-sha256 EXACT_PLAN_SHA256`.
+The private plan fixes API28, source revision, dependencies and sequential j1
+commands. API29 experiments use separate plans and directories.
+
+The driver retains each command PID, log, exit, GNU time report and sampled
+aggregate RSS; it prints progress every30seconds and stops on deadline or RSS
+ceiling. These are operator safeguards, not benchmark results or a hard kernel
+memory limit. It retires only its owned command process group on interruption.
+Full source/config/build outputs must be fresh: it does not migrate existing
+cache stamps. ELF exports, SONAME, dependency closure and16KiB LOAD alignment
+must match the plan before artifact freeze. Actual selected-source notices and
+Bionic source kits are generated and validated; generating a source kit does
+not prove a new source replay or replacement relink. Android/frontend source
+pins remain the separate Product/Runtime candidate responsibility.
+
+`python3 tests/portable-candidate.py` performs tiny host-only driver checks,
+without invoking a native compiler or guest. A real full candidate still needs
+an allocated build and subsequent same-workload target measurements.
