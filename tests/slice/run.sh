@@ -73,11 +73,16 @@ while IFS= read -r line; do
 done < "$TEST"
 [ ${#variants[@]} -gt 0 ] || variants=("")
 export ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" UBSAN_OPTIONS="${UBSAN_OPTIONS:-halt_on_error=1:print_stacktrace=1}"
+if command -v xcrun >/dev/null 2>&1; then
+    compiler=(xcrun clang)
+else
+    compiler=("${CC:-clang}")
+fi
 n=0
 for variant in "${variants[@]}"; do
     read -r -a extra <<<"$variant"
     n=$((n + 1))
-    xcrun clang -std=gnu11 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
+    "${compiler[@]}" -std=gnu11 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
         -Wno-unused-function -Wno-comment -I"$TMP" -I"$ROOT/tests/slice" ${flags[@]+"${flags[@]}"} ${extra[@]+"${extra[@]}"} \
         "$TEST" -o "$TMP/check$n"
     (cd "$TMP" && "$TMP/check$n")

@@ -90,6 +90,10 @@ static void lis302dl_gravity(LIS302DLState *s, int64_t now, double g[3])
 
 bool lis302dl_motion_rate(LIS302DLState *s, int64_t now, double w[3])
 {
+    if ((s->host_fields & 2) && now < s->host_gyro_until_ns) {
+        memcpy(w, s->host_angular_velocity, sizeof(s->host_angular_velocity));
+        return true;
+    }
     bool moving = lis302dl_moving(s, now);
     /* Gravity turns by +angle about k in the device's frame: the device turns by -angle. */
     double r = moving ? -s->motion_angle * 1e9 / s->motion_ns : 0;
@@ -197,6 +201,12 @@ static void lis302dl_sample(LIS302DLState *s, int64_t now)
         for (int i = 0; i < 3; i++) {
             values[i] = lis302dl_counts(s, values[i]);
         }
+    }
+    if ((s->host_fields & 1) && now < s->host_accel_until_ns) {
+        double g[3];
+        for (int i = 0; i < 3; i++) g[i] = -s->host_acceleration[i] / 9.80665;
+        lis302dl_mounted(s, g, values);
+        for (int i = 0; i < 3; i++) values[i] = lis302dl_counts(s, values[i]);
     }
     int64_t elapsed = now - s->shake_start_ns;
     if (s->shake_start_ns >= 0 && elapsed >= 0 && elapsed < 200000000) {
@@ -464,6 +474,7 @@ static void lis302dl_init(Object *obj)
 static int lis302dl_post_load(void *opaque, int version)
 {
     LIS302DLState *s = opaque;
+    lis302dl_clear_host_motion(s);
     if (version < 2) {
         s->pitch_mdeg = 0;
         s->flat_pose = s->orientation == 5 || s->orientation == 6;
@@ -546,3 +557,20 @@ static void lis302dl_register_types(void)
 }
 
 type_init(lis302dl_register_types)
+
+/* Host samples are transient, in device portrait axes; existing sensor mount
+ * and CTRL full-scale conversion remain authoritative for guest registers. */
+void lis302dl_clear_host_motion(LIS302DLState *s)
+{
+    s->host_fields = 0;
+    s->host_accel_until_ns = s->host_gyro_until_ns = 0;
+    memset(s->host_acceleration, 0, sizeof(s->host_acceleration));
+    memset(s->host_angular_velocity, 0, sizeof(s->host_angular_velocity));
+}
+void lis302dl_set_host_motion(LIS302DLState *s, uint32_t fields, const double a[3], const double w[3])
+{
+    int64_t expires = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 250000000;
+    if (fields & 1) { memcpy(s->host_acceleration, a, sizeof(s->host_acceleration)); s->host_accel_until_ns = expires; }
+    if (fields & 2) { memcpy(s->host_angular_velocity, w, sizeof(s->host_angular_velocity)); s->host_gyro_until_ns = expires; }
+    s->host_fields |= fields;
+}
