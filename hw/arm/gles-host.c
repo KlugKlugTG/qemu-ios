@@ -685,7 +685,7 @@ static bool gles_platform_context_create(void)
     if (gh.group && !gh.group->root) gh.group->root = CGLRetainContext(gh.cgl);
     return true;
 }
-static void gles_platform_make_current(void) { CGLSetCurrentContext(gh.cgl); }
+static bool gles_platform_make_current(void) { return CGLSetCurrentContext(gh.cgl) == 0; }
 static bool gles_platform_attach_iosurface(void) { return false; }
 static void *gles_platform_frame_lock(size_t *stride) { return NULL; }
 static void gles_platform_frame_unlock(void) {}
@@ -700,7 +700,7 @@ static bool gles_platform_context_create(void)
             gh.api_version, glGetString(GL_RENDERER), glGetString(GL_VERSION));
     return true;
 }
-static void gles_platform_make_current(void) { CGLSetCurrentContext(gh.cgl); }
+static bool gles_platform_make_current(void) { return CGLSetCurrentContext(gh.cgl) == 0; }
 static bool gles_platform_attach_iosurface(void) { return false; }
 static void *gles_platform_frame_lock(size_t *stride) { return NULL; }
 static void gles_platform_frame_unlock(void) {}
@@ -712,9 +712,10 @@ static bool gles_platform_context_create(void)
     return gles_eagl_context_create();
 }
 
-static inline void gles_platform_make_current(void)
+static inline bool gles_platform_make_current(void)
 {
     gles_eagl_make_current();
+    return true;
 }
 
 /*
@@ -778,11 +779,12 @@ static bool gles_platform_context_create(void)
  * touches CGL, so after the first it is always already current -- and the
  * check is a thread-local read against a call into the GL stack.
  */
-static inline void gles_platform_make_current(void)
+static inline bool gles_platform_make_current(void)
 {
     if (CGLGetCurrentContext() != gh.cgl) {
-        CGLSetCurrentContext(gh.cgl);
+        return CGLSetCurrentContext(gh.cgl) == 0;
     }
+    return true;
 }
 
 /*
@@ -1497,7 +1499,30 @@ static void gles_draw_tex(float x, float y, float z, float w, float h)
     glMatrixMode(mode);
     glPopAttrib();
 #else
+#ifdef GLES_HOST_EGL_ES
+    typedef void (*DrawTex)(GLfloat,GLfloat,GLfloat,GLfloat,GLfloat);
+    static DrawTex draw;
+    if (!draw) draw=(DrawTex)eglGetProcAddress("glDrawTexfOES");
+    if (gh.api_version == 2 || !draw) {
+        gles_refuse("drawtex:host-unavailable");
+        gles_native_error(GL_INVALID_OPERATION);
+        return;
+    }
+    GLint active, units;
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
+    glGetIntegerv(GL_MAX_TEXTURE_UNITS,&units);
+    for (unsigned u=0;u<GLES_MAX_TEXUNITS && u<units;u++) {
+        GLint texture;
+        glActiveTexture(GL_TEXTURE0+u);
+        glGetIntegerv(GL_TEXTURE_BINDING_2D,&texture);
+        GLint *crop=gh.crop ? g_hash_table_lookup(gh.crop,GUINT_TO_POINTER(texture)) : NULL;
+        if (crop) glTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_CROP_RECT_OES,crop);
+    }
+    glActiveTexture(active);
+    draw(x,y,z,w,h);
+#else
     (void)x; (void)y; (void)z; (void)w; (void)h;
+#endif
 #endif
 }
 
@@ -4065,6 +4090,29 @@ done:
 }
 #endif
 
+#ifdef GLES_HOST_EGL
+/* CoreVideo 420v video-range / 420f full-range BT.601, CPU fallback. */
+static uint8_t gles_yuv_byte(int value) { return MIN(255,MAX(0,value)); }
+static bool gles_surface_nv12(unsigned width, unsigned height, uint32_t format,
+                              uint8_t *input, uint8_t *bgra)
+{
+    bool full=format==0x34323066;
+    if (!full && format!=0x34323076) return false;
+    for (unsigned row=0;row<height;row++) for (unsigned col=0;col<width;col++) {
+        size_t uv=(size_t)width*height+(size_t)(row/2)*width+(col&~1u);
+        int u=input[uv]-128,v=input[uv+1]-128;
+        int y=input[(size_t)row*width+col];
+        int luma=full?y*256:MAX(0,y-16)*298;
+        uint8_t *dst=bgra+((size_t)row*width+col)*4;
+        dst[0]=gles_yuv_byte((luma+(full?454:516)*u+128)>>8);
+        dst[1]=gles_yuv_byte((luma-(full?88:100)*u-(full?183:208)*v+128)>>8);
+        dst[2]=gles_yuv_byte((luma+(full?359:409)*v+128)>>8);
+        dst[3]=255;
+    }
+    return true;
+}
+#endif
+
 /* Bytes per pixel of a surface format this host samples, 0 for one it does not. The set
  * is what IOSurface and QuartzCore name in every firmware (immediates in 5F138 through
  * 8C148: the 32-bit orders, the two packed 16-bit RGBA orders, the opaque 16-bit pair)
@@ -4564,7 +4612,7 @@ static int64_t gles_bind_surface(CPUState *cpu, const uint32_t *a, uint32_t id)
     if (surface->npages) {
         gles_surface_fetch(surface, pixels);    /* every page was just mapped: no fault can come */
     } else if (nv12) {
-#if defined(__APPLE__) && !defined(GLES_HOST_EAGL)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL)
         if ((w | h) & 1) {
             gles_refuse("surface:nv12:odd-size");
             gles_debug_texture(target);
@@ -6782,7 +6830,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         else glGetTexParameterfv(a[0], a[1], p);
         return gles_write_xparams(cpu, a[2], a[1], n, p);
     }
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
     case 774: case 775: {                       /* glGetClipPlanef/x(plane, equation[4]) */
         double d[4] = { 0 };
         float p[4];
@@ -7598,7 +7646,10 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
         return -1;
     }
 
-    gles_platform_make_current();
+    if (!gles_platform_make_current()) {
+        gles_refuse("host:make-current");
+        return -1;
+    }
 
     gh.calls++;
     gles_cur_ctx = ctx;

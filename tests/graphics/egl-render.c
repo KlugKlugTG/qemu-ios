@@ -5,13 +5,28 @@
 #define GL_GLEXT_PROTOTYPES 1
 #include <GLES/gl.h>
 #include <GLES/glext.h>
-#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>
+#define GL_UNSIGNED_SHORT_4_4_4_4_REV 0x8365
+#define GL_UNSIGNED_SHORT_1_5_5_5_REV 0x8366
+#define GL_UNSIGNED_INT_8_8_8_8 0x8035
+#define GL_UNSIGNED_INT_8_8_8_8_REV 0x8367
+#define GL_BGRA GL_BGRA_EXT
 #else
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
 #include <GL/glext.h>
 #endif
 #include "../../hw/arm/gles-host-egl.c.inc"
+#ifdef GLES_HOST_EGL_ES
+#include "../../hw/arm/gles-host-native.c.inc"
+#define glGenFramebuffers glGenFramebuffersOES
+#define glBindFramebuffer glBindFramebufferOES
+#define glFramebufferTexture2D glFramebufferTexture2DOES
+#define glCheckFramebufferStatus glCheckFramebufferStatusOES
+#define glBindRenderbuffer glBindRenderbufferOES
+#define glRenderbufferStorage glRenderbufferStorageOES
+#define glFramebufferRenderbuffer glFramebufferRenderbufferOES
+#endif
 
 static GLuint shader(GLenum type, const char *src)
 {
@@ -30,15 +45,19 @@ int main(void)
 {
     CGLContextObj c1, c2;
     assert(gles_egl_create(NULL, 1, &c1));
-    GLuint texture;
-    glGenTextures(1, &texture);
+    GLuint texture=0x40000000u;
     glBindTexture(GL_TEXTURE_2D, texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     /* Exercise actual per-context FBO, not the one-pixel EGL dummy drawable. */
-    GLuint fb;
-    glGenFramebuffers(1, &fb); glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    GLuint fb=0x40000000u;
+    glBindFramebuffer(GL_FRAMEBUFFER, fb);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    GLuint depth=0x40000000u;
+    glBindRenderbuffer(GL_RENDERBUFFER,depth);
+    glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH24_STENCIL8,32,32);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,depth);
+    glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_STENCIL_ATTACHMENT,GL_RENDERBUFFER,depth);
     assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
     glViewport(0, 0, 32, 32);
     float vertices[] = {-1,-1, 1,-1, 0,1};
@@ -71,9 +90,16 @@ int main(void)
     assert(glGetError()==GL_NO_ERROR && px[0]<5 && px[1]>240 && px[2]<5 && px[3]>240);
     printf("GLES2 triangle rgba=%u,%u,%u,%u renderer=%s\n",px[0],px[1],px[2],px[3],glGetString(GL_RENDERER));
     assert(CGLSetCurrentContext(c1)==0); glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px); assert(px[1]>240);
+#ifdef GLES_HOST_EGL_ES
+    glReadPixels(16,16,1,1,GL_BGRA,GL_UNSIGNED_BYTE,px);
+    assert(px[0]<5 && px[1]>240 && px[2]<5 && px[3]>240);
+    unsigned short rgb565;
+    glReadPixels(16,16,1,1,GL_RGB,GL_UNSIGNED_SHORT_5_6_5,&rgb565);
+    assert(rgb565==0x07e0);
+#endif
     CGLRetainContext(c1); CGLReleaseContext(c1);
     CGLReleaseContext(c2); CGLReleaseContext(c1);
     assert(eglGetCurrentContext()==EGL_NO_CONTEXT);
-    puts("PASS context switching, cross-version texture sharing, render/readback, teardown");
+    puts("PASS private object names, packed depth/stencil, context switching, cross-version texture sharing, render/readback, teardown");
     return 0;
 }
