@@ -45,6 +45,27 @@ static GLenum gles_native_get_error(void)
     }
     return glGetError();
 }
+static bool gles_native_extension(const char *extensions, const char *name)
+{
+    size_t length=strlen(name);
+    if (!extensions || !length) return false;
+    for (const char *p=extensions;(p=strstr(p,name));p+=length)
+        if ((p==extensions || p[-1]==' ') && (!p[length] || p[length]==' ')) return true;
+    return false;
+}
+static bool gles_native_require_fbo(void)
+{
+    if (gles_egl_current->api == 2) return true;
+    if (!gles_egl_current->fbo_checked) {
+        const char *extensions=(const char *)glGetString(GL_EXTENSIONS);
+        gles_egl_current->fbo_supported=gles_native_extension(extensions,"GL_OES_framebuffer_object");
+        gles_egl_current->fbo_checked=true;
+        if (!gles_egl_current->fbo_supported)
+            fprintf(stderr,"[gles-egl] unsupported required GLES1 capability GL_OES_framebuffer_object; renderer=%s version=%s\n",
+                    glGetString(GL_RENDERER),glGetString(GL_VERSION));
+    }
+    return gles_egl_current->fbo_supported;
+}
 static void gles_native_pixel_store(GLenum pname, GLint value)
 {
     if (pname == GL_UNPACK_ROW_LENGTH) {
@@ -115,6 +136,18 @@ static void *gles_native_texels(GLsizei w, GLsizei h, GLenum *format, GLenum *ty
     if (reverse16 || packed) { *format=GL_RGBA; *type=GL_UNSIGNED_BYTE; }
     return out;
 }
+static GLESEGLTexture *gles_native_texture(unsigned name, bool create)
+{
+    if (!name) return &gles_egl_current->default_texture;
+    for (GLESEGLTexture *texture=gles_egl_current->textures->head;texture;texture=texture->next)
+        if (texture->name==name) return texture;
+    if (!create) return NULL;
+    GLESEGLTexture *texture=calloc(1,sizeof(*texture));
+    if (!texture) { gles_native_error(GL_OUT_OF_MEMORY); return NULL; }
+    texture->name=name;texture->next=gles_egl_current->textures->head;
+    gles_egl_current->textures->head=texture;
+    return texture;
+}
 static void gles_native_tex_image(GLenum target, GLint level, GLint internal, GLsizei w, GLsizei h,
                                   GLint border, GLenum format, GLenum type, const void *pixels)
 {
@@ -122,7 +155,15 @@ static void gles_native_tex_image(GLenum target, GLint level, GLint internal, GL
     if (pixels && !copy) { gles_native_error(w <= 0 || h <= 0 ? GL_INVALID_VALUE : GL_OUT_OF_MEMORY); return; }
     glPixelStorei(GL_UNPACK_ALIGNMENT,1);
     if (format == GL_RGBA && (internal == GL_BGRA || internal == GL_RGBA)) internal=GL_RGBA;
+    gles_native_save_errors();
     glTexImage2D(target,level,internal,w,h,border,format,type,copy);
+    GLenum error=glGetError();
+    gles_native_error(error);
+    if (error==GL_NO_ERROR && target==GL_TEXTURE_2D && !level) {
+        GLint name; glGetIntegerv(GL_TEXTURE_BINDING_2D,&name);
+        GLESEGLTexture *texture=gles_native_texture(name,true);
+        if (texture) { texture->width=w; texture->height=h; }
+    }
     glPixelStorei(GL_UNPACK_ALIGNMENT,gles_egl_current->unpack_alignment);
     free(copy);
 }
@@ -194,6 +235,9 @@ static GLboolean gles_native_IsFramebuffer(GLuint name)
     typedef GLboolean (*Proc)(GLuint name);
     static Proc es1;
     if (gles_egl_current->api == 2) { return glIsFramebuffer(name); }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return 0;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glIsFramebufferOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glIsFramebufferOES\n"); gles_native_error(GL_INVALID_OPERATION); return 0; }
     return es1(name);
@@ -203,6 +247,9 @@ static GLboolean gles_native_IsRenderbuffer(GLuint name)
     typedef GLboolean (*Proc)(GLuint name);
     static Proc es1;
     if (gles_egl_current->api == 2) { return glIsRenderbuffer(name); }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return 0;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glIsRenderbufferOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glIsRenderbufferOES\n"); gles_native_error(GL_INVALID_OPERATION); return 0; }
     return es1(name);
@@ -212,6 +259,9 @@ static void gles_native_GenerateMipmap(GLenum target)
     typedef void (*Proc)(GLenum target);
     static Proc es1;
     if (gles_egl_current->api == 2) { glGenerateMipmap(target); return; }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glGenerateMipmapOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glGenerateMipmapOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(target);
@@ -221,6 +271,10 @@ static void gles_native_GenFramebuffers(GLsizei n, GLuint *names)
     typedef void (*Proc)(GLsizei n, GLuint *names);
     static Proc es1;
     if (gles_egl_current->api == 2) { glGenFramebuffers(n,names); return; }
+    if (!gles_native_require_fbo()) {
+        if (n > 0 && names) memset(names,0,(size_t)n*sizeof(*names));
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glGenFramebuffersOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glGenFramebuffersOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(n,names);
@@ -230,6 +284,9 @@ static void gles_native_BindFramebuffer(GLenum target, GLuint name)
     typedef void (*Proc)(GLenum target, GLuint name);
     static Proc es1;
     if (gles_egl_current->api == 2) { glBindFramebuffer(target,name); return; }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glBindFramebufferOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glBindFramebufferOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(target,name);
@@ -239,6 +296,9 @@ static void gles_native_FramebufferTexture2D(GLenum target, GLenum attachment, G
     typedef void (*Proc)(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
     static Proc es1;
     if (gles_egl_current->api == 2) { glFramebufferTexture2D(target,attachment,textarget,texture,level); return; }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glFramebufferTexture2DOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glFramebufferTexture2DOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(target,attachment,textarget,texture,level);
@@ -248,6 +308,10 @@ static void gles_native_GenRenderbuffers(GLsizei n, GLuint *names)
     typedef void (*Proc)(GLsizei n, GLuint *names);
     static Proc es1;
     if (gles_egl_current->api == 2) { glGenRenderbuffers(n,names); return; }
+    if (!gles_native_require_fbo()) {
+        if (n > 0 && names) memset(names,0,(size_t)n*sizeof(*names));
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glGenRenderbuffersOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glGenRenderbuffersOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(n,names);
@@ -257,6 +321,9 @@ static void gles_native_BindRenderbuffer(GLenum target, GLuint name)
     typedef void (*Proc)(GLenum target, GLuint name);
     static Proc es1;
     if (gles_egl_current->api == 2) { glBindRenderbuffer(target,name); return; }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glBindRenderbufferOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glBindRenderbufferOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(target,name);
@@ -266,6 +333,9 @@ static void gles_native_RenderbufferStorage(GLenum target, GLenum format, GLsize
     typedef void (*Proc)(GLenum target, GLenum format, GLsizei w, GLsizei h);
     static Proc es1;
     if (gles_egl_current->api == 2) { glRenderbufferStorage(target,format,w,h); return; }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glRenderbufferStorageOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glRenderbufferStorageOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(target,format,w,h);
@@ -275,6 +345,9 @@ static void gles_native_FramebufferRenderbuffer(GLenum target, GLenum attachment
     typedef void (*Proc)(GLenum target, GLenum attachment, GLenum rbtarget, GLuint name);
     static Proc es1;
     if (gles_egl_current->api == 2) { glFramebufferRenderbuffer(target,attachment,rbtarget,name); return; }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glFramebufferRenderbufferOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glFramebufferRenderbufferOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(target,attachment,rbtarget,name);
@@ -284,6 +357,9 @@ static GLenum gles_native_CheckFramebufferStatus(GLenum target)
     typedef GLenum (*Proc)(GLenum target);
     static Proc es1;
     if (gles_egl_current->api == 2) { return glCheckFramebufferStatus(target); }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return 0;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glCheckFramebufferStatusOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glCheckFramebufferStatusOES\n"); gles_native_error(GL_INVALID_OPERATION); return 0; }
     return es1(target);
@@ -293,6 +369,9 @@ static void gles_native_DeleteFramebuffers(GLsizei n, const GLuint *names)
     typedef void (*Proc)(GLsizei n, const GLuint *names);
     static Proc es1;
     if (gles_egl_current->api == 2) { glDeleteFramebuffers(n,names); return; }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glDeleteFramebuffersOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glDeleteFramebuffersOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(n,names);
@@ -302,6 +381,9 @@ static void gles_native_DeleteRenderbuffers(GLsizei n, const GLuint *names)
     typedef void (*Proc)(GLsizei n, const GLuint *names);
     static Proc es1;
     if (gles_egl_current->api == 2) { glDeleteRenderbuffers(n,names); return; }
+    if (!gles_native_require_fbo()) {
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glDeleteRenderbuffersOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glDeleteRenderbuffersOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(n,names);
@@ -311,6 +393,10 @@ static void gles_native_GetRenderbufferParameteriv(GLenum target, GLenum pname, 
     typedef void (*Proc)(GLenum target, GLenum pname, GLint *value);
     static Proc es1;
     if (gles_egl_current->api == 2) { glGetRenderbufferParameteriv(target,pname,value); return; }
+    if (!gles_native_require_fbo()) {
+        if (value) *value=0;
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glGetRenderbufferParameterivOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glGetRenderbufferParameterivOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(target,pname,value);
@@ -320,6 +406,10 @@ static void gles_native_GetFramebufferAttachmentParameteriv(GLenum target, GLenu
     typedef void (*Proc)(GLenum target, GLenum attachment, GLenum pname, GLint *value);
     static Proc es1;
     if (gles_egl_current->api == 2) { glGetFramebufferAttachmentParameteriv(target,attachment,pname,value); return; }
+    if (!gles_native_require_fbo()) {
+        if (value) *value=0;
+        gles_native_error(GL_INVALID_OPERATION); return;
+    }
     if (!es1) es1=(Proc)eglGetProcAddress("glGetFramebufferAttachmentParameterivOES");
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glGetFramebufferAttachmentParameterivOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(target,attachment,pname,value);
@@ -339,3 +429,92 @@ static void gles_native_GetFramebufferAttachmentParameteriv(GLenum target, GLenu
 #define glDeleteRenderbuffersOES gles_native_DeleteRenderbuffers
 #define glGetRenderbufferParameterivOES gles_native_GetRenderbufferParameteriv
 #define glGetFramebufferAttachmentParameterivOES gles_native_GetFramebufferAttachmentParameteriv
+
+/* DrawTex uses window coordinates, current color and per-unit crop rectangles.
+ * Execute it with the real ES1 array pipeline rather than vendor DrawTex entry
+ * points: some drivers advertise the extension but fail when drawing to FBOs.
+ * Restore every state changed here, including client arrays and texture matrices.
+ */
+typedef struct GLESNativeArrayState {
+    GLint size, type, stride, buffer;
+    void *pointer;
+    GLboolean enabled;
+} GLESNativeArrayState;
+static bool gles_native_draw_tex(GLfloat x, GLfloat y, GLfloat z, GLfloat w, GLfloat h,
+                                 const GLint (*crop)[4], const bool *has_crop, unsigned crop_count)
+{
+    if (gles_egl_current->api != 1) { gles_native_error(GL_INVALID_OPERATION); return false; }
+    if (w <= 0 || h <= 0) { gles_native_error(GL_INVALID_VALUE); return false; }
+    enum { MAX_UNITS=8 };
+    GLint viewport[4], active, client, mode, units, buffer, clips;
+    GLfloat projection[16], modelview[16], matrices[MAX_UNITS][16], coords[MAX_UNITS][8];
+    GLboolean cube[MAX_UNITS];
+    GLESNativeArrayState vertex, texcoord[MAX_UNITS];
+    const GLenum enables[]={GL_LIGHTING,GL_CULL_FACE,
+        GL_CLIP_PLANE0,GL_CLIP_PLANE1,GL_CLIP_PLANE2,GL_CLIP_PLANE3,GL_CLIP_PLANE4,GL_CLIP_PLANE5};
+    GLboolean enabled[sizeof(enables)/sizeof(enables[0])];
+    gles_native_save_errors();
+    glGetIntegerv(GL_VIEWPORT,viewport);
+    if (viewport[2]<=0 || viewport[3]<=0) return true;
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&active); glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE,&client);
+    glGetIntegerv(GL_MATRIX_MODE,&mode); glGetIntegerv(GL_MAX_TEXTURE_UNITS,&units);
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING,&buffer); glGetIntegerv(GL_MAX_CLIP_PLANES,&clips);
+    if (units>MAX_UNITS) units=MAX_UNITS;
+    unsigned enable_count=2+(clips>6?6:clips);
+    for (unsigned i=0;i<enable_count;i++) { enabled[i]=glIsEnabled(enables[i]); glDisable(enables[i]); }
+    vertex.enabled=glIsEnabled(GL_VERTEX_ARRAY);
+    glGetIntegerv(GL_VERTEX_ARRAY_SIZE,&vertex.size); glGetIntegerv(GL_VERTEX_ARRAY_TYPE,&vertex.type);
+    glGetIntegerv(GL_VERTEX_ARRAY_STRIDE,&vertex.stride); glGetIntegerv(GL_VERTEX_ARRAY_BUFFER_BINDING,&vertex.buffer);
+    glGetPointerv(GL_VERTEX_ARRAY_POINTER,&vertex.pointer);
+    GLboolean color=glIsEnabled(GL_COLOR_ARRAY), normal=glIsEnabled(GL_NORMAL_ARRAY);
+    glDisableClientState(GL_COLOR_ARRAY); glDisableClientState(GL_NORMAL_ARRAY);
+    glMatrixMode(GL_PROJECTION); glGetFloatv(GL_PROJECTION_MATRIX,projection); glLoadIdentity();
+    glMatrixMode(GL_MODELVIEW); glGetFloatv(GL_MODELVIEW_MATRIX,modelview); glLoadIdentity();
+    for (unsigned unit=0;unit<(unsigned)units;unit++) {
+        glActiveTexture(GL_TEXTURE0+unit); glClientActiveTexture(GL_TEXTURE0+unit);
+        cube[unit]=glIsEnabled(GL_TEXTURE_CUBE_MAP); glDisable(GL_TEXTURE_CUBE_MAP);
+        glMatrixMode(GL_TEXTURE); glGetFloatv(GL_TEXTURE_MATRIX,matrices[unit]); glLoadIdentity();
+        GLESNativeArrayState *array=&texcoord[unit];
+        array->enabled=glIsEnabled(GL_TEXTURE_COORD_ARRAY);
+        glGetIntegerv(GL_TEXTURE_COORD_ARRAY_SIZE,&array->size); glGetIntegerv(GL_TEXTURE_COORD_ARRAY_TYPE,&array->type);
+        glGetIntegerv(GL_TEXTURE_COORD_ARRAY_STRIDE,&array->stride); glGetIntegerv(GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING,&array->buffer);
+        glGetPointerv(GL_TEXTURE_COORD_ARRAY_POINTER,&array->pointer);
+        GLint name; glGetIntegerv(GL_TEXTURE_BINDING_2D,&name);
+        GLESEGLTexture *texture=gles_native_texture(name,false);
+        GLfloat s0=0,s1=0,t0=0,t1=0;
+        if (texture && texture->width && texture->height && unit<crop_count && has_crop[unit]) {
+            s0=(GLfloat)crop[unit][0]/texture->width; s1=s0+(GLfloat)crop[unit][2]/texture->width;
+            t0=(GLfloat)crop[unit][1]/texture->height; t1=t0+(GLfloat)crop[unit][3]/texture->height;
+        }
+        GLfloat *uv=coords[unit];
+        uv[0]=s0;uv[1]=t0;uv[2]=s1;uv[3]=t0;uv[4]=s0;uv[5]=t1;uv[6]=s1;uv[7]=t1;
+        glBindBuffer(GL_ARRAY_BUFFER,0); glTexCoordPointer(2,GL_FLOAT,0,uv); glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    }
+    GLfloat left=2*(x-viewport[0])/viewport[2]-1, right=left+2*w/viewport[2];
+    GLfloat bottom=2*(y-viewport[1])/viewport[3]-1, top=bottom+2*h/viewport[3];
+    GLfloat depth=2*(z<0?0:z>1?1:z)-1;
+    /* Eye distance zero preserves DrawTex fog. Projection alone sets depth,
+     * which the normal DEPTH_RANGE then maps exactly as OES_draw_texture. */
+    const GLfloat window_projection[]={1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,depth,1};
+    glMatrixMode(GL_PROJECTION); glLoadMatrixf(window_projection);
+    const GLfloat vertices[]={left,bottom,0, right,bottom,0, left,top,0, right,top,0};
+    glBindBuffer(GL_ARRAY_BUFFER,0); glVertexPointer(3,GL_FLOAT,0,vertices); glEnableClientState(GL_VERTEX_ARRAY);
+    glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+    for (unsigned unit=0;unit<(unsigned)units;unit++) {
+        glActiveTexture(GL_TEXTURE0+unit); glClientActiveTexture(GL_TEXTURE0+unit);
+        glMatrixMode(GL_TEXTURE); glLoadMatrixf(matrices[unit]);
+        if (cube[unit]) glEnable(GL_TEXTURE_CUBE_MAP);
+        GLESNativeArrayState *array=&texcoord[unit];
+        glBindBuffer(GL_ARRAY_BUFFER,array->buffer); glTexCoordPointer(array->size,array->type,array->stride,array->pointer);
+        if (!array->enabled) glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER,vertex.buffer); glVertexPointer(vertex.size,vertex.type,vertex.stride,vertex.pointer);
+    if (!vertex.enabled) glDisableClientState(GL_VERTEX_ARRAY);
+    if (color) glEnableClientState(GL_COLOR_ARRAY);
+    if (normal) glEnableClientState(GL_NORMAL_ARRAY);
+    glBindBuffer(GL_ARRAY_BUFFER,buffer);
+    glMatrixMode(GL_PROJECTION); glLoadMatrixf(projection); glMatrixMode(GL_MODELVIEW); glLoadMatrixf(modelview);
+    glActiveTexture(active); glClientActiveTexture(client); glMatrixMode(mode);
+    for (unsigned i=0;i<enable_count;i++) if (enabled[i]) glEnable(enables[i]);
+    return true;
+}

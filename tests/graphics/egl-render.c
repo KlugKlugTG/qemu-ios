@@ -23,6 +23,7 @@
 #define glBindFramebuffer glBindFramebufferOES
 #define glFramebufferTexture2D glFramebufferTexture2DOES
 #define glCheckFramebufferStatus glCheckFramebufferStatusOES
+#define glGenRenderbuffers glGenRenderbuffersOES
 #define glBindRenderbuffer glBindRenderbufferOES
 #define glRenderbufferStorage glRenderbufferStorageOES
 #define glFramebufferRenderbuffer glFramebufferRenderbufferOES
@@ -45,20 +46,56 @@ int main(void)
 {
     CGLContextObj c1, c2;
     assert(gles_egl_create(NULL, 1, &c1));
+    fprintf(stderr,"[probe] ES1 renderer=%s version=%s\n",glGetString(GL_RENDERER),glGetString(GL_VERSION));
+    if (getenv("LT_PROBE_DIAGNOSTIC")) fprintf(stderr,"[probe] extensions=%s\n",glGetString(GL_EXTENSIONS));
+#ifdef GLES_HOST_EGL_ES
+    assert(!gles_native_extension("GL_OES_framebuffer_object_other","GL_OES_framebuffer_object"));
+    assert(gles_native_extension("GL_first GL_OES_framebuffer_object GL_last","GL_OES_framebuffer_object"));
+    if (!gles_native_require_fbo()) {
+        CGLReleaseContext(c1);
+        return 2;
+    }
+#endif
     GLuint texture=0x40000000u;
+    if (getenv("LT_PROBE_GENERATED")) glGenTextures(1,&texture);
     glBindTexture(GL_TEXTURE_2D, texture);
+    fprintf(stderr,"[probe] bind texture %u error=0x%x\n",texture,glGetError());
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     /* Exercise actual per-context FBO, not the one-pixel EGL dummy drawable. */
     GLuint fb=0x40000000u;
+    if (getenv("LT_PROBE_GENERATED")) glGenFramebuffers(1,&fb);
     glBindFramebuffer(GL_FRAMEBUFFER, fb);
+    fprintf(stderr,"[probe] bind framebuffer %u error=0x%x\n",fb,glGetError());
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+    fprintf(stderr,"[probe] color FBO=0x%x error=0x%x\n",
+            glCheckFramebufferStatus(GL_FRAMEBUFFER),glGetError());
     GLuint depth=0x40000000u;
+    if (getenv("LT_PROBE_GENERATED")) glGenRenderbuffers(1,&depth);
     glBindRenderbuffer(GL_RENDERBUFFER,depth);
+    fprintf(stderr,"[probe] bind renderbuffer %u error=0x%x\n",depth,glGetError());
     glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH24_STENCIL8,32,32);
+    fprintf(stderr,"[probe] packed depth/stencil storage error=0x%x\n",glGetError());
     glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,depth);
     glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_STENCIL_ATTACHMENT,GL_RENDERBUFFER,depth);
-    assert(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE);
+    GLenum status=glCheckFramebufferStatus(GL_FRAMEBUFFER), error=glGetError();
+    fprintf(stderr,"[probe] complete FBO status=0x%x error=0x%x\n",status,error);
+    if (status != GL_FRAMEBUFFER_COMPLETE || error != GL_NO_ERROR) {
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,0);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_STENCIL_ATTACHMENT,GL_RENDERBUFFER,0);
+        glBindRenderbuffer(GL_RENDERBUFFER,depth);
+        glRenderbufferStorage(GL_RENDERBUFFER,GL_DEPTH_COMPONENT16,32,32);
+        fprintf(stderr,"[probe] depth16 storage error=0x%x\n",glGetError());
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,depth);
+        fprintf(stderr,"[probe] depth16 only status=0x%x error=0x%x\n",glCheckFramebufferStatus(GL_FRAMEBUFFER),glGetError());
+        GLuint stencil=0x40000001u;
+        glBindRenderbuffer(GL_RENDERBUFFER,stencil);
+        glRenderbufferStorage(GL_RENDERBUFFER,GL_STENCIL_INDEX8,32,32);
+        fprintf(stderr,"[probe] stencil8 storage error=0x%x\n",glGetError());
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_STENCIL_ATTACHMENT,GL_RENDERBUFFER,stencil);
+        fprintf(stderr,"[probe] separate depth16+stencil8 status=0x%x error=0x%x\n",glCheckFramebufferStatus(GL_FRAMEBUFFER),glGetError());
+    }
+    assert(status == GL_FRAMEBUFFER_COMPLETE && error == GL_NO_ERROR);
     glViewport(0, 0, 32, 32);
     float vertices[] = {-1,-1, 1,-1, 0,1};
     glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
@@ -88,18 +125,40 @@ int main(void)
     glTexEnvf(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_ADD);
     glEnable(GL_TEXTURE_2D); glTexCoordPointer(2,GL_FLOAT,0,uv); glEnableClientState(GL_TEXTURE_COORD_ARRAY);
     glDrawArrays(GL_TRIANGLES,0,3); glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
-    assert(glGetError()==GL_NO_ERROR && px[0]>240 && px[1]<5 && px[2]>240);
+    GLenum multitexture_error=glGetError();
+    GLint units,active,client,mode,binding;
+    glGetIntegerv(GL_MAX_TEXTURE_UNITS,&units);
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&active); glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE,&client);
+    glGetTexEnviv(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,&mode); glGetIntegerv(GL_TEXTURE_BINDING_2D,&binding);
+    fprintf(stderr,"[probe] multitexture rgba=%u,%u,%u,%u error=0x%x units=%d active=0x%x client=0x%x envmode=0x%x tex=%u enabled=%d\n",
+            px[0],px[1],px[2],px[3],multitexture_error,units,active,client,mode,binding,glIsEnabled(GL_TEXTURE_2D));
+    assert(multitexture_error==GL_NO_ERROR && px[0]>240 && px[1]<5 && px[2]>240);
 #ifdef GLES_HOST_EGL_ES
-    typedef void (*DrawTex)(GLfloat,GLfloat,GLfloat,GLfloat,GLfloat);
-    DrawTex draw=(DrawTex)eglGetProcAddress("glDrawTexfOES");
-    assert(draw);
-    GLint crop[]={0,0,1,1};
-    glTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_CROP_RECT_OES,crop);
-    glActiveTexture(GL_TEXTURE0);
-    glTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_CROP_RECT_OES,crop);
-    glClear(GL_COLOR_BUFFER_BIT); draw(0,0,0,32,32);
+    const GLint crop[8][4]={{0,0,1,1},{0,0,1,1}};
+    const bool has_crop[8]={true,true};
+    /* Production DrawTex preserves original array pointers, units and matrices. */
+    glClear(GL_COLOR_BUFFER_BIT);
+    assert(gles_native_draw_tex(0,0,0,32,32,crop,has_crop,8));
     glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    GLenum drawtex_error=glGetError();
+    fprintf(stderr,"[probe] production DrawTex rgba=%u,%u,%u,%u error=0x%x\n",px[0],px[1],px[2],px[3],drawtex_error);
+    assert(drawtex_error==GL_NO_ERROR && px[0]>240 && px[1]<5 && px[2]>240);
+    GLint restored_active,restored_client,restored_mode;
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&restored_active); glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE,&restored_client);
+    glGetTexEnviv(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,&restored_mode);
+    assert(restored_active==active && restored_client==client && restored_mode==mode);
+    glDrawArrays(GL_TRIANGLES,0,3); glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
     assert(glGetError()==GL_NO_ERROR && px[0]>240 && px[1]<5 && px[2]>240);
+    const GLfloat fog[]={0,1,0,1};
+    glFogf(GL_FOG_MODE,GL_LINEAR); glFogf(GL_FOG_START,-1); glFogf(GL_FOG_END,1);
+    glFogfv(GL_FOG_COLOR,fog); glEnable(GL_FOG);
+    assert(gles_native_draw_tex(0,0,.75f,32,32,crop,has_crop,8));
+    glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    fprintf(stderr,"[probe] production DrawTex fog rgba=%u,%u,%u,%u\n",px[0],px[1],px[2],px[3]);
+    assert(glIsEnabled(GL_FOG) && glGetError()==GL_NO_ERROR);
+    assert(px[0]>=120 && px[0]<=135 && px[1]>=120 && px[1]<=135 && px[2]>=120 && px[2]<=135);
+    glDisable(GL_FOG);
+
 #endif
     printf("GLES1 texture/multitexture rgba=%u,%u,%u,%u\n",px[0],px[1],px[2],px[3]);
     assert(gles_egl_create(c1, 2, &c2));
