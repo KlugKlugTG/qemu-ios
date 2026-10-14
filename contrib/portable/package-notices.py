@@ -83,6 +83,11 @@ def main():
     parser.add_argument('--ndk', type=Path, help='NDK used for this Bionic engine')
     parser.add_argument('--source-reference', required=True, help='public corresponding-source HTTPS URL')
     args = parser.parse_args()
+    generator_revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
+    generator_name = Path(__file__).relative_to(ROOT).as_posix()
+    generator_data = Path(__file__).read_bytes()
+    if git_bytes(generator_revision, generator_name) != generator_data:
+        parser.error('commit notice generator before recording its revision')
     url = urlsplit(args.source_reference)
     if url.scheme != 'https' or not url.netloc or url.username or url.password:
         parser.error('source-reference must be HTTPS without embedded credentials')
@@ -228,6 +233,8 @@ def main():
         'Guest firmware, ROMs, NAND and private device state are not included.\n').encode()
     manifest = {'schema': 1, 'scope': 'selected native engine notices; distribution review unresolved',
                 'source_reference': args.source_reference, 'source_revision': revision,
+                'generator_revision': generator_revision,
+                'generator_script_sha256': sha(generator_data),
                 'source_reference_availability': 'publisher must verify before distribution',
                 'library_sha256': engine['library_sha256'], 'components': components,
                 'empty_archive_inputs': empty_archives,

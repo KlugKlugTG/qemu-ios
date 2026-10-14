@@ -247,6 +247,8 @@ def execute(plan, plan_sha):
                 names.append('libc++_shared.so')
             freeze_files(build, frozen, names)
             artifacts.append({'abi': abi, 'frozen': str(frozen), 'library_sha256': manifest['library_sha256'],
+                              'native_source_revision': manifest['source_revision'],
+                              'packaging_tool_revision': plan['source_revision'],
                               'manifest_sha256': sha(frozen / 'portable-manifest.json'), 'elf': elf,
                               'notice_manifest_sha256': sha(Path(target['notices']) / 'manifest.json'),
                               'sourcekit_manifest_sha256': sha(Path(target['sourcekit']) / 'bundle.json')
