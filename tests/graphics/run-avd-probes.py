@@ -12,7 +12,11 @@ parser.add_argument('--adb', required=True, type=Path)
 parser.add_argument('--frozen', required=True, type=Path)
 parser.add_argument('--output', required=True, type=Path)
 parser.add_argument('--core-diagnostic', action='store_true')
+parser.add_argument('--combine-only', action='store_true',
+                    help='Run only the raw two-unit GLES1 combine leaf; no full renderer qualification')
 args = parser.parse_args()
+if args.combine_only and args.core_diagnostic:
+    parser.error('--combine-only cannot be combined with --core-diagnostic')
 args.output.mkdir(parents=True, exist_ok=False)
 manifest = json.loads((args.frozen / 'manifest.json').read_text())
 adb = [str(args.adb), '-s', 'emulator-5554']
@@ -22,10 +26,11 @@ def call(arguments, timeout=20):
     return subprocess.run(adb + arguments, capture_output=True, text=True, timeout=timeout)
 
 
-probes = ['render', 'pixels']
+probes = ['combine'] if args.combine_only else ['render', 'pixels']
 if args.core_diagnostic:
     probes.insert(0, 'core-fbo')
-receipt = {'serial': 'emulator-5554', 'frozen': str(args.frozen), 'binaries': {}}
+receipt = {'serial': 'emulator-5554', 'frozen': str(args.frozen), 'binaries': {},
+           'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
 for key, command in [('page_size', ['shell', 'getconf', 'PAGE_SIZE']),
                      ('fingerprint', ['shell', 'getprop', 'ro.build.fingerprint'])]:
     result = call(command)
@@ -64,7 +69,8 @@ for probe, option in jobs:
         text = result.stdout + result.stderr
         expected = {'render': 'PASS private object names, packed depth/stencil',
                     'pixels': 'PASS multirow RGB stride+alignment',
-                    'core-fbo': 'PASS real GLES1 fixed-function pixel'}[probe]
+                    'core-fbo': 'PASS real GLES1 fixed-function pixel',
+                    'combine': 'PASS raw GLES1 two-unit ADD independent of active state'}[probe]
         passed = result.returncode == 0 and expected in text and 'ACTUAL_PROBE_EXIT=0' in text
         record = {'probe': label, 'adb_exit': result.returncode, 'passed': passed}
         if result.returncode == 0 and not passed:
@@ -76,5 +82,6 @@ for probe, option in jobs:
     results.append(record)
     print(json.dumps(record), flush=True)
 (args.output / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
-# Experimental core failures are diagnostic; both complete production probes must pass.
-raise SystemExit(0 if all(item['passed'] for item in results if item['probe'] in ('render', 'pixels')) else 2)
+# Experimental core failures are diagnostic. Leaf success cannot qualify full rendering.
+required = {'combine'} if args.combine_only else {'render', 'pixels'}
+raise SystemExit(0 if all(item['passed'] for item in results if item['probe'] in required) else 2)
