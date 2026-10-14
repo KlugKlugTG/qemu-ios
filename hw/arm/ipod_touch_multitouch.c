@@ -285,10 +285,11 @@ bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
     unsigned needed = begins + ends;
     if (begins) {
         needed += MT_MAX_FINGERS + 1; /* END for every contact, plus FULL_END */
-    } else if (!ends && motion) {
+    }
+    if (motion) {
         bool tail_motion = s->queued_count ? s->queued_motion[s->queued_count - 1]
                                           : s->next_frame && s->next_frame_motion;
-        needed = !tail_motion;
+        needed += !tail_motion;
     }
     return needed <= MT_REPORT_QUEUE_SIZE - used;
 #else
