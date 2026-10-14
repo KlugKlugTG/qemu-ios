@@ -8,6 +8,8 @@ cc -Wall -Wextra tests/graphics/egl-render.c -o "$output/egl-desktop" $(pkg-conf
 LIBGL_ALWAYS_SOFTWARE=1 "$output/egl-desktop"
 cc -Wall -Wextra -Wno-unused-function -DGLES_HOST_EGL_ES tests/graphics/egl-pixels.c -o "$output/egl-pixels" $(pkg-config --cflags --libs egl glesv2 glesv1_cm)
 LIBGL_ALWAYS_SOFTWARE=1 "$output/egl-pixels"
+cc -Wall -Wextra -Wno-unused-function -DGLES_HOST_EGL_ES tests/graphics/egl-limits.c -o "$output/egl-limits" $(pkg-config --cflags --libs egl glesv2 glesv1_cm)
+"$output/egl-limits"
 if [ "$#" -gt 1 ]; then
     ndk=$2
     for arch in aarch64 x86_64; do

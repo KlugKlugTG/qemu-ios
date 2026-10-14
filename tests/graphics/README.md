@@ -53,3 +53,8 @@ object with the same guest name receives separate native storage.
 
 See [AVD driver investigation](avd-drivers.md) for supported GPU modes, primary
 source explanation of the extension gate, and the pinned ANGLE fallback plan.
+
+`egl-limits` uses a bounded fake capability interface to reproduce a translator
+reporting eight texture units while accepting only four. It checks retained
+active state, prior errors and consistent cached integer/float queries. It is
+an error/state regression, not an actual rendering qualification.
