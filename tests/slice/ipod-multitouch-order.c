@@ -154,6 +154,11 @@ int main(void)
     assert(s.queued_count + !!s.next_frame <= MT_REPORT_QUEUE_SIZE);
     assert(!ipod_touch_multitouch_can_queue(&s, 1, 0, false));
     assert(!mt_any_down(&s));
+    if (s.queued_count + !!s.next_frame == MT_REPORT_QUEUE_SIZE) {
+        read_frame(&s, p); /* one spare slot; mixed motion + END needs two */
+        assert(ipod_touch_multitouch_can_queue(&s, 0, 1, false));
+        assert(!ipod_touch_multitouch_can_queue(&s, 0, 1, true));
+    }
     /* Reset frees every retained report; no canceled gesture survives it. */
     ipod_touch_multitouch_reset((DeviceState *)&s);
     assert(!s.next_frame && !s.queued_count && !mt_any_active(&s));
