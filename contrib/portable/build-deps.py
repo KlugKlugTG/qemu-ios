@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Pinned static/PIC dependencies for Linux or Bionic; outputs outside checkout."""
 import argparse,json,pathlib,subprocess,os,hashlib,urllib.request,tarfile,shutil,re
+from cache import digest,tool_version,check_cache
 p=argparse.ArgumentParser();p.add_argument('output',type=pathlib.Path);p.add_argument('--abi',choices=['linux','arm64-v8a','x86_64'],default='linux');p.add_argument('--ndk',type=pathlib.Path);p.add_argument('--meson',default='meson');p.add_argument('--only',choices=['ffmpeg']);p.add_argument('--prepare-only',action='store_true');a=p.parse_args()
 src=pathlib.Path(__file__).resolve().parents[2];out=a.output.resolve();out.mkdir(parents=True,exist_ok=True);prefix=out/'prefix';env=os.environ.copy()
 def run(args,cwd):print(' '.join(map(str,args)),flush=True);subprocess.run(list(map(str,args)),cwd=cwd,env=env,check=True)
@@ -25,6 +26,9 @@ if a.abi!='linux':
  crossfile.write_text(f"[binaries]\nc = '{cc}'\ncpp = '{cxx}'\nar = '{ar}'\nstrip = '{bin/'llvm-strip'}'\npkg-config = 'pkg-config'\n[host_machine]\nsystem = 'android'\ncpu_family = '{arch}'\ncpu = '{arch}'\nendian = 'little'\n[properties]\nneeds_exe_wrapper = true\n[built-in options]\nc_args = ['-fPIC']\ncpp_args = ['-fPIC']\n")
  cross=['--cross-file='+str(crossfile)]
 env['CC']=cc;env['CXX']=cxx;env['AR']=ar;env['RANLIB']=ranlib;env['CFLAGS']='-fPIC';env['PKG_CONFIG_LIBDIR']=str(prefix/'lib/pkgconfig');env['PKG_CONFIG_PATH']=str(prefix/'lib/pkgconfig')
+recipe={'schema':1,'abi':a.abi,'compiler':tool_version([cc]),'compiler_path':cc,'prefix':str(prefix),'ndk_properties_sha256':digest(a.ndk/'source.properties') if a.ndk else None,'archives':{p['name']:p['sha256'] for p in packages},'recipe_sha256':digest(__file__),'cache_guard_sha256':digest(src/'contrib/portable/cache.py'),'patches':{p.name:digest(p) for p in (src/'contrib/ffmpeg').glob('*.patch')},'meson':tool_version([a.meson]),'ninja':tool_version(['ninja']),'cflags':env['CFLAGS'],'library':'static/PIC'}
+markers=[prefix/'lib/libavcodec.a',prefix/'lib/libcrypto.a',prefix/'lib/libglib-2.0.a',out/'glib-build/build.ninja',out/'ffmpeg-build/ffbuild/config.mak',trees['libffi']/'Makefile',trees['pcre2']/'Makefile',trees['openssl']/'Makefile']
+check_cache(out,recipe,markers,'dependencies')
 def meson(name,opts):
  b=out/(name+'-build')
  if not (b/'build.ninja').exists():run([a.meson,'setup',b,trees[name],'--prefix='+str(prefix),'--libdir=lib','--default-library=static','-Dbuildtype=release','-Db_staticpic=true']+cross+opts,out)
@@ -58,5 +62,5 @@ if not (ff/'.lighttouch-patched').exists():
 if not (fb/'config.mak').exists():
  run([ff/'configure','--prefix='+str(prefix),'--libdir='+str(prefix/'lib'),'--cc='+cc,'--cxx='+cxx,'--ar='+ar,'--ranlib='+ranlib,'--target-os='+('android' if target=='android' else 'linux'),'--arch='+arch,'--disable-everything','--disable-autodetect','--disable-programs','--disable-doc','--disable-x86asm','--disable-avdevice','--disable-avformat','--disable-avfilter','--disable-swscale','--disable-swresample','--enable-decoder=aac,mp3,alac,h264','--enable-static','--disable-shared','--enable-pic']+(['--enable-cross-compile'] if target=='android' else []),fb)
 run(['make','-j2'],fb);run(['make','install'],fb)
-(out/'dependency-manifest.json').write_text(json.dumps({'schema':1,'abi':a.abi,'packages':packages,'built_packages':['ffmpeg'] if a.only else [p['name'] for p in packages],'ndk':str(a.ndk.resolve()) if a.ndk else None,'compiler':subprocess.check_output([cc,'--version'],env=env,text=True).splitlines()[0]},indent=2)+'\n')
+(out/'dependency-manifest.json').write_text(json.dumps({'schema':1,'abi':a.abi,'packages':packages,'recipe':recipe,'built_packages':['ffmpeg'] if a.only else [p['name'] for p in packages],'ndk':str(a.ndk.resolve()) if a.ndk else None,'compiler':subprocess.check_output([cc,'--version'],env=env,text=True).splitlines()[0]},indent=2)+'\n')
 print(prefix)
