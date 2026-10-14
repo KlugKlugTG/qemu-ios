@@ -21,7 +21,8 @@ static void gles_context_delete_objects(GLESHost *state)
     glDeleteTextures(1, &state->tex);
     glDeleteRenderbuffersEXT(1, &state->depth);
 #ifdef GLES_HOST_EGL_ES
-    if (state->stencil) glDeleteRenderbuffersEXT(1, &state->stencil);
+    if (state->stencil && state->stencil != state->depth)
+        glDeleteRenderbuffersEXT(1, &state->stencil);
 #endif
     CGLSetCurrentContext(NULL);
 }
