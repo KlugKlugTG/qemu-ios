@@ -2910,6 +2910,41 @@ static const uint8_t *gles_frame_lock(size_t *stride)
     return gles_platform_frame_lock(stride);
 }
 
+#include "gles-host-pixels.c.inc"
+
+static void gles_report_frame_pixels(const uint8_t *frame, size_t stride,
+                                     uint32_t width, uint32_t height,
+                                     unsigned bpp, bool bgra, hwaddr base,
+                                     const char *path)
+{
+    static int enabled = -1;
+    GlesFramePixels pixels;
+    uint64_t sequence = gh.presents + 1;
+
+    if (enabled < 0) {
+        const char *metrics = getenv("IT_GLES_FRAME_METRICS");
+        const char *verbose = getenv("IT_GLES_VERBOSE");
+        enabled = (metrics && atoi(metrics)) || (verbose && atoi(verbose));
+    }
+    if ((!enabled && !gles_prof) || (sequence != 1 && sequence % 60 != 0) ||
+        !gles_frame_pixels(frame, stride, width, height, bpp, bgra, &pixels)) {
+        return;
+    }
+    /* These are bytes actually copied, not a success assertion for GL or CA.
+     * Decode only the accepted dimensions, excluding row padding. In particular
+     * a transparent colored image differs from an opaque black one. */
+    fprintf(stderr, "[gles] copied frame=%" PRIu64 " api=%u fbo=%u base=0x%" PRIx64
+            " path=%s source=%s %ux%u stride=%zu pixels=%" PRIu64
+            " nonzero-rgb=%" PRIu64 " nonzero-alpha=%" PRIu64
+            " opaque=%" PRIu64 " mean-rgba=%" PRIu64 ",%" PRIu64 ",%" PRIu64
+            ",%" PRIu64 " rgba-fnv64=%016" PRIx64 "\n",
+            sequence, gh.api_version, gh.fbo, (uint64_t)base, path,
+            bpp == 2 ? "RGB565(alpha-implicit)" : bgra ? "BGRA" : "RGBA",
+            width, height, stride, pixels.pixels, pixels.nonzero_rgb,
+            pixels.nonzero_alpha, pixels.opaque, pixels.mean[0], pixels.mean[1],
+            pixels.mean[2], pixels.mean[3], pixels.hash);
+}
+
 static void gles_present_to_panel(void)
 {
     IPodTouchMachineState *nms;
@@ -2943,6 +2978,8 @@ static void gles_present_to_panel(void)
             cpu_physical_memory_write(fb + (hwaddr)y * GLES_FB_WIDTH * 4,
                                       src, GLES_FB_WIDTH * 4);
         }
+        gles_report_frame_pixels(frame, fstride, GLES_FB_WIDTH, GLES_FB_HEIGHT,
+                                 4, true, fb, "panel-IOSurface");
         gles_platform_frame_unlock();
         gh.presents++;
         gles_frame_end();
@@ -2976,6 +3013,9 @@ static void gles_present_to_panel(void)
         cpu_physical_memory_write(fb + (hwaddr)y * GLES_FB_WIDTH * 4,
                                   row, GLES_FB_WIDTH * 4);
     }
+    gles_report_frame_pixels(gh.readback, GLES_FB_WIDTH * 4,
+                             GLES_FB_WIDTH, GLES_FB_HEIGHT, 4, false, fb,
+                             "panel-readback");
     gh.presents++;
     gles_frame_end();
 }
@@ -3297,26 +3337,6 @@ static void gles_report_progress(void)
     gh.last_report_drawable = gh.draws_drawable;
     gh.last_report_offscreen = gh.draws_offscreen;
     gles_report_visibility();
-    {
-        /* What the DRAWABLE actually contains, read from the same buffer the
-         * present just wrote out. Distinguishes "the app drew nothing / drew
-         * the clear color" from "we drew a scene and lost it on the way to
-         * the panel" -- which no counter can. */
-        uint64_t r = 0, g = 0, b = 0;
-        unsigned i, n = gh.drawable_width * gh.drawable_height;
-
-        if (gh.readback) {
-            for (i = 0; i < n; i += 7) {
-                r += gh.readback[i * 4];
-                g += gh.readback[i * 4 + 1];
-                b += gh.readback[i * 4 + 2];
-            }
-            n = (n + 6) / 7;
-            fprintf(stderr, "[gles]   drawable mean rgb = %llu,%llu,%llu\n",
-                    (unsigned long long)(r / n), (unsigned long long)(g / n),
-                    (unsigned long long)(b / n));
-        }
-    }
 
     /*
      * The accounting line. Percentages are of WALL time over the same 60
@@ -3534,6 +3554,8 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                     return -1;
                 }
             }
+            gles_report_frame_pixels(frame, fstride, rw, rh, bpp, bgra, base,
+                                     "surface-IOSurface");
             gles_dump_frame(frame, fstride, rw, rh, bgra);
             gles_platform_frame_unlock();
             gh.presents++;
@@ -3639,6 +3661,8 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                 return -1;
             }
         }
+        gles_report_frame_pixels(gh.readback, (size_t)rw * bpp, rw, rh,
+                                 bpp, bgra, base, "surface-readback");
         /* The dump writes 32-bit pixels; a 565 frame is not its format. */
         if (bpp == 4) {
             gles_dump_frame(gh.readback, (size_t)rw * 4, rw, rh, bgra);
