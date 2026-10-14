@@ -301,6 +301,7 @@ typedef struct {
     uint32_t panel_w, panel_h;   /* "panel=WxH": opt-in larger panel (0: the shipped 320x480) */
     char gid_blobs[PATH_MAX];
     bool aes_uid_engine;             /* aes-uid=engine; see ipod_touch_aes.c AES_GO */
+    bool aes_mode_readback;          /* aes-uid=hardware; see ipod_touch_aes.c */
     bool direct_iboot_explicit, direct_llb_explicit;
     uint32_t time_dilation;
     bool time_dilation_explicit;

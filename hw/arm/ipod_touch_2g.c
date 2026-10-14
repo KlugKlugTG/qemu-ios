@@ -774,19 +774,22 @@ static void ipod_touch_set_gid_blobs(Object *obj, const char *value, Error **err
 
 static char *ipod_touch_get_aes_uid(Object *obj, Error **errp)
 {
-    return g_strdup(IPOD_TOUCH_MACHINE(obj)->aes_uid_engine ? "engine" : "legacy");
+    IPodTouchMachineState *nms = IPOD_TOUCH_MACHINE(obj);
+    return g_strdup(nms->aes_mode_readback ? "hardware" : nms->aes_uid_engine ? "engine" : "legacy");
 }
 
 static void ipod_touch_set_aes_uid(Object *obj, const char *value, Error **errp)
 {
     IPodTouchMachineState *nms = IPOD_TOUCH_MACHINE(obj);
 
-    if (strcmp(value, "engine") && strcmp(value, "legacy")) {
-        error_setg(errp, "aes-uid must be 'engine' or 'legacy'");
+    if (strcmp(value, "hardware") && strcmp(value, "engine") && strcmp(value, "legacy")) {
+        error_setg(errp, "aes-uid must be 'hardware', 'engine' or 'legacy'");
         return;
     }
-    nms->aes_uid_engine = !strcmp(value, "engine");
+    nms->aes_mode_readback = !strcmp(value, "hardware");
+    nms->aes_uid_engine = nms->aes_mode_readback || !strcmp(value, "engine");
     ipod_touch_aes_set_uid_engine(nms->aes_uid_engine);
+    ipod_touch_aes_set_mode_readback(nms->aes_mode_readback);
 }
 
 static char *ipod_touch_get_panel(Object *obj, Error **errp)
@@ -3721,8 +3724,9 @@ static void ipod_touch_machine_class_init(ObjectClass *klass, const void *data)
     object_class_property_add_str(klass, "aes-uid", ipod_touch_get_aes_uid, ipod_touch_set_aes_uid);
     object_class_property_set_description(klass, "aes-uid",
         "UID (and non-KBAG GID) AES operations: 'legacy' (default; keeps keys existing images "
-        "were made with) or 'engine' (processed like the hardware, with a stand-in key; 4.x "
-        "data protection needs it)");
+        "were made with), 'engine' (processed like the hardware, with a stand-in key; 4.x "
+        "data protection needs it) or 'hardware' (the engine, and the mode register reads "
+        "back, so each request has the direction the guest set; images made for it only)");
     object_class_property_add_str(klass, "gid-blobs", ipod_touch_get_gid_blobs, ipod_touch_set_gid_blobs);
     object_class_property_set_description(klass, "gid-blobs",
         "File of 64-byte KBAG || IV-key records extending the AES engine's GID table");

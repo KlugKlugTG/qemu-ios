@@ -151,7 +151,11 @@ keychain items were encrypted under the legacy keys. Every device `imgtools/devi
 (`"machine": {"aes-uid": "engine"}`); `regress.py --device` applies it. nand-current and devices adopted
 from it have no such lock and keep `legacy`. A fresh 7E18 with the activation hook passes all eight default
 checks this way, and a generic-password keychain item added in one boot reads back after a clean
-shutdown and reboot.
+shutdown and reboot. `aes-uid=hardware` is the engine with the mode register (0x14) reading back: iBoot sets
+the mode with read-modify-write, so under `engine` (0x14 reads 0) every request loses its encrypt bit, and
+iBoot's UID derivation of the SHSH wrapping key (its first request, the seed `db1f5b33...0661`) decrypts.
+NORs made for that (LightTouchMac's N72NOR before it moved to `hardware`) wrap their SHSH with the decrypt
+and boot only under `engine` or `legacy`; under `hardware` iBoot stops with "failed to load device tree".
 
 ### 8C148: GL (2026-09-28)
 

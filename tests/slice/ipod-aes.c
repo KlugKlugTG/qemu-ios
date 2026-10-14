@@ -110,6 +110,29 @@ static void engine(void) {
  }
  puts("PASS: aes-uid=engine UID and short-GID operations match OpenSSL with the stand-in keys");
 }
+/* aes-uid=hardware: 0x14 reads back, so iBoot's read-modify-write of the mode (7E18: 6, read | 1, read, read | 8)
+   keeps the encrypt bit and its UID derivation encrypts; with engine alone 0x14 reads 0 and it decrypts. */
+static void mode_readback(void) {
+ static uint8_t mem[0x1000];
+ const uint8_t seed[16]={0xdb,0x1f,0x5b,0x33,0x60,0x6c,0x5f,0x1c,0x19,0x34,0xaa,0x66,0x58,0x9c,0x06,0x61};
+ for(int hw=0;hw<2;hw++){
+  uint8_t ref[16];AES_KEY k;
+  if(hw){AES_set_encrypt_key(key_uid,128,&k);AES_encrypt(seed,ref,&k);}
+  else{AES_set_decrypt_key(key_uid,128,&k);AES_decrypt(seed,ref,&k);}
+  memset(mem,0,sizeof(mem));memcpy(mem+0x100,seed,16);flat=mem;
+  ipod_touch_aes_set_uid_engine(true);ipod_touch_aes_set_mode_readback(hw);
+  IPodTouchAESState s={.keytype=AESUID,.insize=16,.outaddr=0x100,.inaddr=0x200};
+  W(AES_KEYLEN,6);
+  W(AES_KEYLEN,ipod_touch_aes_read(&s,AES_KEYLEN,4)|1);
+  W(AES_KEYLEN,ipod_touch_aes_read(&s,AES_KEYLEN,4));
+  W(AES_KEYLEN,ipod_touch_aes_read(&s,AES_KEYLEN,4)|8);
+  assert(ipod_touch_aes_read(&s,AES_KEYLEN,4)==(hw?0xfu:0));
+  W(AES_GO,1);
+  assert(!memcmp(mem+0x200,ref,16)&&s.status==15);
+  ipod_touch_aes_set_uid_engine(false);ipod_touch_aes_set_mode_readback(false);flat=NULL;
+ }
+ puts("PASS: aes-uid=hardware reads the mode back and iBoot's UID derivation encrypts; engine alone decrypts");
+}
 
 /* Stock iBSS uses a single request larger than the former 16 MiB guard.
    Compare all bytes, including the plain final tail, with independent CBC. */
@@ -165,5 +188,6 @@ int main(void) {
  }
  check(0x0ff290ac,AESCustom,128,true,false);
  engine();
+ mode_readback();
  puts("PASS: three narrowly preserved boot payloads; unrelated size, source, UID and fourth custom operation decrypt correctly");
 }

@@ -94,5 +94,6 @@ typedef struct IPodTouchAESState
 
 bool ipod_touch_aes_set_gid_blobs(const uint8_t *data, size_t size);
 void ipod_touch_aes_set_uid_engine(bool on);
+void ipod_touch_aes_set_mode_readback(bool on);
 
 #endif
