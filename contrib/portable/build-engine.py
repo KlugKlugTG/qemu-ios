@@ -3,7 +3,8 @@
 import argparse,pathlib,os,subprocess,shutil,importlib.util
 from cache import digest,tool_version,check_cache
 spec=importlib.util.spec_from_file_location('engine_cache',pathlib.Path(__file__).with_name('engine-cache.py'));guard=importlib.util.module_from_spec(spec);spec.loader.exec_module(guard)
-p=argparse.ArgumentParser();p.add_argument('output',type=pathlib.Path);p.add_argument('--abi',choices=['linux','arm64-v8a','x86_64'],default='linux');p.add_argument('--prefix',type=pathlib.Path,required=True);p.add_argument('--crypto-prefix',type=pathlib.Path,required=True);p.add_argument('--ndk',type=pathlib.Path);p.add_argument('--configure-only',action='store_true');p.add_argument('--source-update',action='store_true',help='Allow a clean source revision change with identical configuration/tools/dependencies');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('output',type=pathlib.Path);p.add_argument('--abi',choices=['linux','arm64-v8a','x86_64'],default='linux');p.add_argument('--prefix',type=pathlib.Path,required=True);p.add_argument('--crypto-prefix',type=pathlib.Path,required=True);p.add_argument('--ndk',type=pathlib.Path);p.add_argument('--configure-only',action='store_true');p.add_argument('--source-update',action='store_true',help='Allow a clean source revision change with identical configuration/tools/dependencies');p.add_argument('--android-api',type=int,choices=[28,29],default=28,help='Engine minimum Android API; 29 is an isolated native ELF TLS experiment requiring a fresh build cache');a=p.parse_args()
+if a.abi=='linux' and a.android_api!=28:p.error('--android-api is an Android engine option')
 src=pathlib.Path(__file__).resolve().parents[2];out=a.output.resolve();out.mkdir(parents=True,exist_ok=True);prefix=a.prefix.resolve();env=os.environ.copy()
 crypto_prefix=a.crypto_prefix.resolve()
 env['PKG_CONFIG_PATH']=str(crypto_prefix/'lib/pkgconfig')+':'+str(prefix/'lib/pkgconfig')
@@ -16,7 +17,7 @@ if a.abi!='linux':
  bin=a.ndk.resolve()/'toolchains/llvm/prebuilt/linux-x86_64/bin';arch='aarch64' if a.abi=='arm64-v8a' else 'x86_64';triple='aarch64-linux-android' if arch=='aarch64' else 'x86_64-linux-android'
  env['PATH']=str(bin)+':'+env['PATH']
  for key,name in [('AR','llvm-ar'),('RANLIB','llvm-ranlib'),('NM','llvm-nm'),('STRIP','llvm-strip'),('READELF','llvm-readelf')]:env[key]=str(bin/name)
- args+=['--cross-prefix=','--host-cc=/usr/bin/cc','--cpu='+arch,'--cc='+str(bin/(triple+'28-clang')),'--cxx='+str(bin/(triple+'28-clang++')),'--disable-containers']
+ args+=['--cross-prefix=','--host-cc=/usr/bin/cc','--cpu='+arch,'--cc='+str(bin/(triple+str(a.android_api)+'-clang')),'--cxx='+str(bin/(triple+str(a.android_api)+'-clang++')),'--disable-containers']
 revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=src,text=True).strip()
 status=subprocess.check_output(['git','status','--porcelain=v1','--untracked-files=all'],cwd=src,text=True)
 if status:raise RuntimeError('Commit source changes before a reproducible engine build: '+status)
