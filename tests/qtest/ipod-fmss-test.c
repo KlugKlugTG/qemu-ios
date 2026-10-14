@@ -8,6 +8,13 @@
 #define RAM 0x08010000ULL
 static char *rom_path, *nor_path, *nand_path;
 
+static QTestState *start_board_with(const char *overlay)
+{
+    return qtest_initf("-machine iPod-Touch,bootrom=%s,nor=%s,nand=%s,nandrw=%s "
+                       "-display none -audio driver=none -nic none -d unimp",
+                       rom_path, nor_path, nand_path, overlay);
+}
+
 static QTestState *start_board(char **overlay)
 {
     *overlay = g_dir_make_tmp("fmss-overlay-XXXXXX", NULL);
@@ -1591,6 +1598,88 @@ static void descriptor_pointer_snapshot(void)
     unlink(state); rmdir(overlay); g_free(overlay);
 }
 
+/* The stock kernel's block erase as the sequencer issues it (FMCTRL0 chip enable, 0x60, row in FMADDR0, 0xD0), and
+ * the clean status the driver takes for a blank page, on a physical image. */
+static uint32_t run_status(QTestState *qts)
+{
+    /* The driver reads CSSTATUS after the program it started: an empty one here. */
+    qtest_writel(qts, RAM + 0x4800, 0);
+    qtest_writel(qts, RAM + 0x4804, 0);
+    qtest_writel(qts, FMSS + 0xc04, RAM + 0x4800);
+    qtest_writel(qts, FMSS + 0xc00, 0xffb5);
+    uint32_t status = qtest_readl(qts, FMSS + 0xc30);
+    qtest_writel(qts, FMSS + 0xc00, 8);
+    return status;
+}
+
+static void erase_block_and_clean_status(void)
+{
+    char *overlay;
+    uint8_t pattern[4096], meta[12], data[4096], spare[12];
+    memset(pattern, 0x3c, sizeof(pattern));
+    memset(meta, 0x11, sizeof(meta));
+    QTestState *qts = start_board(&overlay);
+
+    read_page(qts, 0, 130, data, spare);
+    assert_blank(data, spare, true);
+    g_assert_cmphex(run_status(qts), ==, 1u << 29);
+
+    program(qts, 0, 130, pattern, meta);
+    program(qts, 0, 131, pattern, meta);
+    program(qts, 1, 130, pattern, meta);
+    program(qts, 0, 300, pattern, meta);
+    read_page(qts, 0, 130, data, spare);
+    g_assert_cmpmem(data, sizeof(data), pattern, sizeof(pattern));
+    g_assert_cmphex(run_status(qts), ==, 1);
+
+    static const uint32_t erase[] = {
+        0x01000000, 1u << 1,     /* FMCTRL0: chip enable 0 */
+        0x01000008, 0x60,
+        0x0100000c, 130,         /* any page of block 1 */
+        0x01000008, 0xd0,
+        0, 0
+    };
+    for (unsigned i = 0; i < G_N_ELEMENTS(erase); i++) {
+        qtest_writel(qts, RAM + 0x4000 + 4 * i, erase[i]);
+    }
+    /* A clean read's status belongs to its own program run: the erase run after it reports plain completion. */
+    read_page(qts, 0, 1000, data, spare);
+    g_assert_cmphex(run_status(qts), ==, 1u << 29);
+    qtest_writel(qts, FMSS + 0xc04, RAM + 0x4000);
+    qtest_writel(qts, FMSS + 0xc00, 0xffb5);
+    g_assert_cmphex(qtest_readl(qts, FMSS + 0xc30), ==, 1);
+    qtest_writel(qts, FMSS + 0xc00, 8);
+
+    for (unsigned page = 130; page <= 131; page++) {
+        read_page(qts, 0, page, data, spare);
+        assert_blank(data, spare, true);
+        g_assert_cmphex(run_status(qts), ==, 1u << 29);
+    }
+    /* Other chips and blocks keep their pages. */
+    read_page(qts, 1, 130, data, spare);
+    g_assert_cmpmem(data, sizeof(data), pattern, sizeof(pattern));
+    read_page(qts, 0, 300, data, spare);
+    g_assert_cmpmem(data, sizeof(data), pattern, sizeof(pattern));
+    g_assert_cmphex(run_status(qts), ==, 1);
+    /* Programming the erased block works again, and the erase is durable. */
+    program(qts, 0, 131, pattern, meta);
+    read_page(qts, 0, 131, data, spare);
+    g_assert_cmpmem(data, sizeof(data), pattern, sizeof(pattern));
+    qtest_quit(qts);
+
+    g_autofree char *marker = g_build_filename(overlay, "cs0", "blk1.erased", NULL);
+    g_assert_true(g_file_test(marker, G_FILE_TEST_EXISTS));
+    qts = start_board_with(overlay);
+    read_page(qts, 0, 130, data, spare);
+    assert_blank(data, spare, true);
+    read_page(qts, 0, 131, data, spare);
+    g_assert_cmpmem(data, sizeof(data), pattern, sizeof(pattern));
+    qtest_quit(qts);
+    g_autofree char *cmd = g_strdup_printf("rm -rf '%s'", overlay);
+    g_assert_cmpint(system(cmd), ==, 0);
+    g_free(overlay);
+}
+
 int main(int argc, char **argv)
 {
     g_autofree char *rom = g_malloc0(131072);
@@ -1610,6 +1699,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ipod/fmss/physical-snapshot", physical_snapshot);
     qtest_add_func("/ipod/fmss/generated-snapshot", generated_snapshot);
     qtest_add_func("/ipod/fmss/register-copy", register_copy);
+    qtest_add_func("/ipod/fmss/erase-block-clean-status", erase_block_and_clean_status);
     qtest_add_func("/ipod/fmss/descriptor-load", descriptor_load);
     qtest_add_func("/ipod/fmss/descriptor-pointer-backstep", descriptor_pointer_backstep);
     qtest_add_func("/ipod/fmss/descriptor-pointer-snapshot", descriptor_pointer_snapshot);

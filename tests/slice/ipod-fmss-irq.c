@@ -36,6 +36,8 @@ typedef struct {
     bool overlay_indexed;
     uint8_t *page_buffer, *page_spare_buffer;
     QEMUTimer *completion_timer;
+    uint32_t reg_cs_status;
+    bool read_clean;
 } IPodTouchFMSSState;
 static int level;
 static gint key_compare(gconstpointer a, gconstpointer b) {

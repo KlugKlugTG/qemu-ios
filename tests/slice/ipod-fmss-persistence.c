@@ -42,7 +42,10 @@ typedef struct {
     uint32_t reg_cs_buf_addr, reg_pages_in_addr, reg_num_pages;
     uint32_t reg_pages_out_addr, reg_page_spare_out_addr;
     uint8_t page_buffer[4096], page_spare_buffer[64];
+    uint32_t reg_cs_status;
+    bool read_clean;
 } IPodTouchFMSSState;
+#define FMSS_STATUS_DONE 0x1
 typedef IPodTouchFMSSState DeviceState;
 #define IPOD_TOUCH_FMSS(s) (s)
 static void qemu_irq_lower(int irq) {}

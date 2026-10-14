@@ -527,5 +527,53 @@ int main(void) {
         run(immediate_and, sizeof(immediate_and));
         assert(ldl_le_p(mem + 0x9a00) == (0x12345679u & masks[j]));
     }
-    puts("PASS: register OR config, D54 chunk loops, bounded opcode14 right16, opcode0A forms, FMSS opcode03 LE DMA/rejection, opcode06 copies/rejection, D18 page counter, D28 chunks, D4C parameter, READ ID programs of 7E18 and 8C148, unknown op stops");
+    /* The stock 7E18 kernel's BLOCK ERASE program (AppleS5L8720xFMSS, VA 0xc074d328): one erase per D10 chip /
+     * D0C row entry, counting D18 down to zero in place. */
+    static const uint32_t erase7E18[] = {
+        0x01000c0cu,0x000000ffu,0x01000c10u,0x00000001u,0x01000c58u,0x00000004u,0x01000c4cu,0x00000288u,
+        0x01000004u,0x033338e0u,0x01000048u,0x0ff00ffeu,0x05000000u,0x00000801u,0x04010d4cu,0xffffffffu,
+        0x0b000001u,0x00000000u,0x02000000u,0x00000000u,0x05060000u,0x00000000u,0x01000d78u,0xcafebabeu,
+        0x01000d7cu,0xcafebabeu,0x04000d10u,0xffffffffu,0x03020000u,0x00000000u,0x0c000000u,0x00000004u,
+        0x02000d10u,0x00000000u,0x05030000u,0x00000001u,0x13030002u,0x00000000u,0x13000003u,0x00000001u,
+        0x04010000u,0xfffffe01u,0x0b010000u,0x00000000u,0x02010000u,0x00000000u,0x06020003u,0x00000000u,
+        0x0a020006u,0x00000000u,0x17020000u,0x00000118u,0x01000008u,0x00000070u,0x07000000u,0x00000000u,
+        0x01000048u,0x00000002u,0x01000004u,0x000000cau,0x070c0040u,0x00000040u,0x0402004cu,0x00000001u,
+        0x01000004u,0x00030020u,0x01000048u,0x01800000u,0x0e020000u,0x00000288u,0x0b060003u,0x00000000u,
+        0x01000008u,0x00000060u,0x07000000u,0x00000000u,0x01000048u,0x00000002u,0x04010d0cu,0xffffffffu,
+        0x03020001u,0x00000000u,0x0c010001u,0x00000004u,0x02010d0cu,0x00000000u,0x0100002cu,0x00000002u,
+        0x0202000cu,0x00000000u,0x01000004u,0x00000001u,0x07010000u,0x00000000u,0x01000048u,0x00000004u,
+        0x01000008u,0x000000d0u,0x07000000u,0x00000000u,0x01000048u,0x00000002u,0x04020d18u,0xffffffffu,
+        0x0d020002u,0x00000001u,0x02020d18u,0x00000000u,0x0e020000u,0x00000068u,0x05020000u,0x00000001u,
+        0x05030000u,0x00000008u,0x0e030000u,0x000001e8u,0x0d030003u,0x00000001u,0x17030000u,0x00000270u,
+        0x13020002u,0x00000001u,0x06000002u,0x00000000u,0x0a000006u,0x00000000u,0x17000000u,0x000001d0u,
+        0x13000002u,0x00000001u,0x04010000u,0xfffffe01u,0x0b010000u,0x00000000u,0x02010000u,0x00000000u,
+        0x01000008u,0x00000070u,0x07000000u,0x00000000u,0x01000048u,0x00000002u,0x01000004u,0x000000cau,
+        0x070c0040u,0x00000040u,0x0404004cu,0x00000001u,0x01000004u,0x00030020u,0x01000048u,0x01800000u,
+        0x0e040000u,0x00000288u,0x0e030000u,0x000001d0u,0x04010000u,0xfffffe01u,0x02010000u,0x00000000u,
+        0x00000000u,0x00000000u,0x04020c3cu,0xffffffffu,0x04000000u,0x000001feu,0x14000000u,0x00000001u,
+        0x0a060006u,0xffffff00u,0x0b060000u,0x00000000u,0x04000c50u,0x00000001u,0x17000000u,0x000002d0u,
+        0x01000c50u,0x00000001u,0x0b060006u,0x08000000u,0x04010000u,0xfffffe01u,0x02010000u,0x00000000u,
+        0x0b060006u,0x10000000u,0x00000000u,0x00000000u
+    };
+    {
+        IPodTouchFMSSState s = {.reg_cs_script = 0x1000, .reg_cs_buf_addr = 0x3000,
+                                .reg_pages_in_addr = 0x3100, .reg_num_pages = 3};
+        static const uint32_t ces[] = {2, 0, 3}, rows[] = {130, 523648, 5};
+        memset(mem, 0, sizeof(mem));
+        memcpy(mem + 0x1000, erase7E18, sizeof(erase7E18));
+        for (unsigned i = 0; i < 3; i++) {
+            stl_le_p(mem + 0x3000 + 4 * i, ces[i]);
+            stl_le_p(mem + 0x3100 + 4 * i, rows[i]);
+        }
+        erases = 0;
+        descriptor_reads = 0;
+        fmss_run_script(&s);
+        assert(erases == 3);
+        for (unsigned i = 0; i < 3; i++) {
+            assert(erase_select[i] == 1u << ces[i]);
+            assert(erase_row[i] == rows[i]);
+        }
+        assert(s.reg_num_pages == 0);
+    }
+    puts("PASS: register OR config, D54 chunk loops, bounded opcode14 right16, opcode0A forms, FMSS opcode03 LE DMA/rejection, opcode06 copies/rejection, D18 page counter, D28 chunks, D4C parameter, READ ID programs of 7E18 and 8C148, unknown op stops, stock BLOCK ERASE program");
 }
