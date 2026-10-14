@@ -222,7 +222,9 @@ int qemu_ios_portable_board_at(int index, QemuIosPortableBoard *out);
 bool qemu_ios_ui_paused(void);
 /* Copy holds the frame mutex until memcpy completes. On BUFFER_SMALL,
  * metadata describes the required buffer; serial is not acknowledged.
- * last_serial is caller's previous frame; timestamp is publication clock. */
+ * last_serial is caller's previous frame. timestamp_ns is publication time:
+ * host CLOCK_MONOTONIC nanoseconds on Linux/Bionic, continuing while paused.
+ * It is not a wall-clock epoch or VM virtual time. */
 int qemu_ios_portable_frame_copy(void *pixels, size_t capacity,
     uint64_t last_serial, QemuIosPortableFrame *out);
 /* Entire batch validates before injection; stable IDs survive slot reuse.
