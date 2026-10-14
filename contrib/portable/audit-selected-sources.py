@@ -22,10 +22,13 @@ if manifest['source_dirty']:
 revision = manifest['source_revision']
 objects = {pathlib.Path(name).resolve() for name in manifest['link_inputs']
            if name.endswith('.o')}
+archive_objects = {pathlib.Path(name).resolve()
+                   for members in manifest.get('archive_member_inputs', {}).values()
+                   for name in members if name.endswith('.o')}
 selected = {}
 for entry in json.loads((build / 'compile_commands.json').read_text()):
     obj = (build / entry['output']).resolve()
-    if obj in objects:
+    if obj in objects | archive_objects:
         selected[obj] = (pathlib.Path(entry['directory']) / entry['file']).resolve()
 for name, path in [('qemu-ios-entry', src / 'contrib/ios-app/qemu-ios-entry.c'),
                    ('qemu-ios-ui', src / 'contrib/ios-app/qemu-ios-ui.c')]:
@@ -63,13 +66,13 @@ def notice(path):
     return relative, {'sha256': expected, 'spdx': spdx,
                       'gpl2_only_text_review_candidate': only_text}
 
-sources, included = {}, {}
+sources, archive_candidates, included = {}, {}, {}
 for obj, path in selected.items():
     item = notice(path)
     if item:
         name, info = item
         info['object'] = str(obj)
-        sources[name] = info
+        (sources if obj in objects else archive_candidates)[name] = info
 for path in sorted(headers):
     item = notice(path)
     if item:
@@ -80,6 +83,8 @@ result = {'schema': 2, 'source_revision': revision,
           'selected_source_count': len(sources),
           'selected_include_count': len(included),
           'selected_sources': sources, 'selected_includes': included,
+          'archive_source_candidates': archive_candidates,
+          'archive_candidate_limitation': 'Thin archive members are a superset of extracted linked objects; retain notices/source for all supplied members without claiming every member entered the engine.',
           'linked_libraries': manifest.get('resolved_libraries', {}),
           'limitation': 'Source/header notice inventory only. Non-SPDX and generated sources, external archives, application closure and distribution obligations require review. No distribution eligibility claim.'}
 output = a.output or build / 'selected-license-inventory.json'
