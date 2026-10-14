@@ -6,6 +6,8 @@
 #include "hw/core/cpu.h"
 #include "target/arm/cpu.h"
 #include "system/runstate.h"
+#include "system/rtc.h"
+#include "qemu/cutils.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
 
@@ -298,10 +300,25 @@ static uint8_t pmu_bcd(unsigned v)
  * (weekday/day/month/year here) and 0x59..0x5b read zero: a date that moved
  * with bits 8..31 of the counter, days per boot.
  */
+/* QEMU's RTC (-rtc base=, clock=), in Unix seconds: the host's UTC by default. */
+static time_t pmu_rtc_base(void)
+{
+    struct tm tm;
+
+    qemu_get_timedate(&tm, 0);
+    return mktimegm(&tm);
+}
+
+/* The board's clock: QEMU's RTC, moved to the machine's rtc-epoch if it has one. */
+static uint32_t pmu_rtc_now(Pcf50633State *s)
+{
+    return (uint32_t)(pmu_rtc_base() + s->rtc_offset);
+}
+
 static uint8_t pmu_bcd_rtc_read(Pcf50633State *s, uint8_t reg)
 {
     if (reg == PMU_BCD_RTC || s->rtc_latch == 0) {
-        s->rtc_latch = (uint32_t)(time(NULL) + s->rtc_offset);
+        s->rtc_latch = pmu_rtc_now(s);
     }
     time_t t = s->rtc_latch;
     struct tm tm;
@@ -313,7 +330,7 @@ static uint8_t pmu_bcd_rtc_read(Pcf50633State *s, uint8_t reg)
 
 void pcf50633_set_rtc_epoch(Pcf50633State *s, uint64_t epoch)
 {
-    s->rtc_offset = epoch ? (int64_t)epoch - time(NULL) : 0;
+    s->rtc_offset = epoch ? (int64_t)epoch - pmu_rtc_base() : 0;
     s->rtc_latch = 0;
 }
 
@@ -339,7 +356,7 @@ static uint8_t pcf50633_recv(I2CSlave *i2c)
         // without this it can observe a torn counter. (Read out of order,
         // which nobody does, still answers the time rather than zero.)
         if (reg == s->rtc_reg || s->rtc_latch == 0) {
-            s->rtc_latch = (uint32_t)(time(NULL) + s->rtc_offset);
+            s->rtc_latch = pmu_rtc_now(s);
         }
         res = (s->rtc_latch >> (8 * (reg - s->rtc_reg))) & 0xff;
         goto done;

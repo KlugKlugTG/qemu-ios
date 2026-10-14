@@ -3,7 +3,7 @@
  * SLICE include/hw/arm/ipod_touch_pcf50633_pmu.h define PMU_
  * SLICE hw/arm/ipod_touch_pcf50633_pmu.c range static const uint16_t battery_curve | unsigned pcf50633_adc_for_level(
  * SLICE include/hw/arm/ipod_touch_pcf50633_pmu.h typedef Pcf50633State
- * SLICE hw/arm/ipod_touch_pcf50633_pmu.c fn pmu_update_backlight pmu_event_base pmu_event_count pmu_mask_base pmu_set_ap_power pmu_update_irq pmu_latch_event pmu_adc_complete pcf50633_adc_for_level pcf50633_level_for_adc pmu_charge_active pmu_apply_battery_adc pcf50633_update_battery pcf50633_set_battery_adc pcf50633_set_battery_level pcf50633_set_battery_drain pcf50633_set_charging_mode pcf50633_set_usb_cable pcf50633_set_exton1 pmu_adc_command pmu_bcd pmu_bcd_rtc_read pcf50633_recv pcf50633_guest_shutdown_confirmed pcf50633_guest_shutdown pcf50633_send pmu_backlight_level pcf50633_reset pcf50633_post_load pcf50633_init
+ * SLICE hw/arm/ipod_touch_pcf50633_pmu.c fn pmu_update_backlight pmu_event_base pmu_event_count pmu_mask_base pmu_set_ap_power pmu_update_irq pmu_latch_event pmu_adc_complete pcf50633_adc_for_level pcf50633_level_for_adc pmu_charge_active pmu_apply_battery_adc pcf50633_update_battery pcf50633_set_battery_adc pcf50633_set_battery_level pcf50633_set_battery_drain pcf50633_set_charging_mode pcf50633_set_usb_cable pcf50633_set_exton1 pmu_adc_command pmu_bcd pmu_rtc_base pmu_rtc_now pmu_bcd_rtc_read pcf50633_recv pcf50633_guest_shutdown_confirmed pcf50633_guest_shutdown pcf50633_send pmu_backlight_level pcf50633_reset pcf50633_post_load pcf50633_init
  */
 #include <assert.h>
 #define trace_event_get_state_backends(id) 0
@@ -18,6 +18,8 @@
 typedef struct {int unused;} I2CSlave;
 typedef struct {bool pending;int64_t deadline;} QEMUTimer;
 typedef int *qemu_irq;
+static void qemu_get_timedate(struct tm *tm, int offset) { time_t t = time(NULL) + offset; gmtime_r(&t, tm); }
+#define mktimegm timegm
 typedef void Object;
 #define DEVICE(p) (p)
 static int init_irq;
