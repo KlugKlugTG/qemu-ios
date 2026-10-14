@@ -10,6 +10,13 @@ import argparse, json, pathlib, shlex, subprocess, hashlib
 p=argparse.ArgumentParser();p.add_argument('build',type=pathlib.Path);p.add_argument('--output',type=pathlib.Path)
 a=p.parse_args();build=a.build.resolve();src=pathlib.Path(__file__).resolve().parents[2]
 output=a.output.resolve() if a.output else build/'libqemu-arm.so'
+previous_path=build/'portable-manifest.json'
+previous=json.loads(previous_path.read_text()) if previous_path.exists() else {}
+previous_manifest_sha256=hashlib.sha256(previous_path.read_bytes()).hexdigest() if previous_path.exists() else None
+if previous_manifest_sha256:
+ history_dir=build/'manifests';history_dir.mkdir(exist_ok=True)
+ archived=history_dir/(previous_manifest_sha256+'.json')
+ if not archived.exists():archived.write_bytes(previous_path.read_bytes())
 commands=json.loads((build/'compile_commands.json').read_text())
 entry=next(c for c in commands if c['file'].endswith('/system/main.c'))
 compile_args=shlex.split(entry['command']); compiler=compile_args[:1]
@@ -82,6 +89,14 @@ for arg in args:
  candidate=candidate.resolve()
  resolved_libraries[arg]=str(candidate)
  link_inputs[str(candidate)]=hashlib.sha256(candidate.read_bytes()).hexdigest()
-manifest={'schema':1,'source_status':source_status,'source_inputs':source_inputs,'link_inputs':link_inputs,'resolved_libraries':resolved_libraries,'tools':{'compiler':subprocess.check_output(compiler+['--version'],cwd=build,text=True).splitlines()[0],'ninja':subprocess.check_output(['ninja','--version'],text=True).strip()},'source_revision':revision,'source_dirty':dirty,'api_major':2,'portable_version':1,'library_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'link_argv':args,'inputs':{str(path.relative_to(src)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [src/'contrib/ios-app/qemu-ios-ui.h',src/'contrib/ios-app/qemu-ios-ui.c',src/'contrib/macos-app/qemu-macos-extras.c',src/'contrib/portable/dependencies.json']}}
+object_provenance={}
+for name,sha in link_inputs.items():
+ if not name.endswith('.o'):continue
+ if previous.get('link_inputs',{}).get(name)==sha:
+  object_provenance[name]=previous.get('object_provenance',{}).get(name,{'recorded_engine_revision':previous['source_revision'],'object_sha256':sha,'origin':'unchanged object from earlier recorded engine'})
+ else:object_provenance[name]={'recorded_engine_revision':revision,'object_sha256':sha,'origin':'new or changed object in current engine'}
+meson_version=json.loads((build/'meson-info/meson-info.json').read_text())['meson_version']['full']
+manifest={'schema':2,'previous_manifest_sha256':previous_manifest_sha256,'object_provenance':object_provenance,'source_status':source_status,'source_inputs':source_inputs,'link_inputs':link_inputs,'resolved_libraries':resolved_libraries,'tools':{'compiler':subprocess.check_output(compiler+['--version'],cwd=build,text=True).splitlines()[0],'ninja':subprocess.check_output(['ninja','--version'],text=True).strip(),'meson':meson_version},'source_revision':revision,'source_dirty':dirty,'api_major':2,'portable_version':1,'library_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'link_argv':args,'inputs':{str(path.relative_to(src)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [src/'contrib/ios-app/qemu-ios-ui.h',src/'contrib/ios-app/qemu-ios-ui.c',src/'contrib/macos-app/qemu-macos-extras.c',src/'contrib/portable/dependencies.json']}}
+manifest['runtime_files']={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in [build/'libc++_shared.so'] if p.exists()}
 (build/'portable-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(output)

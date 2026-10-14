@@ -124,3 +124,17 @@ patches, and reproducible build/relink material when distributing engine
 binaries; LGPL static dependencies also require their applicable relinking
 material. The source manifest is `dependencies.json`, not permission to
 redistribute proprietary guest material.
+
+For an existing completed engine, add `--source-update` to the same engine
+command after committing a source change. This explicitly permits a source
+revision change while keeping ABI, configure arguments/macros, compiler/tools,
+environment, NDK and dependency inputs unchanged. Configure and Ninja then
+rebuild changed sources and included headers. A reviewed migration accepts the
+exact earlier portable recipe once, checking its completed compiler/Ninja and
+Meson baseline; subsequent unknown recipe changes still fail. The update
+history records the prior library/manifest and requested/compiled revisions.
+The new shared manifest records each reused object's earlier recorded engine
+revision/hash and each changed object's current engine revision/hash. Earlier
+manifests are retained under `BUILD/manifests` by content hash. Changes to configuration or pins
+still require a separate output directory. An interrupted update's requested
+revision is distinct from the last completed library manifest.
