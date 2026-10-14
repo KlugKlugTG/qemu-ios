@@ -159,6 +159,7 @@ Focused host checks (ASan/UBSan, actual production functions):
 
 ```sh
 tests/slice/run.sh tests/slice/ipod-portable-frame.c
+tests/slice/run.sh tests/slice/ipod-ui-deferred-paint.c
 tests/slice/run.sh tests/slice/ipod-portable-touch.c
 tests/slice/run.sh tests/slice/ipod-accel-sampling.c
 tests/slice/run.sh tests/slice/ipod-attitude.c
@@ -170,6 +171,25 @@ python3 tests/portable-crypto.py /private/builds/linux
 python3 tests/portable-models.py /private/builds/linux/engine-run \
   /private/builds/linux/libqemu-arm.so
 ```
+
+Portable frame publication adapts upstream qemu-ios
+`97860b36b0e9fcdd008e95e58efff9609ca44aee`: one reusable main-context bottom
+half coalesces panel dirty rectangles and captures the completed paint, rather
+than waiting solely for the 30 ms display refresh. The refresh remains a
+fallback, unchanged pixels keep their serial, and caller-owned frame copies
+retain their lock/ownership contract. Reset cancels pending publication; engine
+exit cancels and deletes the bottom half before QEMU cleanup. The Apple path
+keeps its original display-refresh publication. This is a frame delivery change,
+not a verified Android presentation rate or CPU speedup.
+
+The deferred-paint slice uses the actual capture/publication/reset/stop functions
+and AIO enqueue/dequeue/cancel/delete operations. It covers partial-rectangle
+coalescing, fallback deduplication, changed-size completed surfaces, reset and
+pending-stop cancellation, and absent surfaces. Run it, the frame ownership,
+startup and deduplication slices, plus Linux/ARM/x86 production syntax checks in
+an allocated compiler slot. A target comparison must use the same fixture and
+scrolling workload with frame intervals and host CPU; keep the frozen PCM A/B
+inputs separate. Added source tests alone are not an executed qualification.
 
 These checks establish frame ownership, stable contact identity/crossing,
 atomic rejection, paused release, sensor units/mounts/expiry/restore behavior,

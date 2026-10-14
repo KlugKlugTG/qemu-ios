@@ -55,10 +55,14 @@ static void portable_runstate_changed(void *opaque, bool running, RunState state
 }
 static void portable_release_all(void);
 static void portable_release_input(bool preserve_buttons);
+#ifndef __APPLE__
+static void ios_cancel_publish(bool stopping);
+#endif
 static void ios_sequence_reset(void *opaque)
 {
     ios_sequence_cancel_current();
 #ifndef __APPLE__
+    ios_cancel_publish(false);
     portable_release_input(ipod_touch_ap_wake_reset_pending());
 #else
     portable_release_all();
@@ -115,6 +119,10 @@ static struct {
 
     /* Set by a partial update, cleared when a whole frame is published. */
     bool pending;
+#ifndef __APPLE__
+    /* Main AioContext/BQL only; never retains a DisplaySurface pointer. */
+    QEMUBH *publish_bh;
+#endif
 } ios;
 
 /* Frame polling can begin even when startup fails before attach(). Initialize
@@ -273,13 +281,18 @@ static void ios_capture(DisplaySurface *surface)
  * SEVERAL partial updates. Publishing each one hands the app a frame caught
  * mid-paint, which is visible as the screen wiping top-to-bottom instead of
  * changing at once -- and costs a full-surface copy per fragment rather than
- * per frame. Frames are published at the refresh boundary instead, where the
- * picture is whole.
+ * per frame. Portable hosts defer publication until the panel paint returns;
+ * Apple hosts retain the original display-refresh publication boundary.
  */
 static void ios_gfx_update(DisplayChangeListener *dcl,
                            int x, int y, int w, int h)
 {
     ios.pending = true;
+#ifndef __APPLE__
+    if (ios.publish_bh) {
+        qemu_bh_schedule(ios.publish_bh);
+    }
+#endif
 }
 
 static void ios_gfx_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
@@ -289,17 +302,62 @@ static void ios_gfx_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
      * do NOT capture it here: on a rotation the console resize happens in the
      * middle of the panel's refresh, BEFORE it has blitted anything into the
      * new surface, so capturing now publishes one all-black frame at the new
-     * size and the app visibly blinks. Marking it pending instead lets
-     * ios_refresh publish it right after graphic_hw_update returns, by which
-     * point the same refresh has painted the surface.
+     * size and the app visibly blinks. Mark it pending without scheduling a
+     * capture here: the ensuing dirty update schedules portable publication
+     * after the paint returns; ios_refresh remains the fallback boundary.
      */
     if (surface) {
         ios.pending = true;
     }
 }
 
+#ifndef __APPLE__
+/* Adapted from upstream 97860b36b0e9fcdd008e95e58efff9609ca44aee.
+ * Coalesce dirty rectangles until the whole panel paint has returned, rather
+ * than resampling its vsync at QEMU's 30 ms display-refresh interval. */
+static void ios_publish(QemuConsole *con)
+{
+    DisplaySurface *surface;
+
+    if (!ios.attached || !qatomic_read(&ios_vm_alive) || !con ||
+        !ios.pending) {
+        return;
+    }
+    surface = qemu_console_surface(con);
+    if (surface) {
+        ios_capture(surface);
+        ios.pending = false;
+    }
+}
+
+static void ios_publish_bh(void *opaque)
+{
+    ios_publish(ios.con);
+}
+
+static void ios_cancel_publish(bool stopping)
+{
+    if (ios.publish_bh) {
+        qemu_bh_cancel(ios.publish_bh);
+        if (stopping) {
+            qemu_bh_delete(ios.publish_bh);
+            ios.publish_bh = NULL;
+        }
+    }
+    ios.pending = false;
+}
+#endif
+
 static void ios_refresh(DisplayChangeListener *dcl)
 {
+#ifndef __APPLE__
+    /* Display cleanup can still notify listeners after the main loop ends. */
+    if (!ios.attached || !qatomic_read(&ios_vm_alive)) {
+        return;
+    }
+    graphic_hw_update(dcl->con);
+    ios_publish(dcl->con);
+#else
     DisplaySurface *surface;
 
     graphic_hw_update(dcl->con);
@@ -312,6 +370,7 @@ static void ios_refresh(DisplayChangeListener *dcl)
         ios_capture(surface);
         ios.pending = false;
     }
+#endif
 }
 
 static const DisplayChangeListenerOps ios_dcl_ops = {
@@ -374,6 +433,9 @@ void qemu_ios_ui_vm_stopped(void)
 {
 #if !defined(__APPLE__)
     qatomic_set(&ios_vm_alive, 0);
+    /* Called under BQL before qemu_cleanup: a deleted BH cannot capture a
+     * surface or notify the app during console/AioContext teardown. */
+    ios_cancel_publish(true);
     ios_input_discard_pending();
     qemu_ios_ui_cancel_input();
 #else
@@ -407,6 +469,9 @@ void qemu_ios_ui_vm_started(void)
     if (ios.con) {
         ios.dcl.ops = &ios_dcl_ops;
         ios.dcl.con = ios.con;
+#ifndef __APPLE__
+        ios.publish_bh = qemu_bh_new(ios_publish_bh, NULL);
+#endif
         register_displaychangelistener(&ios.dcl);
     }
     qatomic_set(&portable_paused, !runstate_is_running());
