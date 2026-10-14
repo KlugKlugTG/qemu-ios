@@ -58,3 +58,18 @@ source explanation of the extension gate, and the pinned ANGLE fallback plan.
 reporting eight texture units while accepting only four. It checks retained
 active state, prior errors and consistent cached integer/float queries. It is
 an error/state regression, not an actual rendering qualification.
+
+For an already allocated AVD, the scoped runner re-pushes frozen binaries,
+checks remote hashes and requires each complete probe's final PASS marker and
+explicit shell exit. It never launches or stops an AVD and always addresses
+`emulator-5554`. `--output` must be a new private directory:
+
+```sh
+python3 tests/graphics/run-avd-probes.py \
+  --adb /absolute/Android/Sdk/platform-tools/adb \
+  --frozen /absolute/private/frozen-attempt \
+  --output /absolute/private/new-run
+```
+
+Add `--core-diagnostic` only for the experimental core/OES comparison; its
+results remain separate from the two complete production probes.
