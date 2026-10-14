@@ -232,6 +232,43 @@ void page_init(void)
 }
 
 /*
+ * Remember how many insns a TB starting at phys_pc may hold.  TBs of other
+ * flags can start at the same address, so a limit only ever shrinks.
+ */
+static void tb_remember_io_insn_limit(tb_page_addr_t phys_pc, int limit)
+{
+    gpointer key = (gpointer)(uintptr_t)phys_pc;
+    int previous;
+
+    assert(limit > 0);
+    qemu_mutex_lock(&tb_ctx.io_insn_lock);
+    previous = GPOINTER_TO_INT(g_hash_table_lookup(tb_ctx.io_insn_limits, key));
+    if (!previous || limit < previous) {
+        g_hash_table_insert(tb_ctx.io_insn_limits, key, GINT_TO_POINTER(limit));
+    }
+    qemu_mutex_unlock(&tb_ctx.io_insn_lock);
+}
+
+static int tb_apply_io_insn_limit(tb_page_addr_t phys_pc, uint32_t cflags,
+                                 int max_insns)
+{
+    int limit;
+
+    /*
+     * A TB asked for by insn count (an I/O or watchpoint replay) keeps it: on
+     * targets with delay slots it must hold the branch and its slot.
+     */
+    if (phys_pc == (tb_page_addr_t)-1 || (cflags & CF_COUNT_MASK)) {
+        return max_insns;
+    }
+    qemu_mutex_lock(&tb_ctx.io_insn_lock);
+    limit = GPOINTER_TO_INT(g_hash_table_lookup(tb_ctx.io_insn_limits,
+                                               (gpointer)(uintptr_t)phys_pc));
+    qemu_mutex_unlock(&tb_ctx.io_insn_lock);
+    return limit ? MIN(max_insns, limit) : max_insns;
+}
+
+/*
  * Isolate the portion of code gen which can setjmp/longjmp.
  * Return the size of the generated code, or negative on error.
  */
@@ -283,17 +320,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         max_insns = TCG_MAX_INSNS;
     }
     QEMU_BUILD_BUG_ON(CF_COUNT_MASK + 1 != TCG_MAX_INSNS);
-    if (phys_pc != -1) {
-        int limit;
-
-        qemu_mutex_lock(&tb_ctx.io_insn_lock);
-        limit = GPOINTER_TO_INT(g_hash_table_lookup(tb_ctx.io_insn_limits,
-                                                    (gpointer)(uintptr_t)phys_pc));
-        qemu_mutex_unlock(&tb_ctx.io_insn_lock);
-        if (limit) {
-            max_insns = MIN(max_insns, limit);
-        }
-    }
+    max_insns = tb_apply_io_insn_limit(phys_pc, s.cflags, max_insns);
 
  buffer_overflow:
     assert_no_pages_locked();
@@ -607,11 +634,7 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
         int left = cpu_unwind_data_from_tb(tb, retaddr, data);
 
         if (left > 1) {
-            qemu_mutex_lock(&tb_ctx.io_insn_lock);
-            g_hash_table_insert(tb_ctx.io_insn_limits,
-                                (gpointer)(uintptr_t)tb_page_addr0(tb),
-                                GINT_TO_POINTER(tb->icount - left + 1));
-            qemu_mutex_unlock(&tb_ctx.io_insn_lock);
+            tb_remember_io_insn_limit(tb_page_addr0(tb), tb->icount - left + 1);
             tb_phys_invalidate(tb, -1);
         }
     }
