@@ -88,6 +88,19 @@ int main(void)
         fprintf(stderr,"[probe] separate depth16+stencil8 status=0x%x error=0x%x\n",glCheckFramebufferStatus(GL_FRAMEBUFFER),glGetError());
     }
     assert(status == GL_FRAMEBUFFER_COMPLETE && error == GL_NO_ERROR);
+#ifdef GLES_HOST_EGL_ES
+    glActiveTexture(GL_TEXTURE1);
+    glEnable(0xdead);  /* Unit validation must preserve a preexisting error. */
+    GLint verified_units,verified_active;
+    glGetIntegerv(GL_MAX_TEXTURE_UNITS,&verified_units);
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&verified_active);
+    assert(verified_units>=2 && verified_active==GL_TEXTURE1);
+    assert(glGetError()==GL_INVALID_ENUM && glGetError()==GL_NO_ERROR);
+    GLfloat verified_float; glGetFloatv(GL_MAX_TEXTURE_UNITS,&verified_float);
+    assert(verified_float==verified_units);
+    glActiveTexture(GL_TEXTURE0);
+    fprintf(stderr,"[probe] verified fixed-function texture units=%d, prior error and active unit preserved\n",verified_units);
+#endif
     glViewport(0, 0, 32, 32);
     float vertices[] = {-1,-1, 1,-1, 0,1};
     glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);

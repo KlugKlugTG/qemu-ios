@@ -10,6 +10,30 @@
 #endif
 static GLenum gles_native_target(GLenum target)
 { return target == GL_TEXTURE_RECTANGLE_ARB && gles_egl_current->api==1 ? GL_TEXTURE_2D : target; }
+/* Some GLES1 translators report the backing GL limit rather than their own
+ * fixed-function limit. Verify usable units once, retaining prior error flags
+ * and the caller's active unit. Never iterate unsupported units during a draw. */
+static GLint gles_native_fixed_units(void)
+{
+    if (gles_egl_current->fixed_texture_units) return gles_egl_current->fixed_texture_units;
+    GLint reported=0,active=GL_TEXTURE0;
+    gles_native_save_errors();
+    glGetIntegerv(GL_MAX_TEXTURE_UNITS,&reported);
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
+    GLint limit=reported>8 ? 8 : reported, supported=0;
+    for (;supported<limit;supported++) {
+        glActiveTexture(GL_TEXTURE0+supported);
+        GLenum error=glGetError();
+        if (!error) continue;
+        if (error!=GL_INVALID_ENUM) gles_native_error(error);
+        break;
+    }
+    glActiveTexture(active);
+    gles_egl_current->fixed_texture_units=supported;
+    if (supported!=reported)
+        fprintf(stderr,"[gles-egl] GLES1 fixed texture units: reported=%d usable=%d\n",reported,supported);
+    return supported;
+}
 static int gles_native_unit(void)
 {
     GLint active;
@@ -113,6 +137,7 @@ static GLboolean gles_native_is_texture(GLuint name)
 }
 static void gles_native_get_integer(GLenum pname, GLint *value)
 {
+    if (pname==GL_MAX_TEXTURE_UNITS && gles_egl_current->api==1) { *value=gles_native_fixed_units(); return; }
     int unit=gles_native_unit();
     if (unit>=0 && pname==GL_TEXTURE_BINDING_RECTANGLE_ARB) { *value=gles_egl_current->texture_units[unit].rectangle; return; }
     if (unit>=0 && pname==GL_TEXTURE_BINDING_2D) { *value=gles_egl_current->texture_units[unit].texture_2d; return; }
@@ -121,6 +146,15 @@ static void gles_native_get_integer(GLenum pname, GLint *value)
         *value=texture ? texture->name : 0; return;
     }
     glGetIntegerv(pname==GL_MAX_RECTANGLE_TEXTURE_SIZE_ARB ? GL_MAX_TEXTURE_SIZE : pname,value);
+}
+static void gles_native_get_float(GLenum pname, GLfloat *value)
+{
+    if (pname==GL_TEXTURE_BINDING_2D || pname==GL_TEXTURE_BINDING_CUBE_MAP ||
+        pname==GL_TEXTURE_BINDING_RECTANGLE_ARB || pname==GL_MAX_RECTANGLE_TEXTURE_SIZE_ARB ||
+        (pname==GL_MAX_TEXTURE_UNITS && gles_egl_current->api==1)) {
+        GLint integer; gles_native_get_integer(pname,&integer); *value=integer; return;
+    }
+    glGetFloatv(pname,value);
 }
 static GLboolean gles_native_is_enabled(GLenum cap)
 {
@@ -207,8 +241,7 @@ static unsigned gles_native_rectangle_begin(GLfloat matrices[8][16], GLint bindi
                                             GLint *saved_active, GLint *saved_mode)
 {
     if (gles_egl_current->api!=1) return 0;
-    GLint units;
-    glGetIntegerv(GL_MAX_TEXTURE_UNITS,&units);
+    GLint units=gles_native_fixed_units();
     glGetIntegerv(GL_ACTIVE_TEXTURE,saved_active); glGetIntegerv(GL_MATRIX_MODE,saved_mode);
     unsigned mask=0;
     for (unsigned unit=0;unit<8 && unit<(unsigned)units;unit++) {
@@ -235,7 +268,7 @@ static void gles_native_rectangle_end(unsigned mask, GLfloat matrices[8][16],
                                       GLint bindings[8], GLint active, GLint mode)
 {
     if (gles_egl_current->api!=1) return;
-    GLint units; glGetIntegerv(GL_MAX_TEXTURE_UNITS,&units);
+    GLint units=gles_native_fixed_units();
     for (unsigned unit=0;unit<8 && unit<(unsigned)units;unit++) {
         glActiveTexture(GL_TEXTURE0+unit);
         if (mask&(1u<<unit)) { glMatrixMode(GL_TEXTURE); glLoadMatrixf(matrices[unit]); }

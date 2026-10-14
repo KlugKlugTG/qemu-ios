@@ -595,6 +595,7 @@ static void gles_native_GetFramebufferAttachmentParameteriv(GLenum target, GLenu
 #define glBindTexture gles_native_bind_texture
 #define glDeleteTextures gles_native_delete_textures
 #define glGetIntegerv gles_native_get_integer
+#define glGetFloatv gles_native_get_float
 #define glIsEnabled gles_native_is_enabled
 #define glEnable gles_native_enable
 #define glDisable gles_native_disable

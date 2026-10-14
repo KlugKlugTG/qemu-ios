@@ -89,3 +89,12 @@ color and packed FBOs with actual red RGBA 255,0,0,255. The complete production
 renderer still failed its first triangle assertion after complete FBO setup.
 This is an active rendering investigation, not an AVD qualification. Earlier
 empty-output swangle samples were invalid and are retained as such.
+
+The host emulator log showed invalid `glActiveTexture` calls in the production
+wrapper. Upstream [GLES1 context constants](https://github.com/google/gfxstream/blob/07ee40efb0e7037a9a9b7fe59071e7c4997e7cbe/host/gl/glestranslator/gles_cm/gles_cm_context.h)
+limit fixed-function units to four, while the backing capability detector
+substitutes eight for core profiles. The adapter now verifies usable units once,
+restores active state, preserves preexisting errors and returns a consistent
+integer/float limit. `egl-limits.c` reproduces the eight-reported/four-accepted
+capability mismatch without EGL; complete host-AVD rendering remains the
+required validation of the change.

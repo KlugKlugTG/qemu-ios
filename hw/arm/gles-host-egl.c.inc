@@ -31,7 +31,7 @@ typedef struct GLESEGLContext {
     EGLContext context;
     EGLSurface surface;
     unsigned refs, api;
-    unsigned unpack_alignment, unpack_row_length, errors;
+    unsigned unpack_alignment, unpack_row_length, errors, fixed_texture_units;
     bool fbo_checked, fbo_supported;
     GLESEGLTextures *textures;
     GLESEGLTexture default_texture, default_cube;
