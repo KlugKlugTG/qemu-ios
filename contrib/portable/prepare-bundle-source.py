@@ -40,7 +40,9 @@ if original_meson.count(needle) != 1:
 # Upstream still creates blob unpack targets when install_blobs is false.
 meson.write_text(original_meson.replace(needle, needle + " and get_option('install_blobs')"))
 subprocess.run(['git', 'init', str(destination)], check=True)
-subprocess.run(['git', 'add', '.'], cwd=destination, check=True)
+# Upstream ignores generated-looking names that are nevertheless tracked
+# source/configuration files. Preserve every supplied source in the local index.
+subprocess.run(['git', 'add', '-f', '.'], cwd=destination, check=True)
 subprocess.run(['git', '-c', 'user.name=Builder', '-c', 'user.email=builder@example.invalid',
                 'commit', '-m', 'Import asset-free corresponding engine source'], cwd=destination, check=True,
                stdout=subprocess.DEVNULL)
