@@ -43,6 +43,51 @@ or visible presentation. Check the real command/error receipt as well. The old
 progress mean sampled the reusable readback as a full RGBA drawable even for
 RGB565, cropped or direct IOSurface copies; that sample has been removed.
 
+## Surface lifecycle and black-cache source checks
+
+The Android adapter and the legacy iOS foreground gate are separate paths:
+
+| Operation | Actual source behavior |
+| --- | --- |
+| Android `clearSurface` | Cancels contacts and removes the JNI `ANativeWindow` under its guard; does not call the graphics foreground setter or pause the VM. |
+| Android Surface attachment | Retains a new native window, increments its generation and resets the copied-frame sequence to zero, so an unchanged cached engine frame can be replayed. |
+| Portable pause/resume | Cancels input and invokes `qemu_ios_ui_pause`/`qemu_ios_ui_resume`, which schedule QMP stop/continue; the Portable engine does not load the legacy foreground setter. |
+| Legacy `qemu_ios_set_foreground` | Writes `gles_host_set_allowed` and schedules a resume on foreground return. The renderer gate rejects guest GL calls while false and does not itself clear buffers or repaint on return. |
+
+The Android service's `foreground()` function posts its notification through
+`startForeground`; it is not a GL state transition. Android sources do not
+invoke `qemu_ios_set_foreground`. Consequently an Android stale Surface clear
+cannot directly leave the renderer's foreground flag false. The inspected
+Surface attach/clear interface has no owning view token, so a late old-view
+destroy callback could structurally remove a newer window. Actual callback
+ordering and a product-side ownership fix need separate evidence. That risk
+removes presentation; it does not change the engine's cached frame pixels.
+
+The engine's `qemu_ios_portable_frame_copy` returns the latest completed panel
+buffer under the frame lock when its serial differs from the caller's. The
+Android presenter requests serial zero on attachment and on failed window
+lock/post, allowing retry of the same engine frame. `ios_capture` copies QEMU's
+real panel Surface and deduplicates byte-identical frames; it applies no
+foreground or backlight mask. A QEMU console resize marks capture pending until
+the graphics refresh completes, avoiding publication of a newly allocated
+blank Surface before the LCD paints it.
+
+The iPod LCD model applies backlight scaling during conversion. In
+`lcd_refresh`, the duplicate-poll skip requires the current brightness to equal
+`last_bright`. A changed brightness therefore bypasses that skip and sets full
+invalidation; a changed scanout base or QEMU Surface also invalidates. Rotated
+and composed paths redraw complete frames. Re-enabling the modeled brightness
+can thus reconvert unchanged scanout RAM without requiring a fresh guest GL
+draw. If the programmed brightness remains zero, a black output is expected
+even when the guest agent is alive and reports SpringBoard/Lock Screen.
+
+These are source checks, not a reproduced lifecycle failure or a target pass.
+For an actual black-frame attempt, retain activity/Surface generation and
+window-post receipts alongside VM pause state, scanout/base, PMU/backlight
+writes, cached-frame serial/hash and the real copied/presented images. An
+unchanged black frame needs those observations to distinguish panel power,
+black scanout RAM and a detached presentation window.
+
 GLES2 needs an actual admitted guest/workload that compiles and executes shader
 commands, not the standalone host GLES2 triangle. The supplied n81 route may be
 used where appropriate with its prepared kernel/NAND/NOR and matching package;
