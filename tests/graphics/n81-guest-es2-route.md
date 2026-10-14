@@ -49,12 +49,24 @@ readback nor verified provider owners closes guest rendering acceptance.
 
 From b88 to b59, the EGL lifetime/native adapter files are unchanged; GLES host
 changes add copied-pixel diagnostics. Therefore the old teardown BAD_ACCESS is
-not known fixed. Regular calls refuse a failed make-current. gles_context_free
-currently ignores its make-current return before deleting GL objects; release
-also attempts cleanup/destruction. Cross-thread current-context ownership is a
-plausible teardown hypothesis, but the retained run has no thread-owner trace
-and does not establish that cause. Keep this error separate from CPU/storage
-shutdown confirmation and verify the next exact producer's error delta.
+not known fixed. Regular calls refuse a failed make-current. The source followup now checks
+EGL acquisition before context-owned GL deletion; a refusal preserves the
+caller's unrelated current context and skips those deletion calls. Context
+release still attempts cleanup/destruction; its native texture collector already
+skips GL work after failed acquisition. The non-EGL/Mac cleanup path is unchanged.
+This fixes an unsafe failure path without eliminating the observed binding
+failure. Cross-thread current-context ownership is a plausible teardown
+hypothesis, but the retained run has no thread-owner trace and does not establish
+that cause. Keep this error separate from CPU/storage shutdown confirmation and
+verify the next exact producer's error delta.
+
+`egl-context-cleanup.c` includes the production deletion helper with an unrelated
+current-context model. It checks failed acquisition causes no deletion or unbind,
+while success deletes the exact owned names and unbinds; the separate non-EGL
+build retains the existing successful path. These are source-policy regressions,
+not driver/thread or guest acceptance. Compilation is pending an allocation.
+No new thread instrumentation is included: a future bounded failure receipt may
+record caller/last successful bind thread and context identity if needed.
 
 ## Minimal next allocated target runs
 
