@@ -183,42 +183,73 @@ uint32_t it_iboot_find_miu_epoch(const uint8_t *image, size_t size,
     return found;
 }
 
-uint32_t it_iboot_find_command_line(const uint8_t *image, size_t size,
-                                    uint32_t base)
+/* The literal-pool slot an armv6 Thumb `ldr rN, [pc, #imm]` at `at` loads. */
+static size_t iboot_ldr_slot(size_t at, uint16_t insn)
 {
-    static const char format[] = "gBootArgs.commandLine = [%s]\n";
-    uint32_t found = 0;
-    if (!image || size < sizeof(format) || size > UINT32_MAX - base || (base & 3)) {
+    return ((at + 4) & ~(size_t)3) + (insn & 255) * 4;
+}
+
+uint32_t it_iboot_find_boot_args_format(const uint8_t *image, size_t size,
+                                        uint32_t base, uint32_t *command_line)
+{
+    static const char format[] = "%s ";
+    uint32_t found = 0, buffer = 0;
+
+    if (!image || size < 16 || size > UINT32_MAX - base) {
         return 0;
     }
-    for (size_t i = 0; i + 10 <= size; i += 2) {
-        /* ldr r4, literal; ldr r0, literal; adds r1, r4, #0; bl printf */
+    for (size_t i = 0; i + 16 <= size; i += 2) {
         uint16_t buffer_load = iboot_u16(image + i);
         uint16_t format_load = iboot_u16(image + i + 2);
-        if ((buffer_load & 0xff00) != 0x4c00 ||
-            (format_load & 0xff00) != 0x4800 ||
-            iboot_u16(image + i + 4) != 0x1c21 ||
-            (iboot_u16(image + i + 6) & 0xf800) != 0xf000 ||
-            (iboot_u16(image + i + 8) & 0xf800) != 0xf800) {
+        size_t j = i + 4, end = i + 16 < size - 6 ? i + 16 : size - 6;
+
+        /* ldr rN, =commandLine; ldr r2, ="%s " */
+        if ((buffer_load & 0xf800) != 0x4800 || (format_load & 0xff00) != 0x4a00) {
             continue;
         }
-        size_t bp = ((i + 4) & ~(size_t)3) + (buffer_load & 255) * 4;
-        size_t fp = ((i + 6) & ~(size_t)3) + (format_load & 255) * 4;
+        /* then, between register moves, movs r1, #0x80; lsls r1, r1, #1 (the size, 0x100) and the bl */
+        while (j < end && iboot_u16(image + j) != 0x2180) {
+            j += 2;
+        }
+        if (j >= end) {
+            continue;
+        }
+        size_t k = j + 2;
+        while (k < j + 8 && k + 2 <= size && iboot_u16(image + k) != 0x0049) {
+            k += 2;
+        }
+        size_t bl = k + 2;
+        while (bl < k + 8 && bl + 4 <= size && (iboot_u16(image + bl) & 0xf800) != 0xf000) {
+            bl += 2;
+        }
+        if (k >= j + 8 || bl >= k + 8 || bl + 4 > size ||
+            (iboot_u16(image + bl + 2) & 0xf800) != 0xf800) {
+            continue;
+        }
+        size_t bp = iboot_ldr_slot(i, buffer_load), fp = iboot_ldr_slot(i + 2, format_load);
         if (bp > size - 4 || fp > size - 4) {
             continue;
         }
-        uint32_t buffer = iboot_u32(image + bp);
-        uint32_t text = iboot_u32(image + fp);
+        uint32_t cmd = iboot_u32(image + bp), text = iboot_u32(image + fp);
         if (text < base || text - base > size - sizeof(format) ||
             memcmp(image + (text - base), format, sizeof(format)) ||
-            size < 256 || buffer < base || (buffer & 3) ||
-            buffer - base > size - 256) {
+            cmd < base || (cmd & 3) || cmd - base > 0x100000 - 256) {
             continue;
         }
-        if (found) {
+        /* The slot is rewritten: nothing else may load it. */
+        unsigned loads = 0;
+        for (size_t at = fp > 1024 ? (fp - 1024) & ~(size_t)1 : 0; at < fp; at += 2) {
+            uint16_t insn = iboot_u16(image + at);
+            loads += (insn & 0xf800) == 0x4800 && iboot_ldr_slot(at, insn) == fp;
+        }
+        if (loads != 1 || found) {
             return 0;
         }
-        found = buffer;
+        found = base + fp;
+        buffer = cmd;
+    }
+    if (found && command_line) {
+        *command_line = buffer;
     }
     return found;
 }

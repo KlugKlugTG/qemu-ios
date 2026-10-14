@@ -194,14 +194,6 @@ typedef struct {
     bool ecid_explicit;
 	AddressSpace *nsas;
 	/* boot-args: repeated early writes of the kernel command line. */
-	QEMUTimer *boot_args_timer;
-	unsigned boot_args_writes;
-    uint64_t boot_args_scan_deadline;
-    uint32_t boot_args_delay_ms, boot_args_repeat, boot_args_interval_ms;
-    bool boot_args_delay_ms_explicit, boot_args_repeat_explicit;
-    bool boot_args_interval_ms_explicit;
-	bool boot_args_scan_failed;	/* complain once, not every retry */
-	uint32_t boot_args_addr;	/* signature hit from an earlier tick; 0 = rescan */
 	qemu_irq **irq;
 	ARMCPU *cpu;
 	PL192State *vic0;
@@ -225,8 +217,9 @@ typedef struct {
 	IPodTouchLCDState *lcd_state;
 	IPodTouchMIPIDSIState *mipi_dsi_state;
 	IPodTouchFMSSState *fmss_state;
-    Notifier compat_nand_read;
-    uint32_t compat_command_line;
+    Notifier boot_args_nand_read;
+    uint32_t boot_args_format;        /* iBoot's "%s " literal slot; 0 = not found yet */
+    uint32_t boot_args_command_line;  /* gBootArgs.commandLine */
 	IPodTouchMBXState *mbx_state;
 	IPodTouchSDIOState *sdio_state;
 	IPodTouchTVOutState *tvout_state;
