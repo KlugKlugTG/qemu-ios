@@ -6,7 +6,7 @@
  * SLICE hw/arm/ipod_touch_lis302dl.c define LIS_MOTION_NS_PER_RAD
  * SLICE hw/arm/ipod_touch_lis302dl.c fn lis302dl_counts lis302dl_mounted lis302dl_moving lis302dl_gravity
  * SLICE hw/arm/ipod_touch_lis302dl.c fn lis302dl_motion_rate lis302dl_start_motion lis302dl_apply_attitude
- * SLICE hw/arm/ipod_touch_lis302dl.c fn lis302dl_sample lis302dl_post_load
+ * SLICE hw/arm/ipod_touch_lis302dl.c fn lis302dl_clear_host_motion lis302dl_sample lis302dl_post_load
  */
 #include <assert.h>
 #include <string.h>
