@@ -40,7 +40,8 @@ such a driver. A supported graphics backend must pass the complete probe.
 `egl-core-fbo.c` is a separate experiment to test core GLES2 framebuffer calls
 inside a native GLES1 context, followed by required fixed-function rendering.
 It does not change production dispatch or establish guest compatibility. Build
-it using the same Android compiler/link flags as the render probe. Freeze the
+it with `check.sh` alongside the render probe. It enforces a 20-second deadline
+and logs each operation; `--oes` checks advertised OES dispatch instead. Freeze the
 source and binary hashes for each hardware attempt before running it; retain
 failed attempts and do not overwrite their artifacts.
 
@@ -49,3 +50,6 @@ texture matrix, independent 2D/rectangle bindings and enables, immutable object
 targets, and texture deletion/name reuse across sibling contexts and retained
 framebuffer attachments. Deleted textures stay alive while referenced; a new
 object with the same guest name receives separate native storage.
+
+See [AVD driver investigation](avd-drivers.md) for supported GPU modes, primary
+source explanation of the extension gate, and the pinned ANGLE fallback plan.
