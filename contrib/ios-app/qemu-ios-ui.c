@@ -21,6 +21,7 @@
 #include "qemu/cutils.h"
 #include "hw/arm/ipod_touch_lis302dl.h"
 #include "qemu/aio.h"
+#include "system/runstate.h"
 #include "ui/console.h"
 #include "ui/surface.h"
 #include "ui/input.h"
@@ -42,6 +43,11 @@ static void ios_sequence_cancel_current(void);
 static bool ios_manual_touch;
 static bool ios_manual_touch2;
 static bool portable_has_gyro;
+static int portable_paused;
+static void portable_runstate_changed(void *opaque, bool running, RunState state)
+{
+    qatomic_set(&portable_paused, !running);
+}
 static void portable_release_all(void);
 static void ios_sequence_reset(void *opaque)
 {
@@ -375,9 +381,6 @@ void qemu_ios_ui_vm_started(void)
         return;
     }
     ios.con = qemu_console_lookup_by_index(0);
-    if (!ios.con) {
-        return;
-    }
     qatomic_set(&ios_is_ipad1, object_dynamic_cast(qdev_get_machine(),
                                                    MACHINE_TYPE_NAME("ipad1")) != NULL);
     qatomic_set(&ios_dsi_panel, qatomic_read(&ios_is_ipad1) ||
@@ -385,9 +388,13 @@ void qemu_ios_ui_vm_started(void)
     for (i = 0; i < INPUT_EVENT_SLOTS_MAX; i++) {
         ios.slots[i].tracking_id = -1;
     }
-    ios.dcl.ops = &ios_dcl_ops;
-    ios.dcl.con = ios.con;
-    register_displaychangelistener(&ios.dcl);
+    if (ios.con) {
+        ios.dcl.ops = &ios_dcl_ops;
+        ios.dcl.con = ios.con;
+        register_displaychangelistener(&ios.dcl);
+    }
+    qatomic_set(&portable_paused, !runstate_is_running());
+    qemu_add_vm_change_state_handler(portable_runstate_changed, NULL);
     ios.attached = true;
     qemu_register_reset(ios_sequence_reset, NULL);
     portable_has_gyro = object_dynamic_cast(qdev_get_machine(), MACHINE_TYPE_NAME("iPod-Touch-4G")) ||
@@ -1000,7 +1007,7 @@ void qemu_ios_set_foreground(bool foreground)
 
 /* Portable frame/board ABI. All output storage is caller owned. */
 uint32_t qemu_ios_portable_version(void) { return QEMU_IOS_PORTABLE_VERSION; }
-bool qemu_ios_ui_paused(void) { return qemu_ios_ui_ready() && !runstate_is_running(); }
+bool qemu_ios_ui_paused(void) { return qemu_ios_ui_ready() && qatomic_read(&portable_paused); }
 int qemu_ios_portable_board(const char *machine, QemuIosPortableBoard *out)
 {
     const QemuIosDeviceInfo *d = qemu_ios_device_info(machine);
