@@ -2,10 +2,16 @@
 
 This immutable directory represents one exact native engine identified by
 `bundle.json`. It includes its recorded QEMU source revision, selected upstream
-dependency source archives, downstream patches/build recipes, pinned libfdt
+dependency source archives, original recipe build prerequisites, downstream
+patches/build recipes, pinned libfdt/keymap
 source, actual linked objects/static archives, explicit relink arguments and
 offline notices. Guest firmware, ROMs, NAND, prepared bases and captures are
 excluded. Original objects retain compiler debug/build-path metadata.
+`bundle.json` labels dependency archives as linked or build prerequisites.
+For example, the original dependency builder also builds libffi and OpenSSL;
+their source archives support replaying that recipe, while neither library
+appears in the engine's recorded link inputs. Including an unlinked source
+archive does not describe it as part of the engine's binary license combination.
 The immutable source includes QEMU's tracked pure-Python build-tool wheels so
 configure can run offline; those archives retain their embedded license notices.
 
@@ -59,9 +65,10 @@ does not require rebuilding application code. Replacement results need actual
 target testing; a successful link alone does not establish compatibility.
 
 To rebuild the engine source, prepare a writable checkout with the validated
-helper below. It unpacks the pinned libfdt source and disables installation and
-unpacking of unrelated firmware blobs omitted from this bundle. Those build options
-does not change the selected engine object code. Actual configure/rebuild
+helper below. It unpacks pinned libfdt/keymap source and disables installation
+and unpacking of unrelated firmware blobs and host UI icons omitted from this
+bundle. Those build options
+do not change the selected engine object code. Actual configure/rebuild
 validation remains required before claiming a reproduced build. The filtered
 source archive excludes nonbuild assets and research captures, so
 its new local Git tree/identity differs from the original full upstream commit;

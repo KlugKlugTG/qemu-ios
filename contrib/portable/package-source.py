@@ -109,8 +109,9 @@ def main():
             pins = json.loads((stage / 'source/qemu' / pinfile).read_text())
             for package in pins['packages']:
                 used = sorted(notices.ARCHIVES.get(package['name'], set()) & archives.keys())
-                if not used:
-                    continue
+                # Preserve every archive the recorded builder fetches, including
+                # unlinked prerequisites used while building GLib or firmware's
+                # crypto prefix. Selected binary inputs remain separately listed.
                 archive = directory / package['archive']
                 if sha(archive) != package['sha256']:
                     p.error('Release source archive differs from pin: ' + package['name'])
@@ -118,6 +119,8 @@ def main():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(archive, target)
                 components.append({'name': package['name'], 'source_reference': package['url'],
+                                   'role': 'linked' if used else 'build-prerequisite',
+                                   'linked_archives': used,
                                    'source_archive': target.relative_to(stage).as_posix(),
                                    'source_archive_sha256': package['sha256']})
                 if package['name'] in ['ffmpeg', 'glib', 'libgcrypt', 'libgpg-error', 'proxy-libintl']:
