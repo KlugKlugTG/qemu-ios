@@ -203,7 +203,7 @@ static const A4Board a4_k48 = {
         { 0, 0x39, TYPE_CD3272MIKEY },
         /* I2C2: LIS331DLH accelerometer and TSL2581 light sensor. */
         { 2, 0x19, TYPE_LIS302DL },
-        { 2, 0x39, TYPE_S5L8930_TSL2581 },
+        { 2, 0x39, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
     },
     /* On the iPad the LIS331 sits turned 180 degrees about X relative to
      * the iPod's mounting: the iPod vectors read with Y (and Z) negated.
@@ -254,7 +254,7 @@ static const A4Board a4_n81 = {
         /* CS42L59 (audio0): the same MAP register file the CS42L61 driver saw. */
         { 0, 0x4a, TYPE_CS42L59 },
         { 2, 0x19, TYPE_LIS302DL },
-        { 2, 0x49, TYPE_S5L8930_TSL2581 },
+        { 2, 0x49, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
         { 2, 0x68, TYPE_S5L8930_L3G4200D, 0x21, 0x05 },   /* gyro,ap3gdl: INT1, INT2 */
     },
     /* DT accelerometer orientation rows (0,-1,0) (-1,0,0) (0,0,1): x reads -y, y reads -x. */
@@ -1158,6 +1158,9 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
             continue;
         }
         slave = i2c_slave_new(d->type, d->addr);
+        if (object_dynamic_cast(OBJECT(slave), TYPE_S5L8930_TSL2581)) {
+            object_property_add_child(OBJECT(s), "lightsensor", OBJECT(slave));   /* qom-set its lux */
+        }
         dev = DEVICE(slave);
         if (!strcmp(d->type, TYPE_LIS302DL)) {
             /*

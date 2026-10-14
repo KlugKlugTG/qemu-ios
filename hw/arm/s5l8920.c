@@ -251,7 +251,7 @@ static const S5L8920Board s5l8920_n88 = {
         { 0, 0x39, TYPE_CD3272MIKEY },
         { 0, 0x1d, TYPE_LIS302DL },
         { 0, 0x1e, TYPE_S5L8930_AK8973 },
-        { 2, 0x49, TYPE_S5L8930_TSL2561 },
+        { 2, 0x49, TYPE_S5L8930_TSL2561, 0x9e },     /* DT als interrupt */
     },
     /* DT accelerometer orientation 7 where the N18's (and the N72's) is 4: bits 0 and 1 more, which negate x
      * and y in AppleLIS302DL, as the M68's 0 to the N45's 3. The model reads as the N18's part; without this
@@ -520,6 +520,9 @@ static void s5l8920_i2c_create(S5L8920MachineState *s, int n)
             continue;
         }
         slave = i2c_slave_new(d->type, d->addr);
+        if (object_dynamic_cast(OBJECT(slave), TYPE_S5L8930_TSL2581)) {
+            object_property_add_child(OBJECT(s), "lightsensor", OBJECT(slave));   /* qom-set its lux */
+        }
         if (!strcmp(d->type, TYPE_LIS302DL) && s->board->accel_mount) {
             qdev_prop_set_string(DEVICE(slave), "mount", s->board->accel_mount);
         }
