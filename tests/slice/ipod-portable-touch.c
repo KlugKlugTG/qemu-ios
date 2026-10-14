@@ -1,6 +1,6 @@
 /* Exercise production stable-ID admission and batching, not a copied mapper.
  * SLICE:qemu-ios-ui contrib/ios-app/qemu-ios-ui.h file
- * SLICE contrib/ios-app/qemu-ios-ui.c fn portable_touch_bh qemu_ios_portable_touch qemu_ios_portable_input_status
+ * SLICE contrib/ios-app/qemu-ios-ui.c fn portable_touch_bh portable_touch_discard qemu_ios_portable_touch qemu_ios_portable_input_status
  * CFLAGS -Wall -Werror -Wno-unused-function -Wno-comment
  */
 #include <assert.h>
@@ -39,7 +39,7 @@ static void portable_emit(int slot,int phase,double x,double y) {
  events[emits].slot=slot;events[emits].phase=phase;events[emits].x=x;events[emits].y=y;emits++;
 }
 static void qemu_input_event_sync_impl(void){syncs++;}
-static void aio_bh_schedule_oneshot(void *ctx,void(*cb)(void*),void*arg){cb(arg);}
+static bool ios_input_enqueue(void(*cb)(void*),void*arg,void(*discard)(void*)){cb(arg);return true;}
 #include "slice.h"
 static QemuIosPortableContact contact(uint32_t id,int phase,double x,double y) {
  return (QemuIosPortableContact){.size=sizeof(QemuIosPortableContact),.version=1,.contact_id=id,.phase=phase,.x=x,.y=y};
