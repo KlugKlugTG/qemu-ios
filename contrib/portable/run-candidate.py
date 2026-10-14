@@ -203,6 +203,18 @@ def validate_elf(target, output):
     return {'exports': len(exports), 'needed': needed, 'load_alignment': alignments}
 
 
+def freeze_files(build, frozen, names):
+    frozen.mkdir(parents=True, exist_ok=False)
+    for name in names:
+        expected = sha(build / name)
+        shutil.copyfile(build / name, frozen / name)
+        require(sha(frozen / name) == expected and sha(build / name) == expected,
+                'frozen copy differs: ' + name)
+    for name in names:
+        (frozen / name).chmod(0o444)
+    frozen.chmod(0o555)
+
+
 def execute(plan, plan_sha):
     output = Path(plan['run_output'])
     output.mkdir(parents=True, exist_ok=False)
@@ -230,17 +242,17 @@ def execute(plan, plan_sha):
             if target.get('sourcekit'):
                 require(sha(Path(target['sourcekit']) / 'bundle.json'), 'sourcekit receipt missing')
             frozen = output / 'frozen' / manifest['library_sha256']
-            frozen.mkdir(parents=True, exist_ok=False)
-            for name in ['libqemu-arm.so', 'portable-manifest.json', 'scheduler-actual-argv.json']:
-                shutil.copyfile(build / name, frozen / name)
+            names = ['libqemu-arm.so', 'portable-manifest.json', 'scheduler-actual-argv.json']
             if target.get('cpp_input'):
-                shutil.copyfile(build / 'libc++_shared.so', frozen / 'libc++_shared.so')
+                names.append('libc++_shared.so')
+            freeze_files(build, frozen, names)
             artifacts.append({'abi': abi, 'frozen': str(frozen), 'library_sha256': manifest['library_sha256'],
                               'manifest_sha256': sha(frozen / 'portable-manifest.json'), 'elf': elf,
                               'notice_manifest_sha256': sha(Path(target['notices']) / 'manifest.json'),
                               'sourcekit_manifest_sha256': sha(Path(target['sourcekit']) / 'bundle.json')
                               if target.get('sourcekit') else None})
             (output / 'artifacts.json').write_text(json.dumps(artifacts, indent=2) + '\n')
+        (output / 'frozen').chmod(0o555)
     finally:
         (output / 'terminal.json').write_text(json.dumps({'approved_plan_sha256': plan_sha,
             'completed_abis': [a['abi'] for a in artifacts], 'target_guest_verified': False,

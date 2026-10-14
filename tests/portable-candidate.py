@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import os
+import stat
 from pathlib import Path
 import subprocess
 import tempfile
@@ -16,6 +17,27 @@ spec.loader.exec_module(candidate)
 
 
 class Candidate(unittest.TestCase):
+    def test_actual_frozen_copies_are_verified_and_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            build = root / 'build'
+            build.mkdir()
+            names = ['libqemu-arm.so', 'portable-manifest.json',
+                     'scheduler-actual-argv.json', 'libc++_shared.so']
+            for name in names:
+                (build / name).write_text(name + '\n')
+            frozen = root / 'frozen' / 'first-abi'
+            candidate.freeze_files(build, frozen, names)
+            try:
+                self.assertEqual(stat.S_IMODE(frozen.stat().st_mode), 0o555)
+                for name in names:
+                    self.assertEqual(candidate.sha(frozen / name), candidate.sha(build / name))
+                    self.assertEqual(stat.S_IMODE((frozen / name).stat().st_mode), 0o444)
+                # The shared parent must remain writable for the next ABI.
+                (frozen.parent / 'next-abi').mkdir()
+            finally:
+                frozen.chmod(0o755)  # Allow ordinary temporary-tree cleanup.
+
     def test_preflight_mismatch_never_starts_command_or_creates_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
