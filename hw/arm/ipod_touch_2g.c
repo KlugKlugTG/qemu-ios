@@ -1482,6 +1482,9 @@ static void ipod_touch_ap_power(void *opaque, int n, int on)
     IPodTouchMachineState *nms = opaque;
 
     if (on) {
+#ifndef __APPLE__
+        nms->gpio_state->ap_wake_reset_pending = true;
+#endif
         nms->resume_boot = true;
         if (nms->sdio_state) {
             nms->sdio_state->ap_waking = true;
@@ -2218,6 +2221,25 @@ static void ipod_touch_key_event(void *opaque, int keycode)
     uint32_t button_gpio = 0;
 
     IPodTouchMultitouchState *s = (IPodTouchMultitouchState *)opaque;
+#ifndef __APPLE__
+    /* Record the physical level even when reset made the pad already equal. */
+    uint32_t host_gpio = 0;
+    bool host_high = false;
+    switch (keycode) {
+    case KEY_P_DOWN: host_gpio = GPIO_BUTTON_POWER; host_high = true; break;
+    case KEY_P_UP: host_gpio = GPIO_BUTTON_POWER; break;
+    case KEY_H_DOWN: host_gpio = GPIO_BUTTON_HOME; host_high = true; break;
+    case KEY_H_UP: host_gpio = GPIO_BUTTON_HOME; break;
+    case KEY_MIN_DOWN: host_gpio = GPIO_BUTTON_VOLDOWN; break;
+    case KEY_MIN_UP: host_gpio = GPIO_BUTTON_VOLDOWN; host_high = true; break;
+    case KEY_PLUS_DOWN: host_gpio = GPIO_BUTTON_VOLUP; break;
+    case KEY_PLUS_UP: host_gpio = GPIO_BUTTON_VOLUP; host_high = true; break;
+    default: break;
+    }
+    if (host_gpio) {
+        ipod_touch_gpio_record_host_input(s->gpio_state, host_gpio, host_high);
+    }
+#endif
     if(keycode == KEY_P_DOWN || keycode == KEY_P_UP) {
         // power button
         gpio_group = GPIO_BUTTON_POWER_IRQ / NUM_GPIO_PINS;
@@ -2749,6 +2771,13 @@ static void ipod_touch_powerdown_arm(IPodTouchMachineState *nms, int ms)
  * power and home buttons an emulated device that sleeps can never be woken.
  * This is the same key path, addressed by name instead of by keystroke.
  */
+#ifndef __APPLE__
+bool ipod_touch_ap_wake_reset_pending(void)
+{
+    return s_kbd_mt && s_kbd_mt->gpio_state->ap_wake_reset_pending;
+}
+#endif
+
 void ipod_touch_press_button(IPodTouchButton button, bool down)
 {
 	int base;

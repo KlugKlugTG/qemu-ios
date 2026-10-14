@@ -52,10 +52,15 @@ static void portable_runstate_changed(void *opaque, bool running, RunState state
     qatomic_set(&portable_paused, !running);
 }
 static void portable_release_all(void);
+static void portable_release_input(bool preserve_buttons);
 static void ios_sequence_reset(void *opaque)
 {
     ios_sequence_cancel_current();
+#ifndef __APPLE__
+    portable_release_input(ipod_touch_ap_wake_reset_pending());
+#else
     portable_release_all();
+#endif
 }
 #include "hw/arm/ipod_touch_pcf50633_pmu.h"
 #include "hw/arm/ipod_touch_lcd.h"
@@ -1080,7 +1085,7 @@ static void portable_emit(int slot, int phase, double x, double y)
                phase == QEMU_IOS_TOUCH_UPDATE ? INPUT_MULTI_TOUCH_TYPE_UPDATE : INPUT_MULTI_TOUCH_TYPE_END;
     qemu_input_event_send_impl(ios.con, &event);
 }
-static void portable_release_all(void)
+static void portable_release_input(bool preserve_buttons)
 {
     if (ios.con) {
         for (int i = 0; i < 5; i++) {
@@ -1096,14 +1101,20 @@ static void portable_release_all(void)
         qemu_input_event_sync_impl();
     }
     ios_manual_touch = ios_manual_touch2 = false;
-    for (int i = 0; i < 4; i++) {
-        if (ios_button_holds[i].release) timer_del(ios_button_holds[i].release);
-        if (ios_button_holds[i].down) ios_button_release(&ios_button_holds[i]);
+    if (!preserve_buttons) {
+        for (int i = 0; i < 4; i++) {
+            if (ios_button_holds[i].release) timer_del(ios_button_holds[i].release);
+            if (ios_button_holds[i].down) ios_button_release(&ios_button_holds[i]);
+        }
     }
     LIS302DLState *a = portable_accel();
     if (a) lis302dl_clear_host_motion(a);
     portable_touch_timestamp = 0;
     portable_motion_timestamp[0] = portable_motion_timestamp[1] = 0;
+}
+static void portable_release_all(void)
+{
+    portable_release_input(false);
 }
 static void portable_cancel_bh(void *unused) { qemu_ios_ui_cancel_input(); }
 int qemu_ios_portable_cancel_input(void)

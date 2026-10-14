@@ -25,6 +25,10 @@ typedef enum {
  * that has gone to sleep cannot be woken any other way.
  */
 void ipod_touch_press_button(IPodTouchButton button, bool down);
+#ifndef __APPLE__
+/* BQL-only: remains true throughout every hold callback of an n72 AP wake. */
+bool ipod_touch_ap_wake_reset_pending(void);
+#endif
 /* The iPad 1's buttons (GPIO pins), same contract; no-op on other machines. */
 void ipad1_press_button(IPodTouchButton button, bool down);
 /* The iPod touch 1G's (GPIO pads 0x16), home and power only; no-op on other machines. */
