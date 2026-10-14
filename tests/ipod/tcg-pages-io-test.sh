@@ -13,7 +13,17 @@ set -u
 QEMU="${QEMU:-$(cd "$(dirname "$0")/../.." && pwd)/build/qemu-system-arm}"
 [ -x "$QEMU" ] || { echo "FAIL no emulator at $QEMU: build it or set QEMU="; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/tcgio.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+pid=
+cleanup() {
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+    rm -rf "$TMP"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 words() { for word in "$@"; do printf '%s' "${word:6:2}${word:4:2}${word:2:2}${word:0:2}"; done; }
 {
     words e3a0343d e3833601 e3a04ffa ea0000f3   # r3 = CHIPID (0x3d100000); r4 = 1000; b 0x3e0
@@ -30,6 +40,7 @@ mkdir "$TMP/nand"
 pid=$!
 for _ in $(seq 50); do grep -q '/0000000000000418/' "$TMP/exec.log" 2>/dev/null && break; sleep 0.2; done
 kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+pid=
 grep -q '/0000000000000418/' "$TMP/exec.log" || { echo "FAIL the program never reached its end"; exit 1; }
 rewound=$(grep -c 'cpu_io_recompile: rewound' "$TMP/exec.log")
 fail=0
