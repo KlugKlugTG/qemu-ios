@@ -243,7 +243,6 @@ typedef struct {
 	/* USB device-mode options; see ipod_touch_instance_init(). */
 	char usb_tcp_addr[256];   /* host:port of the host bridge, empty = disabled */
 	bool usb_attached;        /* assert PMU USB cable presence */
-	bool mbx_irq;             /* wire the MBX completion interrupt */
 	bool usb_patch_mux_gate;  /* retired option, always false */
 	bool wifi;                /* present a BCM4325 on the SDIO bus */
 	bool gles_debug;          /* paint what the GL bridge refuses magenta (tests) */

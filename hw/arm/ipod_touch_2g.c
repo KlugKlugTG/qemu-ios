@@ -1409,16 +1409,6 @@ static void ipod_touch_set_usb_patch_mux_gate(Object *obj, bool value, Error **e
     }
 }
 
-static bool ipod_touch_get_mbx_irq(Object *obj, Error **errp)
-{
-    return IPOD_TOUCH_MACHINE(obj)->mbx_irq;
-}
-
-static void ipod_touch_set_mbx_irq(Object *obj, bool value, Error **errp)
-{
-    IPOD_TOUCH_MACHINE(obj)->mbx_irq = value;
-}
-
 /*
  * Accelerometer controls, forwarded to the LIS302DL. These live on the machine
  * (a stable /machine QOM path) so a host can drive rotation/shake over QMP:
@@ -1812,15 +1802,6 @@ static void ipod_touch_instance_init(Object *obj)
         "Percent per virtual minute while unplugged or charging is forced off; zero disables drain");
     object_property_add_str(obj, "battery-charging", ipod_touch_get_battery_charging,
                             ipod_touch_set_battery_charging);
-    /* On by default: this gates the verified MBX MMU request/ack mirror
-     * (ipod_touch_mbx.c), which stops the ~21M-read disable-loop spin that
-     * froze OpenGL ES apps. The 2D boot path does not touch the MMU handshake,
-     * so defaulting it on is safe there. */
-    IPOD_TOUCH_MACHINE(obj)->mbx_irq = true;
-    object_property_add_bool(obj, "mbx-irq", ipod_touch_get_mbx_irq, ipod_touch_set_mbx_irq);
-    object_property_set_description(obj, "mbx-irq",
-        "Raise a completion interrupt for the unemulated MBX GPU so an app that "
-        "submits work does not wait for it forever. Cannot make anything render");
 
     object_property_add_bool(obj, "usb-attached", ipod_touch_get_usb_attached, ipod_touch_set_usb_attached);
     object_property_set_description(obj, "usb-attached",
@@ -3401,7 +3382,6 @@ static void ipod_touch_machine_init(MachineState *machine)
     dev = qdev_new("ipodtouch.mbx");
     IPodTouchMBXState *mbx_state = IPOD_TOUCH_MBX(dev);
     nms->mbx_state = mbx_state;
-    mbx_state->irq_enabled = nms->mbx_irq;
     sysbus_realize(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, s5l8900_get_irq(nms, S5L8720_MBX_IRQ));
     memory_region_add_subregion(sysmem, MBX1_MEM_BASE, &mbx_state->iomem1);

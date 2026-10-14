@@ -1136,13 +1136,10 @@ static void n45_machine_init(MachineState *machine)
     }
 
     /*
-     * MBX: the 2G's model, the same PowerVR MBX Lite and the same AppleMBX driver. The id stub it
-     * replaces read 0x12c (interrupt status) without the idle bit 0x40, so the first time anything
-     * drove the engine (LayerKit's GL path, a display swap) the driver spun on it forever.
-     * Interrupt 0xC is the mbx node's in the n45ap device tree.
+     * MBX: the 2G's model, the same PowerVR MBX Lite and the same AppleMBX driver, with no wrapper
+     * registers mapped here. Interrupt 0xC is the mbx node's in the n45ap device tree.
      */
     dev = qdev_new("ipodtouch.mbx");
-    IPOD_TOUCH_MBX(dev)->irq_enabled = true;
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, n45_irq(s, N45_MBX_IRQ));
     memory_region_add_subregion(sysmem, N45_MBX_BASE, &IPOD_TOUCH_MBX(dev)->iomem1);
