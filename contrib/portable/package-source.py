@@ -76,7 +76,10 @@ def main():
                         omitted += 1
                         continue
                     data = archive.extractfile(member).read()
-                    if b'\0' in data:
+                    # QEMU's tracked, pinned pure-Python build-tool wheels are
+                    # needed by offline configure and contain their notices.
+                    build_wheel = name.parts[:2] == ('python', 'wheels') and name.suffix == '.whl'
+                    if b'\0' in data and not build_wheel:
                         omitted += 1
                         continue
                     expected = engine['source_inputs'].get(name.as_posix())

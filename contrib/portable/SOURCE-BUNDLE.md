@@ -6,6 +6,8 @@ dependency source archives, downstream patches/build recipes, pinned libfdt
 source, actual linked objects/static archives, explicit relink arguments and
 offline notices. Guest firmware, ROMs, NAND, prepared bases and captures are
 excluded. Original objects retain compiler debug/build-path metadata.
+The immutable source includes QEMU's tracked pure-Python build-tool wheels so
+configure can run offline; those archives retain their embedded license notices.
 
 This material covers the native engine. Complete application/firmware source
 and notices, publication availability and chosen license-compliance route must
