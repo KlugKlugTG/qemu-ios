@@ -1104,6 +1104,7 @@ static void ipod_touch_stage_ramdisk(IPodTouchMachineState *nms)
             (unsigned long long)delay_ms);
 }
 
+#ifdef __APPLE__
 /*
  * boot-args: set the XNU kernel command line late in boot.
  *
@@ -1380,6 +1381,93 @@ static void ipod_touch_stage_boot_args(IPodTouchMachineState *nms)
             (unsigned long long)delay_ms);
 }
 
+#else
+/*
+ * Portable boot-args: the kernel command line, handed over by iBoot itself.
+ * Adapted from upstream 1b451cc86c77c153fae1d7be2d4f151e693a9d75;
+ * upstream code retains its original licensing.
+ *
+ * Release iBoots ignore the boot-args variable: they format
+ * gBootArgs.commandLine with snprintf(commandLine, 0x100, "%s ", "") (7E18:
+ * "gBootArgs.commandLine = [ ]"). The literal-pool slot holding that format's
+ * address is found by pattern (it_iboot_find_boot_args_format, every n72 iBoot
+ * 2.1.1 .. 4.2.1) and pointed at commandLine itself, filled with the
+ * arguments, '%' doubled, so snprintf copies them onto themselves and iBoot
+ * hands the kernel exactly them (the idea is Martijn de Vos's, who used a
+ * per-build address table). commandLine is iBoot BSS, cleared when it starts,
+ * so both are written before each NAND read iBoot makes; reads made from
+ * anywhere else (LLB, the kernel) are left alone. Empty boot-args leaves
+ * iBoot's own empty command line.
+ */
+#define BOOT_ARGS_CMDLINE_LEN   256
+#define IBOOT_SCAN_PA_START     0x0ff00000u
+#define IBOOT_SCAN_LEN          0x00040000u   /* the n72 iBoot image and its BSS */
+
+static const char *ipod_touch_requested_boot_args(IPodTouchMachineState *nms)
+{
+    return nms->boot_args[0] ? nms->boot_args : NULL;
+}
+
+/* `args` with every '%' doubled, as the format snprintf reads: false if it doesn't fit `out`. */
+static bool boot_args_as_format(const char *args, char *out, size_t size)
+{
+    size_t n = 0;
+
+    for (; *args; args++) {
+        if (n + (*args == '%' ? 2 : 1) >= size) {
+            return false;
+        }
+        if (*args == '%') {
+            out[n++] = '%';
+        }
+        out[n++] = *args;
+    }
+    out[n] = '\0';
+    return true;
+}
+
+static void ipod_touch_boot_args_before_nand_read(Notifier *notifier, void *data)
+{
+    IPodTouchMachineState *nms = container_of(notifier, IPodTouchMachineState,
+                                             boot_args_nand_read);
+    const char *args = ipod_touch_requested_boot_args(nms);
+    uint32_t pc = nms->cpu->env.regs[15];
+    char format[BOOT_ARGS_CMDLINE_LEN] = { 0 };
+    uint8_t slot[4];
+
+    if (!args || pc - IBOOT_SCAN_PA_START >= IBOOT_SCAN_LEN) {
+        return;
+    }
+    if (!nms->boot_args_format) {
+        g_autofree uint8_t *image = g_try_malloc(IBOOT_SCAN_LEN);
+        if (!image) {
+            return;
+        }
+        cpu_physical_memory_read(IBOOT_SCAN_PA_START, image, IBOOT_SCAN_LEN);
+        nms->boot_args_format = it_iboot_find_boot_args_format(
+            image, IBOOT_SCAN_LEN, IBOOT_SCAN_PA_START, &nms->boot_args_command_line);
+        if (!nms->boot_args_format) {
+            warn_report_once("boot-args: unqualified iBoot; command-line format was not found; "
+                             "the kernel gets iBoot's own command line");
+            return;
+        }
+    }
+    if (!boot_args_as_format(args, format, sizeof(format))) {
+        return; /* The startup setter rejects this; do not write partial data. */
+    }
+    if (!nms->boot_args_reported) {
+        fprintf(stderr, "[IT_BOOT_ARGS] iBoot format slot 0x%08x, CommandLine "
+                "0x%08x; kernel arguments supplied before NAND read\n",
+                nms->boot_args_format, nms->boot_args_command_line);
+        nms->boot_args_reported = true;
+    }
+    stl_le_p(slot, nms->boot_args_command_line);
+    cpu_physical_memory_write(nms->boot_args_format, slot, sizeof(slot));
+    cpu_physical_memory_write(nms->boot_args_command_line, format, sizeof(format));
+}
+
+#endif
+
 static void ipod_touch_load_direct_boot(IPodTouchMachineState *nms)
 {
     const char *iboot_path = nms->direct_iboot[0] ? nms->direct_iboot : NULL;
@@ -1415,7 +1503,9 @@ static void ipod_touch_load_direct_boot(IPodTouchMachineState *nms)
 
         /* Optional bring-up helpers run after staging the iBoot image. */
         ipod_touch_stage_ramdisk(nms);
+#ifdef __APPLE__
         ipod_touch_stage_boot_args(nms);
+#endif
     }
 }
 
@@ -1427,7 +1517,12 @@ static void ipod_touch_cpu_reset(void *opaque)
     bool resume = nms->resume_boot;
 
     nms->resume_boot = false;
+#ifdef __APPLE__
     nms->compat_command_line = 0;
+#else
+    nms->boot_args_format = 0;
+    nms->boot_args_reported = false;
+#endif
     if (!resume) {
         /* Across a hibernate the guest's side of these lives on in DRAM. */
         ipod_agent_reset(nms->agent);
@@ -1602,10 +1697,19 @@ static void ipod_touch_set_boot_args(Object *obj, const char *value, Error **err
         error_setg(errp, "boot-args must be set before the machine starts");
         return;
     }
+#ifdef __APPLE__
     if (strlen(value) >= BOOT_ARGS_CMDLINE_LEN) {
         error_setg(errp, "boot-args exceeds the kernel's 255-byte command line");
         return;
     }
+#else
+    char format[BOOT_ARGS_CMDLINE_LEN];
+    if (!boot_args_as_format(value, format, sizeof(format))) {
+        error_setg(errp, "boot-args exceeds the kernel's 255-byte command line "
+                   "(each %% counts twice)");
+        return;
+    }
+#endif
     g_strlcpy(nms->boot_args, value, sizeof(nms->boot_args));
     nms->boot_args_explicit = true;
 }
@@ -2077,23 +2181,43 @@ static void ipod_touch_instance_init(Object *obj)
     /* No default override: unconfigured boots retain firmware defaults. */
     object_property_add_str(obj, "boot-args", ipod_touch_get_boot_args, ipod_touch_set_boot_args);
     object_property_set_description(obj, "boot-args",
-        "Startup kernel command line (at most 255 bytes); empty disables injection");
+#ifdef __APPLE__
+        "Startup kernel command line (at most 255 bytes); empty disables injection"
+#else
+        "Kernel command line handed over by n72 iBoot (255 bytes, each % counts twice); empty keeps firmware arguments"
+#endif
+    );
 
     object_property_add(obj, "boot-args-delay-ms", "uint32",
                         ipod_touch_get_boot_args_delay_ms,
                         ipod_touch_set_boot_args_delay_ms, NULL, NULL);
     object_property_set_description(obj, "boot-args-delay-ms",
-        "Initial command-line write delay in virtual milliseconds (0..3600000; default 0)");
+#ifdef __APPLE__
+        "Initial command-line write delay in virtual milliseconds (0..3600000; default 0)"
+#else
+        "Deprecated compatibility option; parsed but inert on portable n72 early-handoff hook"
+#endif
+    );
     object_property_add(obj, "boot-args-repeat", "uint32",
                         ipod_touch_get_boot_args_repeat,
                         ipod_touch_set_boot_args_repeat, NULL, NULL);
     object_property_set_description(obj, "boot-args-repeat",
-        "Command-line write count (0..1000000; default 24; 0 still performs the initial write)");
+#ifdef __APPLE__
+        "Command-line write count (0..1000000; default 24; 0 still performs the initial write)"
+#else
+        "Deprecated compatibility option; parsed but inert on portable n72 early-handoff hook"
+#endif
+    );
     object_property_add(obj, "boot-args-interval-ms", "uint32",
                         ipod_touch_get_boot_args_interval_ms,
                         ipod_touch_set_boot_args_interval_ms, NULL, NULL);
     object_property_set_description(obj, "boot-args-interval-ms",
-        "Command-line refresh interval after discovery, in virtual milliseconds (1..3600000; default 500)");
+#ifdef __APPLE__
+        "Command-line refresh interval after discovery, in virtual milliseconds (1..3600000; default 500)"
+#else
+        "Deprecated compatibility option; parsed but inert on portable n72 early-handoff hook"
+#endif
+    );
 
     object_property_add_str(obj, "usb-tcp-addr", ipod_touch_get_usb_tcp_addr, ipod_touch_set_usb_tcp_addr);
     object_property_set_description(obj, "usb-tcp-addr",
@@ -3656,8 +3780,13 @@ static void ipod_touch_machine_init(MachineState *machine)
     fmss_state->nand_path = nms->nand_path;
     fmss_state->nand_overlay = nms->nand_overlay[0] ? nms->nand_overlay : NULL;
     nms->fmss_state = fmss_state;
+#ifdef __APPLE__
     nms->compat_nand_read.notify = ipod_touch_compat_before_nand_read;
     notifier_list_add(&fmss_state->before_read, &nms->compat_nand_read);
+#else
+    nms->boot_args_nand_read.notify = ipod_touch_boot_args_before_nand_read;
+    notifier_list_add(&fmss_state->before_read, &nms->boot_args_nand_read);
+#endif
     busdev = SYS_BUS_DEVICE(dev);
     memory_region_add_subregion(sysmem, FMSS_MEM_BASE, &fmss_state->iomem);
     sysbus_realize(busdev, &error_fatal);
