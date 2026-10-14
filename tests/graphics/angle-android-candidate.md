@@ -1,10 +1,10 @@
 # Pinned Android ANGLE candidate
 
-The pinned x86_64 GLES backend now builds and passes ELF closure inspection;
-runtime graphics remain unqualified. The physical Poco native path remains the
-default. Do not qualify ANGLE until its actual Bionic libraries execute the full
-adapter probes and required guest workloads in the packaged worker on both AVD
-page sizes.
+The pinned x86_64 GLES backend builds, passes ELF closure inspection, and passes
+the complete shell adapter probes on both 4 KiB and 16 KiB AVDs. Packaged-worker
+loading and actual guest graphics remain unqualified. The physical Poco native
+path remains the default. Shell probe success does not qualify the required
+guest workloads in the app UID.
 
 ## Why a separate frontend is needed
 
@@ -57,6 +57,18 @@ slot is allocated:
 ```sh
 bash tests/graphics/build-angle-android.sh --fetch-only NEW_PRIVATE_DIRECTORY x64 gl
 bash tests/graphics/build-angle-android.sh --build-only SAME_PRIVATE_DIRECTORY x64 gl
+```
+
+The tested candidate02 disables optional Abseil and Perfetto dependencies in a
+separate output directory, preserving candidate01. On an initialized checkout,
+prepare its GN graph without hooks or compilation, then build only after resource
+allocation:
+
+```sh
+ANGLE_PROFILE=no-abseil-perfetto bash tests/graphics/build-angle-android.sh \
+  --prepare-only SAME_PRIVATE_DIRECTORY x64 gl
+ANGLE_PROFILE=no-abseil-perfetto bash tests/graphics/build-angle-android.sh \
+  --build-only SAME_PRIVATE_DIRECTORY x64 gl
 ```
 
 The fetch phase records actual dependency revisions in `source-receipt.txt`.
@@ -141,8 +153,9 @@ needs inspection. Record each object's `DT_NEEDED`, exported symbols and the
 actual library owner of resolved addresses; do not rely on a filename suffix or
 assume `RTLD_LOCAL` alone prevents interposition. Validate in the app worker after
 system graphics libraries have loaded, including cross-version texture sharing
-and teardown. The source loader is implemented and cross-builds on both Android
-ABIs, but its runtime address checks and rendering are not yet qualified.
+and teardown. The source loader cross-builds on both Android ABIs. Its runtime
+address checks and complete shell probes passed on both AVD page sizes; app-UID
+loading after system-library initialization still requires validation.
 
 Choose the backing renderer explicitly through ANGLE's public
 `eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, ...)`, with
@@ -155,8 +168,9 @@ The Android GLES backing path loads `/system/lib64/libEGL.so` in
 so the suffixed frontend must remain distinct from that platform runtime.
 Log the selected frontend and backing renderer and fail on unsupported
 selection rather than silently changing providers. The current inventory
-describes the existing native path; this planned display-selection entry point
-would extend it.
+includes the additional public display-selection entry point. Each actual probe
+verified 197 unique public EGL/GL/OES addresses owned by the selected EGL or
+GLESv2 implementation, alongside the exact bytes of all three libraries.
 
 First run raw combine and complete production probes using the candidate's own
 EGL/GLES dispatch, including API1/API2 context sharing, object lifetime, DrawTex,
@@ -167,3 +181,52 @@ Repeat on 4 KiB and 16 KiB AVDs with source/fixture/package receipts. Keep snaps
 unavailable and require fresh-worker cold restart. Any required feature gap
 must be fixed or recorded as a failed gate; do not weaken the workload or replace
 its pixels.
+
+## Actual shell results and selected notices
+
+On 2026-10-14, candidate01 and the separate no-Abseil/no-Perfetto candidate02
+both passed raw two-unit ADD with either active unit, full production rendering,
+and packed-pixel/error-state probes on API35 AVDs with actual page sizes 4096 and
+16384. Each probe returned its final PASS sentinel and actual shell exit 0.
+Full rendering includes GLES1 red, multitexture, DrawTex/fog, rectangle corner
+pixels and matrix order, shared deletion/name reuse/FBO queries, GLES2 green,
+cross-version sharing and teardown. Frozen probe binaries were unchanged between
+the two candidates. Receipts retained their source/binary/library hashes,
+address owners, target fingerprints and exact emulator/Xvfb processes; all owned
+processes stopped at terminal.
+
+Host-mode Android captures were inspected. Candidate02's 4 KiB capture showed
+System UI not responding; its 16 KiB capture showed a black Android screen with
+the navigation bar. Neither is a guest image or Android UI acceptance. Actual
+packaged guest validation should use an explicitly selected supported GLES3
+backing driver and retain matching copied guest and Surface images.
+
+Candidate02 libraries have these SHA256 identities:
+
+| Library | SHA256 |
+| --- | --- |
+| libEGL_lighttouch_angle.so | 2e33859a4cd84f46ff07bf68ba4975a307fa31e85946d0e5d901551c30d8cd57 |
+| libGLESv1_CM_lighttouch_angle.so | e3c3a9c8311e039424fc3bc55fd1b3ad1719f75e2ad1510136d291e3e1f9edca |
+| libGLESv2_lighttouch_angle.so | 1f88f4c575feae2e9cecb5eccfc39bcb9d84edf78bff3ce543bd0aa9e4be56aa |
+
+`angle-selected-inputs.py` records actual direct objects and forced thin-archive
+members from Ninja's reviewed whole-archive link rule, mapping each object to its
+actual compile source and hashes. With `--headers-output`, it checks the compiler
+dependency records of every selected object and records actual Khronos headers
+and optional dependency counts. Candidate01 selected 982 distinct objects;
+candidate02 selected 417. All candidate02 objects mapped to sources, with no
+Abseil or Perfetto object or header inputs. Sixteen selected Vulkan headers carry
+Apache-2.0 OR MIT grants; the notice bundle retains the MIT choice. No SPIRV
+header or object inputs were selected. Final section GC and ordinary compiler-rt
+archive extraction are explicitly separate from this forced-input inventory.
+
+`make-angle-notices.py` emits the common offline viewer's schema1 manifest with
+public source references/revisions, safe relative filenames, exact input library
+hashes, notices and selected-input inventories. Candidate02's bundle has ten
+component notices and fourteen hashed files. It retains the LLVM exceptions for
+libc++/libc++abi/libunwind/compiler-rt and the selected generated parser's Bison
+exception. Its compiler-rt grant uses public source at the compiler package's
+base revision; the downstream compiler's reported revision differs, so the
+bundle preserves that provenance qualification. Complete corresponding-source
+and application license compatibility review remain open. A broad upstream
+license inventory or shell rendering pass cannot decide those questions.
