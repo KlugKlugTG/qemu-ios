@@ -21,10 +21,11 @@ destination = a.destination.absolute()
 if destination.exists():
     p.error('Use a fresh writable source directory')
 shutil.copytree(bundle / 'source/qemu', destination)
-dtc = destination / 'subprojects/dtc'
-dtc.mkdir(exist_ok=True)
-with tarfile.open(bundle / 'source/dependencies/dtc-source.tar') as archive:
-    archive.extractall(dtc, filter='data')
+for name in ['dtc', 'keycodemapdb']:
+    target = destination / 'subprojects' / name
+    target.mkdir(exist_ok=True)
+    with tarfile.open(bundle / 'source/dependencies' / (name + '-source.tar')) as archive:
+        archive.extractall(target, filter='data')
 recipe = destination / 'contrib/portable/build-engine.py'
 original = recipe.read_text()
 needle = "'--audio-drv-list=']"
@@ -39,6 +40,8 @@ if original_meson.count(needle) != 1:
     raise RuntimeError('Reviewed firmware unpack rule no longer matches source preparation')
 # Upstream still creates blob unpack targets when install_blobs is false.
 meson.write_text(original_meson.replace(needle, needle + " and get_option('install_blobs')"))
+icons = destination / 'ui/icons/meson.build'
+icons.write_text('# Asset-free embedded engine: omit installation of unrelated host UI icons.\n')
 subprocess.run(['git', 'init', str(destination)], check=True)
 # Upstream ignores generated-looking names that are nevertheless tracked
 # source/configuration files. Preserve every supplied source in the local index.
@@ -48,4 +51,4 @@ subprocess.run(['git', '-c', 'user.name=Builder', '-c', 'user.email=builder@exam
                stdout=subprocess.DEVNULL)
 print('Prepared source revision from bundle:', metadata['source_revision'])
 print('Local identity:', subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=destination, text=True).strip())
-print('Build-only adjustments: disable installation/unpacking of unrelated firmware blobs')
+print('Build-only adjustments: disable firmware blob installation/unpacking and host UI icon installation')

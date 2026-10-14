@@ -121,19 +121,22 @@ def main():
                                    'source_archive_sha256': package['sha256']})
                 if package['name'] in ['ffmpeg', 'glib', 'libgcrypt', 'libgpg-error', 'proxy-libintl']:
                     replaceable.update({name: 'relink/inputs/archives/' + name for name in used})
-        # libfdt is the actual pinned source subproject, not an unpinned download.
-        wrap = (stage / 'source/qemu/subprojects/dtc.wrap').read_text()
-        dtc_revision = re.search(r'^revision\s*=\s*([0-9a-f]{40})$', wrap, re.M)[1]
-        dtc = ROOT / 'subprojects/dtc'
-        if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=dtc, text=True).strip() != dtc_revision:
-            p.error('libfdt checkout differs from pin')
-        subprocess.run(['git', 'diff', '--quiet', 'HEAD'], cwd=dtc, check=True)
-        dtc_tar = stage / 'source/dependencies/dtc-source.tar'
-        with dtc_tar.open('wb') as stream:
-            subprocess.run(['git', 'archive', '--format=tar', dtc_revision], cwd=dtc, stdout=stream, check=True)
-        components.append({'name': 'libfdt', 'source_revision': dtc_revision,
-                           'source_archive': 'source/dependencies/dtc-source.tar',
-                           'source_archive_sha256': sha(dtc_tar)})
+        # Include compiled libfdt and the preferred generated-keymap source.
+        for name, component in [('dtc', 'libfdt'), ('keycodemapdb', 'keycodemapdb')]:
+            wrap = (stage / 'source/qemu/subprojects' / (name + '.wrap')).read_text()
+            subrevision = re.search(r'^revision\s*=\s*([0-9a-f]{40})$', wrap, re.M)[1]
+            reference = re.search(r'^url\s*=\s*(\S+)$', wrap, re.M)[1]
+            tree = ROOT / 'subprojects' / name
+            if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=tree, text=True).strip() != subrevision:
+                p.error(component + ' checkout differs from pin')
+            subprocess.run(['git', 'diff', '--quiet', 'HEAD'], cwd=tree, check=True)
+            target = stage / 'source/dependencies' / (name + '-source.tar')
+            with target.open('wb') as stream:
+                subprocess.run(['git', 'archive', '--format=tar', subrevision], cwd=tree, stdout=stream, check=True)
+            components.append({'name': component, 'source_revision': subrevision,
+                               'source_reference': reference,
+                               'source_archive': target.relative_to(stage).as_posix(),
+                               'source_archive_sha256': sha(target)})
         mappings = {}
         ndk_inputs = {}
         thin_members = {}
@@ -165,6 +168,9 @@ def main():
                             p.error('Thin archive member escapes owned build directory')
                         member_target = target.parent / child.relative_to(path.parent.resolve())
                         member_target.parent.mkdir(parents=True, exist_ok=True)
+                        recorded = engine.get('archive_member_inputs', {}).get(original)
+                        if recorded is not None and recorded.get(str(child)) != sha(child):
+                            p.error('Thin archive member differs from recorded engine manifest')
                         shutil.copyfile(child, member_target)
                         thin_members[member_target.relative_to(stage).as_posix()] = sha(child)
             elif path.is_relative_to(ndk):

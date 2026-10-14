@@ -2,7 +2,7 @@
 
 This immutable directory represents one exact native engine identified by
 `bundle.json`. It includes its recorded QEMU source revision, selected upstream
-dependency source archives, downstream patches/build recipes, pinned libfdt
+dependency source archives, downstream patches/build recipes, pinned libfdt/keymap
 source, actual linked objects/static archives, explicit relink arguments and
 offline notices. Guest firmware, ROMs, NAND, prepared bases and captures are
 excluded. Original objects retain compiler debug/build-path metadata.
@@ -59,8 +59,9 @@ does not require rebuilding application code. Replacement results need actual
 target testing; a successful link alone does not establish compatibility.
 
 To rebuild the engine source, prepare a writable checkout with the validated
-helper below. It unpacks the pinned libfdt source and disables installation and
-unpacking of unrelated firmware blobs omitted from this bundle. Those build options
+helper below. It unpacks pinned libfdt/keymap source and disables installation
+and unpacking of unrelated firmware blobs and host UI icons omitted from this
+bundle. Those build options
 does not change the selected engine object code. Actual configure/rebuild
 validation remains required before claiming a reproduced build. The filtered
 source archive excludes nonbuild assets and research captures, so
