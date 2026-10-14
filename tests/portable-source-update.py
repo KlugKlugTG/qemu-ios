@@ -19,12 +19,15 @@ guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 previous = json.loads((build / 'engine-inputs.json').read_text())
 manifest = json.loads((build / 'portable-manifest.json').read_text())
-assert previous['recipe_sha256'] == guard.LEGACY_RECIPE
 current = copy.deepcopy(previous)
-current.update(schema=2, source_revision='test-clean-next-revision', recipe_sha256='reviewed-new-guard-recipe',
-               source_update_guard_sha256='guard-version', environment={},
-               tools={'compiler_version': manifest['tools']['compiler'],
-                      'ninja_version': manifest['tools']['ninja'], 'compiler_sha256': 'recorded-tool'})
+current['source_revision'] = 'test-clean-next-revision'
+if previous['recipe_sha256'] == guard.LEGACY_RECIPE and previous['schema'] == 1:
+    current.update(schema=2, recipe_sha256='reviewed-new-guard-recipe',
+                   source_update_guard_sha256='guard-version', environment={},
+                   tools={'compiler_version': manifest['tools']['compiler'],
+                          'ninja_version': manifest['tools']['ninja'], 'compiler_sha256': 'recorded-tool'})
+else:
+    assert previous['schema'] == 2
 
 with tempfile.TemporaryDirectory(prefix='source-update-') as temp:
     out = pathlib.Path(temp)
