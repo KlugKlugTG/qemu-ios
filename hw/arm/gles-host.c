@@ -7595,6 +7595,8 @@ static void gles_group_unref(GLESGroup *group)
     g_free(group);
 }
 
+#include "gles-host-context-cleanup.c.inc"
+
 static void gles_context_free(GLESHost *state)
 {
     GLESArray *arrays[] = { &state->vertex, &state->color, &state->normal, &state->pointsize };
@@ -7618,13 +7620,7 @@ static void gles_context_free(GLESHost *state)
     if (state->glsl) g_hash_table_destroy(state->glsl);
     if (state->uloc) g_hash_table_destroy(state->uloc);
     if (state->cgl) {
-        CGLSetCurrentContext(state->cgl);
-        glDeleteFramebuffersEXT(1, &state->fbo);
-        if (state->sync_fbo) glDeleteFramebuffersEXT(1, &state->sync_fbo);
-        if (state->copy_fbo) glDeleteFramebuffersEXT(1, &state->copy_fbo);
-        glDeleteTextures(1, &state->tex);
-        glDeleteRenderbuffersEXT(1, &state->depth);
-        CGLSetCurrentContext(NULL);
+        gles_context_delete_objects(state);
         CGLReleaseContext(state->cgl);
     }
     gles_group_unref(state->group);
