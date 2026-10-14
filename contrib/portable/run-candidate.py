@@ -44,6 +44,13 @@ def preflight(plan):
         version = subprocess.check_output(tool['version_argv'], text=True, stderr=subprocess.STDOUT,
                                           timeout=10).splitlines()[0]
         require(version == tool['version'], 'tool version changed: ' + tool['path'])
+    for project in plan.get('subprojects', []):
+        checkout = project['path']
+        require(subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=checkout, text=True).strip()
+                == project['revision'], 'subproject revision changed: ' + checkout)
+        require(subprocess.check_output(['git', 'status', '--porcelain=v1', '--untracked-files=all'],
+                                        cwd=checkout, text=True) == project['status'],
+                'subproject contents changed: ' + checkout)
     require(os.environ.get('PATH', '') == plan['path_environment'], 'operator PATH differs from pinned plan')
     destinations = [Path(plan['run_output'])]
     for target in plan['targets']:
@@ -60,7 +67,8 @@ def preflight(plan):
         require(not any((p / '.git').exists() for p in (destination, *destination.parents)),
                 'candidate outputs must be outside Git')
     return {'preflight': 'PASS', 'source': plan['source_revision'], 'android_api': 28,
-            'targets': [t['abi'] for t in plan['targets']], 'compiler_invoked': False}
+            'targets': [t['abi'] for t in plan['targets']], 'native_compilation_performed': False,
+            'tool_version_checks': len(plan['tools'])}
 
 
 def group_rss_kib(group):
