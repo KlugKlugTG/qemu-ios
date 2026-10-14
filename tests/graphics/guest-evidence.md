@@ -25,6 +25,52 @@ replacement/activity recreation, orderly stop and a fresh worker restart.
 The real guest's required multi-contact input and concurrent render/audio
 behavior remain part of integration validation; gyro is deferred/unqualified.
 
+## Bounded n72 button timing trace
+
+The non-Apple S5L8720 GPIO diagnostic uses the existing
+`ipod_touch_gpio_read_log` event, disabled by default. It records at most 128
+actual guest reads of pad `0x0c` at offset `0x184`, including the returned value,
+guest PC and `QEMU_CLOCK_VIRTUAL` nanoseconds. The same event records at most
+16 actual Home/Power pad transitions with their value, direction, IRQ and
+virtual timestamp, after the model changes the pad. A bottom-half transition
+may have PC zero because it has no current vCPU. These are physical model
+transitions and guest reads, distinct from frontend button admission.
+
+Budgets are process-wide, independent for reads and edges, and cannot be
+refilled by toggling tracing. Other pad reads do not consume the read budget.
+Only the non-Apple S5L8720 diagnostic is filtered/bounded this way; the Mac path
+and other SoCs retain their existing trace behavior. No GPIO/IRQ/polarity/PMU
+state, pixel, clock or public API behavior changes. Rebuild the two GPIO/button
+translation units and package the resulting engine before target validation.
+The pure `gpio-wake-budget` regression validates disabled/filter/exhaustion
+behavior, not actual button delivery or kernel debounce timing.
+
+Enable the event after the real guest agent is ready, around one bounded
+press/hold/release attempt, and disable it promptly afterward. The existing
+QMP interface can toggle it without boot-wide tracing:
+
+```json
+{"execute":"trace-event-set-state","arguments":{"name":"ipod_touch_gpio_read_log","enable":true}}
+```
+
+Use the same command with `enable:false` afterward. Retain the exact engine
+hash, existing SYSIC/PMU events and the new `[gpio-wake]` lines. The Home bit is
+bit 1 and Power is bit 2; each should be set while held and cleared on release.
+With only the resting active-low volume-down bit set, pad values are `1` at
+rest, `3` for Home and `5` for Power, but preserve other pad bits in the receipt.
+Subtract the down/up edge `virtual_ns` values for actual guest-time duration
+and locate guest reads with the relevant bit set before release. This does not
+establish a target debounce threshold or compare the separate raw timer counter.
+Do not poll read-to-clear PMU event registers or override brightness.
+
+Documented n72 Home/Power GPIOs `0x0c01`/`0x0c02`, active-high flags `0x100`, and
+IRQs `0x79`/`0x7a` match the host mapping and observed group3 bits25/26. A separate
+source discrepancy remains: the 2G handler writes SYSIC `gpio_int_level` as
+live pad state, while SYSIC models it as guest-programmed interrupt polarity;
+the 1G uses its physical-pad setter. The observed press/release polarity flips
+still align, so this diagnostic does not claim that discrepancy caused the
+actual wake failure and does not modify it.
+
 GLES2 needs an actual admitted guest/workload that compiles and executes shader
 commands, not the standalone host GLES2 triangle. The supplied n81 route may be
 used where appropriate with its prepared kernel/NAND/NOR and matching package;

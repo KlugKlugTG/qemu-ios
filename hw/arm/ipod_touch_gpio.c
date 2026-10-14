@@ -4,13 +4,18 @@
 #include "hw/core/qdev-properties.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
+#ifndef __APPLE__
+#include "hw/core/cpu.h"
+#include "target/arm/cpu.h"
+#include "ipod-gpio-wake-trace.c.inc"
+#endif
 
 /*
- * -trace ipod_touch_gpio_read_log logs every GPIO pad read. It was unconditional, one line
- * per read, on the vCPU thread with the BQL held -- guest stall, and enough
- * volume to bury anything else on the console. Named apart from sysic.c's
- * ipod_touch_sysic_gpio_log, which traces the GPIO *interrupt* block. Cached the same way
- * as the FMSS, MBX and PMU gates; these are not meant to be togglable mid-run.
+ * The event is off by default and can be toggled for a bounded wake attempt.
+ * Non-Apple S5L8720 reads below are limited to the Home/Power pad and a fixed
+ * process-wide budget. Other SoCs and Mac retain the original pad-read trace.
+ * Named apart from sysic.c's ipod_touch_sysic_gpio_log, which traces the GPIO
+ * interrupt block rather than the live pad values.
  */
 static bool gpio_trace(void)
 {
@@ -44,6 +49,26 @@ static uint64_t s5l8900_gpio_read(void *opaque, hwaddr addr, unsigned size)
     IPodTouchGPIOState *s = (struct IPodTouchGPIOState *) opaque;
     uint64_t v = s5l8900_gpio_read_pad(s, addr);
 
+#ifndef __APPLE__
+    if (s->fsel_offset == 0x1e0) {
+        /* The n72's Home/Power pads are 0xc01/0xc02, read at +0x184.
+         * Bound this diagnostic independently of an external trace toggle.
+         * It observes actual guest reads, not host button admission. */
+        static IpodGPIOWakeTraceBudget budget;
+        if (ipod_gpio_wake_trace_take(&budget, gpio_trace(), addr == 0x184, 128)) {
+            uint32_t pc = 0;
+            if (current_cpu && object_dynamic_cast(OBJECT(current_cpu), TYPE_ARM_CPU)) {
+                pc = ARM_CPU(current_cpu)->env.regs[15];
+            }
+            TRACE_PRINTF(trace_ipod_touch_gpio_read_log,
+                         "[gpio-wake] read offset=0x%03x value=0x%08x pc=0x%08x "
+                         "virtual_ns=%" PRId64 " sample=%u/128\n",
+                         (unsigned)addr, (unsigned)v, pc,
+                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), budget.used);
+        }
+        return v;
+    }
+#endif
     if (gpio_trace()) {
         TRACE_PRINTF(trace_ipod_touch_gpio_read_log, "%s: read from location 0x%08x -> 0x%08x\n", __func__, (unsigned)addr, (unsigned)v);
     }
