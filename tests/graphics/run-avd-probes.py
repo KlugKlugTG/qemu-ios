@@ -14,6 +14,7 @@ parser.add_argument('--output', required=True, type=Path)
 parser.add_argument('--core-diagnostic', action='store_true')
 parser.add_argument('--combine-only', action='store_true',
                     help='Run only the raw two-unit GLES1 combine leaf; no full renderer qualification')
+parser.add_argument('--provider', choices=['platform', 'angle-gl', 'angle-vulkan'], default='platform')
 args = parser.parse_args()
 if args.combine_only and args.core_diagnostic:
     parser.error('--combine-only cannot be combined with --core-diagnostic')
@@ -30,6 +31,7 @@ probes = ['combine'] if args.combine_only else ['render', 'pixels']
 if args.core_diagnostic:
     probes.insert(0, 'core-fbo')
 receipt = {'serial': 'emulator-5554', 'frozen': str(args.frozen), 'binaries': {},
+           'provider': args.provider, 'libraries': {},
            'runner_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
 for key, command in [('page_size', ['shell', 'getconf', 'PAGE_SIZE']),
                      ('fingerprint', ['shell', 'getprop', 'ro.build.fingerprint'])]:
@@ -52,6 +54,25 @@ for probe in probes:
     if result.returncode or not result.stdout.split() or result.stdout.split()[0] != digest:
         raise RuntimeError(f'Remote binary mismatch: {remote}: {result.stdout}{result.stderr}')
     receipt['binaries'][binary_name] = digest
+if args.provider != 'platform':
+    remote_libraries='/data/local/tmp/lt-egl-angle'
+    result=call(['shell', 'mkdir', '-p', remote_libraries])
+    if result.returncode:
+        raise RuntimeError(result.stdout + result.stderr)
+    for name in ['libEGL_lighttouch_angle.so', 'libGLESv1_CM_lighttouch_angle.so',
+                 'libGLESv2_lighttouch_angle.so']:
+        source=args.frozen / 'lib' / name
+        digest=hashlib.sha256(source.read_bytes()).hexdigest()
+        if not source.stat().st_size or digest != manifest['libraries'][name]:
+            raise RuntimeError(f'Local frozen provider library mismatch: {name}')
+        remote=remote_libraries + '/' + name
+        result=call(['push', str(source), remote])
+        if result.returncode:
+            raise RuntimeError(result.stdout + result.stderr)
+        result=call(['shell', 'sha256sum', remote])
+        if result.returncode or not result.stdout.split() or result.stdout.split()[0] != digest:
+            raise RuntimeError(f'Remote provider library mismatch: {name}')
+        receipt['libraries'][name]=digest
 result = call(['shell', 'sync'])
 if result.returncode:
     raise RuntimeError(result.stdout + result.stderr)
@@ -64,6 +85,8 @@ results = []
 for probe, option in jobs:
     label = probe + ('-oes' if option else '')
     command = f'/data/local/tmp/lt-egl-{probe} {option}; probe_rc=$?; echo ACTUAL_PROBE_EXIT=$probe_rc; exit "$probe_rc"'
+    if args.provider != 'platform':
+        command = f'LD_LIBRARY_PATH={remote_libraries} LIGHTTOUCH_GLES_PROVIDER={args.provider} LT_GLES_DRIVER_DIAGNOSTIC=1 ' + command
     try:
         result = call(['shell', command], timeout=45)
         text = result.stdout + result.stderr
@@ -72,6 +95,8 @@ for probe, option in jobs:
                     'core-fbo': 'PASS real GLES1 fixed-function pixel',
                     'combine': 'PASS raw GLES1 two-unit ADD independent of active state'}[probe]
         passed = result.returncode == 0 and expected in text and 'ACTUAL_PROBE_EXIT=0' in text
+        if args.provider != 'platform':
+            passed = passed and f'provider={args.provider}; verified public EGL/GLES dispatch' in text
         record = {'probe': label, 'adb_exit': result.returncode, 'passed': passed}
         if result.returncode == 0 and not passed:
             record['reason'] = 'Missing real probe PASS output or explicit exit marker'

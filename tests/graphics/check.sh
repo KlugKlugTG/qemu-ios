@@ -17,7 +17,7 @@ if [ "$#" -gt 1 ]; then
             "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/$arch-linux-android26-clang" \
                 -Wall -Wextra -Wno-unused-function -DGLES_HOST_EGL_ES \
                 "tests/graphics/egl-$probe.c" -o "$output/egl-$probe-$arch" \
-                -lEGL -lGLESv2 -lGLESv1_CM -Wl,-z,max-page-size=16384
+                -lEGL -lGLESv2 -lGLESv1_CM -ldl -Wl,-z,max-page-size=16384
         done
     done
 fi

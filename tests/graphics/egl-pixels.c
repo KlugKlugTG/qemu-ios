@@ -18,6 +18,9 @@ int main(void)
 {
     CGLContextObj context;
     assert(gles_egl_create(NULL,2,&context));
+#if defined(__ANDROID__)
+    driver_get_integer=GLES_DRIVER_RAW(glGetIntegerv);
+#endif
     GLuint tex,fb;
     glGenTextures(1,&tex); glBindTexture(GL_TEXTURE_2D,tex);
     /* Unsupported targets must raise an error without changing a valid binding.
