@@ -6,7 +6,7 @@
  * VARIANT
  * VARIANT -D__APPLE__
  * PKG glib-2.0
- * CFLAGS -I$ROOT/include -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter
+ * CFLAGS -I$ROOT/include -Wall -Wextra -Werror -Wno-unused-function -Wno-unused-parameter -Wno-comment
  */
 #include <assert.h>
 #include <glib.h>
