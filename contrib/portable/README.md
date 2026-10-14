@@ -6,7 +6,12 @@ build-support dependency pins. The additive portable ABI is version 1 in
 restart requires a fresh worker process. The host must finish worker shutdown
 before freeing callbacks, frame buffers, or audio resources.
 
-Use private build outputs outside the checkout. These scripts never read or
+Use fresh private build outputs outside the checkout. Input stamps record ABI,
+compiler, dependency/archive and patch hashes, recipe hashes, tool versions,
+and options. A changed or unstamped compiled cache is refused; choose a fresh
+output instead of deleting the stamp. Engine builds require a clean committed
+source tree. The shared library manifest hashes every tracked source and
+selected object/archive/shared-library input, including renderer/device code. These scripts never read or
 stage firmware, ROMs, guest assets, or credentials. Dependencies are downloaded
 from their official release sources and SHA-256 checked against
 `dependencies.json`. FFmpeg 9.0.1 retains the macOS version/hash and both
@@ -16,7 +21,8 @@ newer, static PIC third-party dependencies, and 16 KiB ELF maximum page size.
 The platform provides zlib; its metadata version is read from the NDK header.
 
 ```sh
-# MESON is a Meson >=1.5 executable (QEMU's pyvenv supplies one).
+# MESON is Meson 1.10.0; its Python needs packaging 24.0.
+# Install host tools in a private venv when unavailable, never change system Python.
 python3 contrib/portable/build-deps.py /private/builds/deps-linux --only ffmpeg
 python3 contrib/portable/build-engine.py /private/builds/linux \
   --prefix /private/builds/deps-linux/prefix

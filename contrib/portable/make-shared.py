@@ -56,7 +56,7 @@ source_inputs={name:hashlib.sha256((src/name).read_bytes()).hexdigest() for name
 link_inputs={}
 for arg in args:
  candidate=pathlib.Path(arg)
- if candidate.suffix in ['.o','.a']:
+ if candidate.suffix in ['.o','.a'] or '.so' in candidate.name:
   if not candidate.is_absolute():candidate=build/candidate
   if candidate.is_file():link_inputs[str(candidate)]=hashlib.sha256(candidate.read_bytes()).hexdigest()
 manifest={'schema':1,'source_status':source_status,'source_inputs':source_inputs,'link_inputs':link_inputs,'tools':{'compiler':subprocess.check_output(compiler+['--version'],cwd=build,text=True).splitlines()[0],'ninja':subprocess.check_output(['ninja','--version'],text=True).strip()},'source_revision':revision,'source_dirty':dirty,'api_major':2,'portable_version':1,'library_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'link_argv':args,'inputs':{str(path.relative_to(src)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [src/'contrib/ios-app/qemu-ios-ui.h',src/'contrib/ios-app/qemu-ios-ui.c',src/'contrib/macos-app/qemu-macos-extras.c',src/'contrib/portable/dependencies.json']}}
