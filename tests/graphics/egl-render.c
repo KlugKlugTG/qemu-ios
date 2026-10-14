@@ -19,14 +19,6 @@
 #include "../../hw/arm/gles-host-egl.c.inc"
 #ifdef GLES_HOST_EGL_ES
 #include "../../hw/arm/gles-host-native.c.inc"
-#define glGenFramebuffers glGenFramebuffersOES
-#define glBindFramebuffer glBindFramebufferOES
-#define glFramebufferTexture2D glFramebufferTexture2DOES
-#define glCheckFramebufferStatus glCheckFramebufferStatusOES
-#define glGenRenderbuffers glGenRenderbuffersOES
-#define glBindRenderbuffer glBindRenderbufferOES
-#define glRenderbufferStorage glRenderbufferStorageOES
-#define glFramebufferRenderbuffer glFramebufferRenderbufferOES
 #endif
 
 static GLuint shader(GLenum type, const char *src)
@@ -202,21 +194,25 @@ int main(void)
     fprintf(stderr,"[probe] rectangle pixel coordinates, matrix order, immutable targets and separate bindings/enables PASS\n");
     /* Name reuse must preserve the old object in sibling bindings and unbound
      * framebuffer attachments; native aliases remain invisible to the guest. */
+    fprintf(stderr,"[probe] lifetime: create retained FBO\n");
     GLuint retained_fbo;
     glGenFramebuffers(1,&retained_fbo); glBindFramebuffer(GL_FRAMEBUFFER,retained_fbo);
     glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_RECTANGLE_ARB,43,0);
     assert(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE);
     glBindFramebuffer(GL_FRAMEBUFFER,0x40000000u);
     CGLContextObj sibling;
+    fprintf(stderr,"[probe] lifetime: create shared GLES1 context\n");
     assert(gles_egl_create(c1,1,&sibling));
     glBindTexture(GL_TEXTURE_RECTANGLE_ARB,43);
     assert(CGLSetCurrentContext(c1)==0);
+    fprintf(stderr,"[probe] lifetime: delete and reuse guest name\n");
     GLuint reused=43; glDeleteTextures(1,&reused); assert(!glIsTexture(43));
     glBindTexture(GL_TEXTURE_2D,43);
     const unsigned char fresh[]={0,0,255,255};
     glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,fresh);
     glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
     glBindFramebuffer(GL_FRAMEBUFFER,retained_fbo);
+    fprintf(stderr,"[probe] lifetime: query retained attachment\n");
     GLint retained_name;
     glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,&retained_name);
     assert(retained_name==43);
@@ -224,6 +220,7 @@ int main(void)
     assert(px[0]==255 && px[1]==0 && px[2]==0);
     glBindFramebuffer(GL_FRAMEBUFFER,0x40000000u);
     glDeleteFramebuffers(1,&retained_fbo);
+    fprintf(stderr,"[probe] lifetime: render retained sibling rectangle\n");
     assert(CGLSetCurrentContext(sibling)==0);
     GLuint sibling_fbo;
     glGenFramebuffers(1,&sibling_fbo); glBindFramebuffer(GL_FRAMEBUFFER,sibling_fbo);
@@ -235,6 +232,7 @@ int main(void)
     glDrawArrays(GL_TRIANGLE_STRIP,0,4);
     glReadPixels(8,8,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
     assert(px[0]==255 && px[1]==0 && px[2]==0 && glGetError()==GL_NO_ERROR);
+    fprintf(stderr,"[probe] lifetime: release sibling and render new object\n");
     CGLReleaseContext(sibling); assert(CGLSetCurrentContext(c1)==0);
     glBindTexture(GL_TEXTURE_2D,43); glDisable(GL_TEXTURE_RECTANGLE_ARB);
     glDrawArrays(GL_TRIANGLE_STRIP,0,4);
