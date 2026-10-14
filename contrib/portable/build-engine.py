@@ -3,7 +3,7 @@
 import argparse,pathlib,os,subprocess,shutil,importlib.util
 from cache import digest,tool_version,check_cache
 spec=importlib.util.spec_from_file_location('engine_cache',pathlib.Path(__file__).with_name('engine-cache.py'));guard=importlib.util.module_from_spec(spec);spec.loader.exec_module(guard)
-p=argparse.ArgumentParser();p.add_argument('output',type=pathlib.Path);p.add_argument('--abi',choices=['linux','arm64-v8a','x86_64'],default='linux');p.add_argument('--prefix',type=pathlib.Path,required=True);p.add_argument('--crypto-prefix',type=pathlib.Path,required=True);p.add_argument('--ndk',type=pathlib.Path);p.add_argument('--configure-only',action='store_true');p.add_argument('--source-update',action='store_true',help='Allow a clean source revision change with identical configuration/tools/dependencies');p.add_argument('--android-api',type=int,choices=[28,29],default=28,help='Engine minimum Android API; 29 is an isolated native ELF TLS experiment requiring a fresh build cache');a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('output',type=pathlib.Path);p.add_argument('--abi',choices=['linux','arm64-v8a','x86_64'],default='linux');p.add_argument('--prefix',type=pathlib.Path,required=True);p.add_argument('--crypto-prefix',type=pathlib.Path,required=True);p.add_argument('--ndk',type=pathlib.Path);p.add_argument('--configure-only',action='store_true');p.add_argument('--source-update',action='store_true',help='Allow a clean source revision change with identical configuration/tools/dependencies');p.add_argument('--android-api',type=int,choices=[28,29],default=28,help='Engine minimum Android API; 29 is an isolated native ELF TLS experiment requiring a fresh build cache');p.add_argument('--experimental-tb-cache',choices=['control','large'],help='Isolated TCG jump-cache experiment: same optional counters, 4K or 16K entries; fresh build cache required');a=p.parse_args()
 if a.abi=='linux' and a.android_api!=28:p.error('--android-api is an Android engine option')
 src=pathlib.Path(__file__).resolve().parents[2];out=a.output.resolve();out.mkdir(parents=True,exist_ok=True);prefix=a.prefix.resolve();env=os.environ.copy()
 crypto_prefix=a.crypto_prefix.resolve()
@@ -12,6 +12,9 @@ if a.abi!='linux': env['PKG_CONFIG_LIBDIR']=env['PKG_CONFIG_PATH']
 pc=out/'target-pkg-config'
 pc.write_text('#!/bin/sh\nexec pkg-config --static "$@"\n');pc.chmod(0o755);env['PKG_CONFIG']=str(pc)
 args=[src/'configure','--target-list=arm-softmmu','--without-default-features','--without-default-devices','--with-devices-arm=portable','--enable-tcg','--enable-pixman','--enable-gcrypt','--python=/usr/bin/python3','--disable-docs','--disable-tools','--disable-werror','--disable-pie','--extra-cflags=-fPIC -DQEMU_IOS_PORTABLE_CRYPTO','--extra-ldflags=-L'+str(prefix/'lib'),'--audio-drv-list=']
+if a.experimental_tb_cache:
+ bits=12 if a.experimental_tb_cache=='control' else 14
+ args[args.index('--extra-cflags=-fPIC -DQEMU_IOS_PORTABLE_CRYPTO')]+=' -DQEMU_EXPERIMENTAL_TB_CACHE_STATS -DQEMU_EXPERIMENTAL_TB_JMP_CACHE_BITS='+str(bits)
 if a.abi!='linux':
  if not a.ndk:raise RuntimeError('--ndk required')
  bin=a.ndk.resolve()/'toolchains/llvm/prebuilt/linux-x86_64/bin';arch='aarch64' if a.abi=='arm64-v8a' else 'x86_64';triple='aarch64-linux-android' if arch=='aarch64' else 'x86_64-linux-android'

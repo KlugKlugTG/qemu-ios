@@ -224,6 +224,10 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
  *
  * Returns: an existing translation block or NULL.
  */
+#ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
+extern bool it_acct_on;
+#endif
+
 static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
 {
     TranslationBlock *tb;
@@ -242,10 +246,35 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
                tb->cs_base == s.cs_base &&
                tb->flags == s.flags &&
                tb_cflags(tb) == s.cflags)) {
+#ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
+        if (unlikely(it_acct_on)) {
+            jc->fast_hits++;
+        }
+#endif
         goto hit;
     }
 
+#ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
+    if (unlikely(it_acct_on)) {
+        if (!tb) {
+            jc->empty_misses++;
+        } else if (jc->array[hash].pc != s.pc) {
+            jc->pc_misses++;
+        } else {
+            jc->state_misses++;
+        }
+    }
+#endif
     tb = tb_htable_lookup(cpu, s);
+#ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
+    if (unlikely(it_acct_on)) {
+        if (tb) {
+            jc->slow_hits++;
+        } else {
+            jc->slow_absent++;
+        }
+    }
+#endif
     if (tb == NULL) {
         return NULL;
     }

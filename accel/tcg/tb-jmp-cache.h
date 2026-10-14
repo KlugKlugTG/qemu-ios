@@ -12,7 +12,15 @@
 #include "qemu/rcu.h"
 #include "exec/cpu-common.h"
 
+#ifdef QEMU_EXPERIMENTAL_TB_JMP_CACHE_BITS
+#if QEMU_EXPERIMENTAL_TB_JMP_CACHE_BITS != 12 && \
+    QEMU_EXPERIMENTAL_TB_JMP_CACHE_BITS != 14
+#error "Experimental TB jump cache supports only 12 or 14 bits"
+#endif
+#define TB_JMP_CACHE_BITS QEMU_EXPERIMENTAL_TB_JMP_CACHE_BITS
+#else
 #define TB_JMP_CACHE_BITS 12
+#endif
 #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
 
 /*
@@ -24,6 +32,11 @@
  */
 typedef struct CPUJumpCache {
     struct rcu_head rcu;
+#ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
+    /* Owner-vCPU diagnostics; not migrated, cleared, or used for correctness. */
+    uint64_t fast_hits, empty_misses, pc_misses, state_misses;
+    uint64_t slow_hits, slow_absent;
+#endif
     struct {
         TranslationBlock *tb;
         vaddr pc;
