@@ -122,7 +122,14 @@ Touch batches preserve full 32-bit host contact IDs, validate the whole batch
 before any injection, map active IDs to five existing controller slots, emit
 coordinates before commits, and close with one sync. Eight is the ABI batch
 bound, not the emulated controller contact limit. Poll the newest ID to confirm
-actual delivery; `QUEUED` is only queue admission. Cancel releases touch and
+actual touch delivery; `QUEUED` is only queue admission. The legacy button
+operation returns no delivery acknowledgment: runtime success means its request
+was admitted, and the engine applies GPIO/PMU edges later under the BQL. Button
+release has a minimum 100 ms hold in guest virtual time. Pause and resume also
+enqueue work; use the engine runstate to observe their completion. Foreground
+resume permits rendering and resumes execution, while guest software controls
+the panel and backlight. Confirm wake using guest progress and display facts.
+Cancel releases touch and
 buttons even while paused and resets live motion. Held contacts/live samples
 are never migrated or retained across reset/worker restart.
 
