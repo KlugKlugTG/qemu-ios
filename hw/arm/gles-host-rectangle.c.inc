@@ -160,6 +160,27 @@ NATIVE_TEXTURE_PARAMETER(glGetTexParameteriv, GLint *)
 NATIVE_TEXTURE_PARAMETER(glGetTexParameterfv, GLfloat *)
 #undef NATIVE_TEXTURE_PARAMETER
 
+/* Copy calls use the same logical target selection as uploads. */
+static void gles_native_copy_tex_image(GLenum target, GLint level, GLenum internal,
+                                       GLint x, GLint y, GLsizei w, GLsizei h, GLint border)
+{
+    GLuint old=gles_native_texture_start(target);
+    gles_native_save_errors();
+    glCopyTexImage2D(gles_native_target(target),level,internal,x,y,w,h,border);
+    GLenum error=glGetError(); gles_native_error(error);
+    if (!error && !level) {
+        GLESEGLTexture *texture=gles_native_bound_texture(target);
+        if (texture) { texture->width=w; texture->height=h; }
+    }
+    gles_native_texture_finish(target,old);
+}
+static void gles_native_copy_tex_sub_image(GLenum target, GLint level, GLint xoff, GLint yoff,
+                                           GLint x, GLint y, GLsizei w, GLsizei h)
+{
+    GLuint old=gles_native_texture_start(target);
+    glCopyTexSubImage2D(gles_native_target(target),level,xoff,yoff,x,y,w,h);
+    gles_native_texture_finish(target,old);
+}
 static void gles_native_delete_bound_attachments(GLESEGLTexture *texture);
 static void gles_native_delete_textures(GLsizei n, const GLuint *names)
 {

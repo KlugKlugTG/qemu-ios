@@ -323,6 +323,8 @@ static GLenum gles_native_driver_error(void) { return glGetError(); }
 #define glTexImage2D gles_native_tex_image
 #define glTexSubImage2D gles_native_tex_sub_image
 #define glReadPixels gles_native_read_pixels
+#define glCopyTexImage2D gles_native_copy_tex_image
+#define glCopyTexSubImage2D gles_native_copy_tex_sub_image
 
 /* ES1 FBO extensions are loaded via EGL, ES2 uses core dispatch. */
 static GLboolean gles_native_IsFramebuffer(GLuint name)
@@ -353,13 +355,15 @@ static void gles_native_GenerateMipmap(GLenum target)
 {
     typedef void (*Proc)(GLenum target);
     static Proc es1;
-    if (gles_egl_current->api == 2) { glGenerateMipmap(target); return; }
-    if (!gles_native_require_fbo()) {
-        gles_native_error(GL_INVALID_OPERATION); return;
+    if (target==GL_TEXTURE_RECTANGLE_ARB) { gles_native_error(GL_INVALID_ENUM); return; }
+    if (gles_egl_current->api==1) {
+        if (!gles_native_require_fbo()) { gles_native_error(GL_INVALID_OPERATION); return; }
+        if (!es1) es1=(Proc)eglGetProcAddress("glGenerateMipmapOES");
+        if (!es1) { gles_native_error(GL_INVALID_OPERATION); return; }
     }
-    if (!es1) es1=(Proc)eglGetProcAddress("glGenerateMipmapOES");
-    if (!es1) { fprintf(stderr,"[gles-egl] missing required glGenerateMipmapOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
-    es1(target);
+    GLuint old=gles_native_texture_start(target);
+    if (gles_egl_current->api==2) glGenerateMipmap(target); else es1(target);
+    gles_native_texture_finish(target,old);
 }
 static void gles_native_GenFramebuffers(GLsizei n, GLuint *names)
 {
@@ -569,6 +573,22 @@ static void gles_native_GetFramebufferAttachmentParameteriv(GLenum target, GLenu
 #define glDeleteRenderbuffersOES gles_native_DeleteRenderbuffers
 #define glGetRenderbufferParameterivOES gles_native_GetRenderbufferParameteriv
 #define glGetFramebufferAttachmentParameterivOES gles_native_GetFramebufferAttachmentParameteriv
+
+#define glIsFramebuffer gles_native_IsFramebuffer
+#define glIsRenderbuffer gles_native_IsRenderbuffer
+#define glGenerateMipmap gles_native_GenerateMipmap
+#define glGenFramebuffers gles_native_GenFramebuffers
+#define glBindFramebuffer gles_native_BindFramebuffer
+#define glFramebufferTexture2D gles_native_FramebufferTexture2D
+#define glGenRenderbuffers gles_native_GenRenderbuffers
+#define glBindRenderbuffer gles_native_BindRenderbuffer
+#define glRenderbufferStorage gles_native_RenderbufferStorage
+#define glFramebufferRenderbuffer gles_native_FramebufferRenderbuffer
+#define glCheckFramebufferStatus gles_native_CheckFramebufferStatus
+#define glDeleteFramebuffers gles_native_DeleteFramebuffers
+#define glDeleteRenderbuffers gles_native_DeleteRenderbuffers
+#define glGetRenderbufferParameteriv gles_native_GetRenderbufferParameteriv
+#define glGetFramebufferAttachmentParameteriv gles_native_GetFramebufferAttachmentParameteriv
 
 #define glGenTextures gles_native_gen_textures
 #define glIsTexture gles_native_is_texture

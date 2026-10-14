@@ -89,6 +89,34 @@ int main(void)
     glGetShaderPrecisionFormat(GL_FRAGMENT_SHADER,GL_MEDIUM_FLOAT,range,&precision);
     assert(range[0]>=10 && range[1]>=10 && precision>=10);
     assert(glGetError()==GL_NO_ERROR);
+    /* A bound sibling and an unbound framebuffer retain a deleted object. */
+    CGLContextObj sibling;
+    assert(gles_egl_create(context,2,&sibling));
+    glBindTexture(GL_TEXTURE_2D,tex);
+    GLuint sibling_fb; glGenFramebuffers(1,&sibling_fb); glBindFramebuffer(GL_FRAMEBUFFER,sibling_fb);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,tex,0);
+    assert(CGLSetCurrentContext(context)==0);
+    glBindFramebuffer(GL_FRAMEBUFFER,empty);
+    glDeleteTextures(1,&tex); assert(!glIsTexture(tex));
+    glBindTexture(GL_TEXTURE_2D,tex);
+    const unsigned char blue[]={0,0,255,255};
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,blue);
+    glBindFramebuffer(GL_FRAMEBUFFER,fb);
+    GLint retained; glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,&retained);
+    assert(retained==(GLint)tex);
+    glReadPixels(0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,actual);
+    assert(actual[0]==255 && actual[1]==0 && actual[2]==0);
+    assert(CGLSetCurrentContext(sibling)==0);
+    glReadPixels(0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,actual);
+    assert(actual[0]==255 && actual[1]==0 && actual[2]==0);
+    CGLReleaseContext(sibling); assert(CGLSetCurrentContext(context)==0);
+    /* Copy operations replace storage in the new object, not the retained one. */
+    glCopyTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,0,0,2,2,0);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,tex,0);
+    glReadPixels(0,0,2,2,GL_RGBA,GL_UNSIGNED_BYTE,actual);
+    assert(actual[0]==255 && actual[4]==0 && actual[5]==255);
+    assert(glGetError()==GL_NO_ERROR);
+    fprintf(stderr,"PASS native shared deletion/name reuse, retained FBO query, copy texture storage and context teardown\n");
     CGLReleaseContext(context);
     puts("PASS multirow RGB stride+alignment, invalid pixel-store state/error, preserved prior errors, failed read output, BGRA upload/readback, packed pixel formats, native shader limits");
     return 0;
