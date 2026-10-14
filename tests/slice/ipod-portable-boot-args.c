@@ -1,8 +1,6 @@
-/* Actual timer callback: slow handoff readiness, bounded scan frequency,
- * successful writes and cessation after match/budget. Legacy Mac policy too.
+/* Original Apple timer callback policy; portable builds use ipod-early-handoff.c.
  * SLICE hw/arm/ipod_touch_2g.c define BOOT_ARGS_CMDLINE_OFF|BOOT_ARGS_SCAN_LEN|BOOT_ARGS_CMDLINE_LEN
  * SLICE hw/arm/ipod_touch_2g.c fn boot_args_signature ipod_touch_boot_args_discovery_interval_ms ipod_touch_boot_args_search_budget_ms ipod_touch_requested_boot_args ipod_touch_set_boot_args_now ipod_touch_stage_boot_args
- * VARIANT
  * VARIANT -D__APPLE__=1
  */
 #include <assert.h>
@@ -41,7 +39,7 @@ static int address_space_rw(void *space, uint32_t addr, int attrs, uint8_t *data
     }
     reads++; memset(data,0,size);
     if (now >= ready_at && addr <= handoff && (uint64_t)addr + size >= handoff + 12)
-        signature(data + handoff - addr);
+        signature(data + (handoff - addr));
     return 0;
 }
 #include "slice.h"
@@ -57,37 +55,13 @@ int main(void) {
     now=50000; unsigned old_schedules=schedules,old_reads=reads;
     ipod_touch_set_boot_args_now(&s);
     assert(schedules==old_schedules && reads==old_reads && !writes);
-    puts("PASS: legacy macOS discovery cadence/deadline unchanged");
-#else
-    assert(s.boot_args_scan_deadline==600000);
-    /* Dispatch the production timer at its real requested cadence. */
-    while (next<=1000) {
-        now=next; ipod_touch_set_boot_args_now(&s);
-        assert(next==now+250 && !writes);
-    }
-    assert(s.boot_args_scan_attempts==5 && reads<1500);
-    /* The old 50-second window must not terminate a still-booting guest. */
-    now=50000; ipod_touch_set_boot_args_now(&s); assert(next==50250 && !writes);
-    now=120000; ipod_touch_set_boot_args_now(&s);
-    assert(s.boot_args_addr==0x08000400 && writes==1);
-    assert(!strcmp((char*)command_line,s.boot_args));
-    uint64_t found_scans=s.boot_args_scan_attempts;
-    unsigned found_reads=reads;
-    for(unsigned i=1;i<200;i++) { now=next;ipod_touch_set_boot_args_now(&s); }
-    assert(writes==200 && s.boot_args_scan_attempts==found_scans);
-    assert(reads-found_reads==199); /* Cached signature, never another full scan. */
-    /* Unknown firmware stops at the exact budget without another scan/rearm. */
-    s.boot_args_addr=0; ready_at=UINT64_MAX; now=0;
-    ipod_touch_stage_boot_args(&s);
-    now=600000; unsigned old_schedules=schedules,old_reads=reads;
-    ipod_touch_set_boot_args_now(&s);
-    assert(schedules==old_schedules && reads==old_reads && !s.boot_args_scan_attempts);
-    /* A caller's 1ms interval cannot cause >40 full scans/second. */
-    s.boot_args_interval_ms=1;now=0;ipod_touch_stage_boot_args(&s);
-    ipod_touch_set_boot_args_now(&s);assert(next==25);
-    /* Explicit empty startup args create no timer and no discovery work. */
-    s.boot_args[0]=0;old_schedules=schedules;
-    ipod_touch_stage_boot_args(&s);assert(schedules==old_schedules);
-    puts("PASS: pre-handoff readiness at120s, configured250ms cadence, >=25ms bound, cached-match refresh and exact600s stop");
+    /* A found handoff retains cached refresh and stops at the old count. */
+    now=0; ready_at=0; s.boot_args_addr=0;
+    ipod_touch_stage_boot_args(&s); ipod_touch_set_boot_args_now(&s);
+    assert(writes==1 && s.boot_args_addr==0x08000400);
+    unsigned found_reads=reads; uint64_t scans=s.boot_args_scan_attempts;
+    for(unsigned i=1;i<200;i++){now=next;ipod_touch_set_boot_args_now(&s);}
+    assert(writes==200 && reads-found_reads==199 && s.boot_args_scan_attempts==scans);
+    puts("PASS: legacy macOS discovery cadence/deadline/cached refresh unchanged");
 #endif
 }

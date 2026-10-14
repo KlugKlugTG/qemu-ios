@@ -220,3 +220,28 @@ timer, IRQ and board delivery boundaries are stubbed; it does not execute a full
 PMU/board reset, qualify guest wake or prove the complete black-screen cause.
 Actual target GPIO/PMU traces, visible guest response and lifecycle acceptance
 remain required.
+
+### n72 boot arguments before kernel handoff
+
+The non-Apple n72 route adapts upstream QEMU commit
+`1b451cc86c77c153fae1d7be2d4f151e693a9d75`. Before a NAND read made by iBoot,
+it finds the unique `snprintf(CommandLine, 256, "%s ", ...)` format literal and
+supplies the requested arguments there, so iBoot hands them to the kernel.
+Percent signs are escaped; the escaped format must fit 255 bytes. Empty arguments
+keep the firmware command line. A missing or ambiguous pattern emits an
+unqualified-iBoot warning and does not fall back to late kernel-memory writes.
+
+`boot-args-delay-ms`, `boot-args-repeat` and `boot-args-interval-ms` retain their
+startup parsing, validation and getters for compatibility. They are deprecated
+and inert on this portable early-handoff route. Apple builds retain their
+original timer, argument-length policy, legacy finder and option behavior.
+
+Run `tests/slice/run.sh tests/slice/ipod-early-handoff.c` for the production
+finder/NAND-hook regression, `ipod-early-boot-args.c` for both startup APIs and
+legacy-option parsing, and `ipod-portable-boot-args.c` for the retained Apple timer.
+Optionally set `IT_TEST_IBOOT` to a read-only n72 7E18 iBoot image for the known
+corpus check; no proprietary fixture is included. The production-board
+`ipod-boot-args-test` qtest also covers FMSS notification and reset with a
+synthetic iBoot, and must be run against the rebuilt engine. Slice tests use
+emulated RAM and do not execute guest snprintf or prove actual boot, improve
+measured performance, or identify a Pixel-specific failure.

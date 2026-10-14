@@ -228,6 +228,11 @@ typedef struct {
 	IPodTouchFMSSState *fmss_state;
     Notifier compat_nand_read;
     uint32_t compat_command_line;
+#ifndef __APPLE__
+    Notifier boot_args_nand_read;
+    uint32_t boot_args_format, boot_args_command_line;
+    bool boot_args_reported;
+#endif
 	IPodTouchMBXState *mbx_state;
 	IPodTouchSDIOState *sdio_state;
 	IPodTouchTVOutState *tvout_state;
