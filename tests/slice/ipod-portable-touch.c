@@ -31,6 +31,8 @@ struct portable_touch_request {
  uint64_t id,timestamp; size_t count;
  QemuIosPortableContact contacts[8];
 };
+static bool capacity=true;
+static bool portable_touch_capacity(unsigned begins,unsigned ends,bool motion){return capacity;}
 static unsigned emits,syncs;
 static struct {int slot,phase;double x,y;} events[100];
 static void portable_emit(int slot,int phase,double x,double y) {
@@ -68,6 +70,11 @@ int main(void) {
  assert(qemu_ios_portable_input_status(8)==QEMU_IOS_NOT_READY && emits==5);
  c[0]=contact(0xffffffffu,3,.3,.3);qemu_ios_portable_touch(9,9,c,1);
  assert(qemu_ios_portable_input_status(9)==QEMU_IOS_OK && !portable_contacts[0].active && emits==6 && syncs==4);
- ready=false;assert(qemu_ios_portable_touch(10,10,c,1)==QEMU_IOS_NOT_READY);
+ running=true;capacity=false;c[0]=contact(123,0,.4,.4);
+ qemu_ios_portable_touch(10,10,c,1);
+ assert(qemu_ios_portable_input_status(10)==QEMU_IOS_BUSY && emits==6 && syncs==4);
+ assert(!portable_contacts[0].active && portable_touch_timestamp==9);
+ capacity=true;
+ ready=false;assert(qemu_ios_portable_touch(11,11,c,1)==QEMU_IOS_NOT_READY);
  puts("PASS: production stable 32-bit IDs, crossing, independent lift, atomic batch rejection, board limits, stale timestamps, paused cancellation");
 }
