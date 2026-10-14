@@ -95,7 +95,8 @@ def main():
                  'hw/arm/powervr/LICENSE.md', 'hw/arm/powervr/README.md']:
         files['qemu/' + name] = tracked(name)
     snippets = []
-    selected = {**inventory['selected_sources'], **inventory['selected_includes']}
+    selected = {**inventory.get('archive_source_candidates', {}),
+                **inventory['selected_sources'], **inventory['selected_includes']}
     for name in sorted(selected):
         data = tracked(name)
         if sha(data) != selected[name]['sha256']:
