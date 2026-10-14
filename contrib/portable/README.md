@@ -54,6 +54,28 @@ SPDX terms and text review candidates, including missing or ambiguous notices;
 it does not give a legal verdict. The shared manifest also resolves and hashes
 libraries named through `-l` flags.
 
+Generate Android offline notice assets from a completed immutable engine after
+running its selected-source audit:
+
+```sh
+python3 contrib/portable/audit-selected-sources.py /private/builds/arm64-v8a
+python3 contrib/portable/package-notices.py /private/builds/arm64-v8a \
+  /private/generated/engine-notices-arm64 \
+  --deps /private/builds/deps-arm64 --crypto-deps /private/builds/crypto-arm64 \
+  --ndk "$ANDROID_NDK_ROOT" \
+  --source-reference "https://github.com/blake-lucas/qemu-ios/tree/COMMIT"
+```
+
+The schema-1 manifest records the engine's actual revision/library hash,
+selected archive hashes, public upstream references and each offline notice
+file's SHA-256. The generator checks immutable tracked notices, selected link
+archives, verified release archives, pinned libfdt and NDK notice inputs. It
+excludes dependencies absent from the selected link, such as firmware's
+OpenSSL. Repeating the command requires identical output; changed contents
+require a fresh destination. No private build paths or guest assets enter the
+bundle. These notice assets do not replace corresponding source, applicable
+static LGPL relinking material or complete application distribution review.
+
 The portable recipe selects QEMU's existing public-domain AES implementation
 for the Apple AES model and pinned libgcrypt MPI for its signed Montgomery PKE
 operations. The original macOS OpenSSL implementation remains selected without
