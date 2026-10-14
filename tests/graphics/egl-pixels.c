@@ -11,6 +11,7 @@
 #define GL_UNSIGNED_INT_8_8_8_8 0x8035
 #define GL_UNSIGNED_INT_8_8_8_8_REV 0x8367
 #define GL_BGRA GL_BGRA_EXT
+static void (*driver_get_integer)(GLenum, GLint *)=glGetIntegerv;
 #include "../../hw/arm/gles-host-egl.c.inc"
 #include "../../hw/arm/gles-host-native.c.inc"
 int main(void)
@@ -19,6 +20,18 @@ int main(void)
     assert(gles_egl_create(NULL,2,&context));
     GLuint tex,fb;
     glGenTextures(1,&tex); glBindTexture(GL_TEXTURE_2D,tex);
+    /* Unsupported targets must raise an error without changing a valid binding.
+     * Query the actual driver state, independent of the logical binding cache. */
+    GLint original_binding,after_binding;
+    driver_get_integer(GL_TEXTURE_BINDING_2D,&original_binding);
+    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,NULL);
+    assert(glGetError()==GL_INVALID_ENUM);
+    driver_get_integer(GL_TEXTURE_BINDING_2D,&after_binding);
+    assert(after_binding==original_binding);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+    assert(glGetError()==GL_INVALID_ENUM);
+    driver_get_integer(GL_TEXTURE_BINDING_2D,&after_binding);
+    assert(after_binding==original_binding && glGetError()==GL_NO_ERROR);
     /* Two RGB pixels plus one unused pixel and 3 alignment bytes per row. */
     const unsigned char input[]={255,0,0, 0,0,255, 13,14,15, 99,98,97,
                                   0,255,0, 255,255,0, 16,17,18, 96,95,94};
@@ -32,6 +45,11 @@ int main(void)
     glReadPixels(0,0,2,2,GL_RGBA,GL_UNSIGNED_BYTE,actual);
     const unsigned char expected[]={255,0,0,255, 0,0,255,255, 0,255,0,255, 255,255,0,255};
     assert(glGetError()==GL_NO_ERROR && !memcmp(actual,expected,16));
+    glCopyTexImage2D(GL_TEXTURE_RECTANGLE_ARB,0,GL_RGBA,0,0,1,1,0);
+    assert(glGetError()==GL_INVALID_ENUM);
+    driver_get_integer(GL_TEXTURE_BINDING_2D,&after_binding);
+    assert(after_binding==original_binding && glGetError()==GL_NO_ERROR);
+    fprintf(stderr,"PASS native GLES2 rejected texture target preserves actual binding/error semantics\n");
     glPixelStorei(GL_UNPACK_ROW_LENGTH,-1);
     glPixelStorei(GL_UNPACK_ALIGNMENT,3);
     assert(context->unpack_row_length==3 && context->unpack_alignment==4);

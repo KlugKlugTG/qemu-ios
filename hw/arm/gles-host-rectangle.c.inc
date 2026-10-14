@@ -85,7 +85,8 @@ static GLuint gles_native_texture_start(GLenum target)
 }
 static void gles_native_texture_finish(GLenum target, GLuint old)
 {
-    if (target==GL_TEXTURE_2D || target==GL_TEXTURE_RECTANGLE_ARB) glBindTexture(GL_TEXTURE_2D,old);
+    if (target==GL_TEXTURE_2D || (target==GL_TEXTURE_RECTANGLE_ARB && gles_egl_current->api==1))
+        glBindTexture(GL_TEXTURE_2D,old);
 }
 static void gles_native_bind_texture(GLenum target, GLuint name)
 {
