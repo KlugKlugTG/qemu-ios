@@ -38,12 +38,13 @@ for name, path in [('qemu-ios-entry', src / 'contrib/ios-app/qemu-ios-entry.c'),
 
 dependencies = subprocess.check_output(['ninja', '-t', 'deps'], cwd=build, text=True)
 headers = set()
+archive_headers = set()
 current = None
 for line in dependencies.splitlines():
     if not line.startswith(' '):
         current = (build / line.split(': #deps ', 1)[0]).resolve() if ': #deps ' in line else None
     elif current in selected:
-        headers.add((build / line.strip()).resolve())
+        (headers if current in objects else archive_headers).add((build / line.strip()).resolve())
 
 def notice(path):
     try:
@@ -66,7 +67,7 @@ def notice(path):
     return relative, {'sha256': expected, 'spdx': spdx,
                       'gpl2_only_text_review_candidate': only_text}
 
-sources, archive_candidates, included = {}, {}, {}
+sources, archive_candidates, included, archive_includes = {}, {}, {}, {}
 for obj, path in selected.items():
     item = notice(path)
     if item:
@@ -78,12 +79,18 @@ for path in sorted(headers):
     if item:
         name, info = item
         included[name] = info
+for path in sorted(archive_headers - headers):
+    item = notice(path)
+    if item:
+        name, info = item
+        archive_includes[name] = info
 result = {'schema': 2, 'source_revision': revision,
           'library_sha256': manifest['library_sha256'],
           'selected_source_count': len(sources),
           'selected_include_count': len(included),
           'selected_sources': sources, 'selected_includes': included,
           'archive_source_candidates': archive_candidates,
+          'archive_include_candidates': archive_includes,
           'archive_candidate_limitation': 'Thin archive members are a superset of extracted linked objects; retain notices/source for all supplied members without claiming every member entered the engine.',
           'linked_libraries': manifest.get('resolved_libraries', {}),
           'limitation': 'Source/header notice inventory only. Non-SPDX and generated sources, external archives, application closure and distribution obligations require review. No distribution eligibility claim.'}

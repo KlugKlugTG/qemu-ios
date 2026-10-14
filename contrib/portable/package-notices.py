@@ -96,6 +96,7 @@ def main():
         files['qemu/' + name] = tracked(name)
     snippets = []
     selected = {**inventory.get('archive_source_candidates', {}),
+                **inventory.get('archive_include_candidates', {}),
                 **inventory['selected_sources'], **inventory['selected_includes']}
     for name in sorted(selected):
         data = tracked(name)
@@ -162,6 +163,19 @@ def main():
         files['dependencies/libfdt/SOURCE-NOTICES.txt'] = ('\n'.join(dtc_notices)).encode()
         components.append({'name': 'libfdt', 'source_reference': dtc_url,
                            'source_revision': dtc_revision, 'linked_archive_sha256': linked['libfdt.a']})
+
+    wrap = tracked('subprojects/keycodemapdb.wrap').decode()
+    key_revision = re.search(r'^revision\s*=\s*([0-9a-f]{40})$', wrap, re.M)[1]
+    key_url = re.search(r'^url\s*=\s*(\S+)$', wrap, re.M)[1]
+    key_tree = ROOT / 'subprojects/keycodemapdb'
+    if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=key_tree, text=True).strip() != key_revision:
+        parser.error('generated keymap source differs from pinned revision')
+    subprocess.run(['git', 'diff', '--quiet', 'HEAD'], cwd=key_tree, check=True)
+    for name in ['LICENSE.BSD', 'LICENSE.GPL2', 'README']:
+        files['dependencies/keycodemapdb/' + name] = git_bytes(key_revision, name, key_tree)
+    components.append({'name': 'keycodemapdb generated keymaps', 'source_reference': key_url,
+                       'source_revision': key_revision,
+                       'grant': 'package and generated output dual GPL2-or-later/BSD3; upstream README'})
 
     if engine.get('runtime_files') or 'libatomic.a' in linked:
         if not args.ndk:

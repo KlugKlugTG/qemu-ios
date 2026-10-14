@@ -21,10 +21,11 @@ destination = a.destination.absolute()
 if destination.exists():
     p.error('Use a fresh writable source directory')
 shutil.copytree(bundle / 'source/qemu', destination)
-dtc = destination / 'subprojects/dtc'
-dtc.mkdir(exist_ok=True)
-with tarfile.open(bundle / 'source/dependencies/dtc-source.tar') as archive:
-    archive.extractall(dtc, filter='data')
+for name in ['dtc', 'keycodemapdb']:
+    target = destination / 'subprojects' / name
+    target.mkdir(exist_ok=True)
+    with tarfile.open(bundle / 'source/dependencies' / (name + '-source.tar')) as archive:
+        archive.extractall(target, filter='data')
 recipe = destination / 'contrib/portable/build-engine.py'
 original = recipe.read_text()
 needle = "'--audio-drv-list=']"
