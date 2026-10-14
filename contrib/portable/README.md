@@ -122,7 +122,10 @@ Touch batches preserve full 32-bit host contact IDs, validate the whole batch
 before any injection, map active IDs to five existing controller slots, emit
 coordinates before commits, and close with one sync. Eight is the ABI batch
 bound, not the emulated controller contact limit. Poll the newest ID to confirm
-actual touch delivery; `QUEUED` is only queue admission. The legacy button
+dispatch to the input model; `QUEUED` is only queue admission. A completed
+dispatch does not acknowledge that the guest collected its SPI report or acted
+on the gesture. The existing controller retains one pending report, so later
+reports may replace one the guest has not collected. The legacy button
 operation returns no delivery acknowledgment: runtime success means its request
 was admitted, and the engine applies GPIO/PMU edges later under the BQL. Button
 release has a minimum 100 ms hold in guest virtual time. Pause and resume also
