@@ -66,9 +66,12 @@ engine discovery for machine/dimensions and explicit matching raw armv7 package.
 
 The sealed cleanup engine's Linux library SHA is
 a85e640b791aa8e1260ed2c2349e7807a14cf71e3864805b5bd3fd03717c5737.
-Runtime supplied frontend32c5bb84745663732663bff629e4a3b657ede212b174aa024976f869ad3efbba
-from51736577; a newer lazy-frame frontend is being prepared. This plan must be
-repinned to its actually selected executable/manifest before launch.
+The later Runtime12 frontend is
+3a738a5f1fb4905714b1a5bc4542e9716c35eb778ea6efe662e567ca7d5a1c0e
+fromb6905b78e716d15145561e68ed575a4ca2034a49, with ten host sanitizer CTests
+passed. Its S capture uses equal/even-generation metadata plus pixels. It has
+no new n81 guest qualification. Bind its exact dependency receipt and engine
+manifest before allocation; do not silently reuse the previous517/32c5 plan pin.
 
 Use the existing observed admission contract:900s admission,30s checkpoint-stall,
 5s cancellation acknowledgement; --seconds360 starts at HELLO. The existing
@@ -98,7 +101,16 @@ Current directory UI import stages another full copy before native import and
 should not be used under the no-extra18GB-copy constraint. Prepare a verified
 compact ITPACK01 transport directly from the existing read-only source, without
 an expanded host copy; this is a separate future allocated read/package stage,
-not completed here. Current archive extraction writes the full17.7GB target base
+not completed here. The app repository now provides
+`Portable/tools/write_prepared_base.py`: a closed n81 kboot thirteen-file profile
+which checks a caller-pinned lock, individual file hashes and final NAND listing
+while hashing/compressing64KiB chunks. It atomically publishes a NEW private
+archive/receipt directory without replacing an existing result. Thirteen tiny
+production-importer tests passed under ASAN/UBSAN, including malformed payload,
+path, hash, source-mutation and no-replace cases. Those tests read no large
+fixture and do not qualify actual transport or guest graphics. See that tool's
+`PREPARED-BASE-ARCHIVE.md` for the tested command; a large run still requires a
+fresh allocation and metadata/space preflight. Current archive extraction writes the full17.7GB target base
 once and is not sparse-preserving. Bind all original file hashes/lock and raw
 armv7 package, verify actual target capacity, and retain the real import receipt.
 The handoff tar is not itself ITPACK01. No new firmware asset is requested.
