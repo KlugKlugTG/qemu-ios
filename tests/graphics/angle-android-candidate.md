@@ -112,6 +112,20 @@ assume `RTLD_LOCAL` alone prevents interposition. Validate in the app worker aft
 system graphics libraries have loaded, including cross-version texture sharing
 and teardown. This loader is a plan; no production ANGLE dispatch has been added.
 
+Choose the backing renderer explicitly through ANGLE's public
+`eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, ...)`, with
+`EGL_PLATFORM_ANGLE_TYPE_OPENGLES_ANGLE` for the first candidate or
+`EGL_PLATFORM_ANGLE_TYPE_VULKAN_ANGLE` for a separately built alternate.
+These calls and attribute constants are defined in the pin's
+[public EGL extension header](https://chromium.googlesource.com/angle/angle/+/8cd050f07ebd65cce269fc92e36699fc03b20ac3/include/EGL/eglext_angle.h).
+The Android GLES backing path loads `/system/lib64/libEGL.so` in
+[DisplayEGL](https://chromium.googlesource.com/angle/angle/+/8cd050f07ebd65cce269fc92e36699fc03b20ac3/src/libANGLE/renderer/gl/egl/DisplayEGL.cpp),
+so the suffixed frontend must remain distinct from that platform runtime.
+Log the selected frontend and backing renderer and fail on unsupported
+selection rather than silently changing providers. The current inventory
+describes the existing native path; this planned display-selection entry point
+would extend it.
+
 First run raw combine and complete production probes using the candidate's own
 EGL/GLES dispatch, including API1/API2 context sharing, object lifetime, DrawTex,
 fog, rectangle matrix order, packed formats, shader limits and readback. Then
