@@ -1254,7 +1254,7 @@ if host_os in ['linux', 'android']
   if not egl_dep.found()
     egl_dep = cc.find_library('EGL', required: false)
   endif
-  if host_os == 'android'
+  if cc.get_define('__ANDROID__') != ''
     es1 = cc.find_library('GLESv1_CM', required: true)
     es2 = cc.find_library('GLESv2', required: true)
     host_egl = declare_dependency(dependencies: [egl_dep, es2, es1],

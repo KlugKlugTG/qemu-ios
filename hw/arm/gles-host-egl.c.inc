@@ -13,7 +13,7 @@ typedef struct GLESEGLContext {
     EGLContext context;
     EGLSurface surface;
     unsigned refs, api;
-    unsigned unpack_alignment, unpack_row_length;
+    unsigned unpack_alignment, unpack_row_length, errors;
 } *CGLContextObj;
 static EGLDisplay gles_egl_display = EGL_NO_DISPLAY;
 static EGLConfig gles_egl_config;
