@@ -6,7 +6,7 @@
 #include "hw/core/hw-error.h"
 #include "exec/hwaddr.h"
 #include "system/memory.h"
-#include <openssl/aes.h>
+#include "hw/arm/portable-crypto.h"
 
 #define TYPE_IPOD_TOUCH_AES                "ipodtouch.aes"
 OBJECT_DECLARE_SIMPLE_TYPE(IPodTouchAESState, IPOD_TOUCH_AES)

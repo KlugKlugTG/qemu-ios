@@ -32,6 +32,13 @@ struct TBContext {
 
     struct qht htable;
 
+    /*
+     * Physical start of a TB -> how many insns it may hold: the ones up to
+     * and including an I/O access that once had to end it early.
+     */
+    GHashTable *io_insn_limits;
+    QemuMutex io_insn_lock;
+
     /* statistics */
     unsigned tb_flush_count;
     unsigned tb_phys_invalidate_count;

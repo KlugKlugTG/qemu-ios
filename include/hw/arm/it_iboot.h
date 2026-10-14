@@ -43,6 +43,11 @@ uint32_t it_iboot_find_miu_epoch(const uint8_t *image, size_t size,
 uint32_t it_iboot_find_command_line(const uint8_t *image, size_t size,
                                     uint32_t base);
 
+/* Portable n72 snprintf format literal and its CommandLine buffer.
+ * Returns zero for absent/ambiguous/shared patterns. Upstream 1b451cc86c77. */
+uint32_t it_iboot_find_boot_args_format(const uint8_t *image, size_t size,
+                                      uint32_t base, uint32_t *command_line);
+
 #ifndef IT_IBOOT_HOST_TEST
 #include "exec/hwaddr.h"
 #include "system/memory.h"

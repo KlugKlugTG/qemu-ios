@@ -2,6 +2,7 @@
  *
  * SLICE hw/arm/ipod_touch_pke.c range static const uint8_t sha1_digestinfo | static const MemoryRegionOps
  * PKG openssl
+ * CFLAGS -I$ROOT/include
  */
 #include <stdint.h>
 #include <stdbool.h>
@@ -12,6 +13,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <openssl/bn.h>
+#include "hw/arm/portable-crypto.h"
 typedef uint64_t hwaddr;
 typedef struct {void *sha1;bool forge_sigcheck;uint8_t segments[2048],modulus[256];uint32_t seg_size_reg,segment_size,modulus_size,key_len,seg_id,seg_sign;} IPodTouchPKEState;
 #define REG_PKE_START 8
@@ -79,6 +81,10 @@ int main(void) {
             uint64_t expected=1;for(unsigned i=0;i<exponent;i++)expected*=3;
             for(unsigned i=0;i<length;i++)assert(s.segments[length+i]==(i<8 ? (expected>>(8*i))&255:0));
         }
+        /* One mode ignores b entirely, even when its register is 255. */
+        memcpy(block,s.segments+length,length);
+        op(&s,2,255,1,true,false);
+        assert(!memcmp(block,s.segments+length,length));
         memset(s.segments+length,0,length);exponentiate(&s,3,n);
         for(unsigned i=0;i<length;i++)assert(s.segments[length+i]==0);
         /* No preload, invalid segment IDs, and even modulus do not publish. */

@@ -61,18 +61,22 @@
  * glOrtho/glFrustum/glClearDepth take doubles on the desktop and floats in ES.
  * Nothing here is a reimplementation; each shim below is a rename.
  */
+#ifdef __APPLE__
 #include <TargetConditionals.h>
-#if !TARGET_OS_IPHONE
+#else
+#define TARGET_OS_IPHONE 0
+#endif
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 #include <VideoToolbox/VideoToolbox.h>
 #endif
 
-#if TARGET_OS_IPHONE || defined(GLES_HOST_ANGLE)
+#if TARGET_OS_IPHONE || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL_ES)
 #define GLES_HOST_EAGL 1
 #endif
 
 #ifdef GLES_HOST_EAGL
 
-#ifdef GLES_HOST_ANGLE
+#if defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL_ES)
 #define GL_GLES_PROTOTYPES 1
 #define GL_GLEXT_PROTOTYPES 1
 #include <GLES/gl.h>
@@ -84,7 +88,11 @@
 #define GL_UNSIGNED_SHORT_1_5_5_5_REV 0x8366
 #define GL_UNSIGNED_INT_8_8_8_8 0x8035
 #define GL_UNSIGNED_INT_8_8_8_8_REV 0x8367
+#ifdef GLES_HOST_ANGLE
 #include "gles-host-angle.c.inc"
+#else
+#include "gles-host-egl.c.inc"
+#endif
 #else
 #include <OpenGLES/ES1/gl.h>
 #include <OpenGLES/ES1/glext.h>
@@ -180,12 +188,26 @@ void gles_eagl_iosurface_unlock(void);
 
 #else /* macOS: legacy CGL */
 
+#ifdef GLES_HOST_EGL
+#define GL_GLEXT_PROTOTYPES 1
+#include <GL/gl.h>
+#include <GL/glext.h>
+#include "gles-host-egl.c.inc"
+#else
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
+#endif
 
 #define GLES_BGRA_READ_TYPE           GL_UNSIGNED_INT_8_8_8_8_REV
 
+#endif
+
+#ifdef GLES_HOST_EGL
+#include "gles-host-fence.c.inc"
+#endif
+#ifdef GLES_HOST_EGL_ES
+#include "gles-host-native.c.inc"
 #endif
 
 /* The physical LCD remains portrait. Individual CA drawables can be landscape
@@ -305,7 +327,7 @@ typedef struct {
 } GLESPVRTC;
 
 typedef struct {
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     CGLContextObj root;
 #endif
     unsigned refs;
@@ -324,9 +346,11 @@ typedef struct {
     bool failed;
     /* 0: older guest did not supply its API; 1/2: explicit GLES version. */
     uint32_t api_version;
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     CGLContextObj cgl;
 #endif
+    GLuint stencil;                    /* separate private stencil; 0 when packed */
+    GLenum drawable_depth_format;      /* native capability-selected private storage */
     GLuint fbo, tex, depth, sync_fbo;   /* sync_fbo: gles_surface_writeback's scratch */
     GLuint copy_fbo;                    /* gles_surface_copy's draw side */
     uint32_t drawable_width, drawable_height;
@@ -545,7 +569,7 @@ static Error *gles_save_blocker;
 
 static bool gles_begin_context(void)
 {
-#ifdef GLES_HOST_EAGL
+#if defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL)
     /* The CGL backend saves live GL state (gles-host-snapshot.c.inc); the
      * iOS-host EAGL backend cannot yet. */
     if (!qatomic_read(&gles_live_contexts)) {
@@ -656,7 +680,25 @@ static inline uint64_t gles_t(void)
  * returns -1, which is the guest's cue to fall back to its software renderer.
  * A missing context is therefore never fatal to the emulator.
  */
-#if defined(GLES_HOST_ANGLE)
+#if defined(GLES_HOST_EGL)
+static bool gles_platform_context_create(void)
+{
+    if (!gles_egl_create(gh.group ? gh.group->root : NULL, gh.api_version, &gh.cgl)) return false;
+#ifdef GLES_HOST_EGL_ES
+    if (!gles_native_require_fbo()) {
+        CGLReleaseContext(gh.cgl);
+        gh.cgl=NULL;
+        return false;
+    }
+#endif
+    if (gh.group && !gh.group->root) gh.group->root = CGLRetainContext(gh.cgl);
+    return true;
+}
+static bool gles_platform_make_current(void) { return CGLSetCurrentContext(gh.cgl) == 0; }
+static bool gles_platform_attach_iosurface(void) { return false; }
+static void *gles_platform_frame_lock(size_t *stride) { return NULL; }
+static void gles_platform_frame_unlock(void) {}
+#elif defined(GLES_HOST_ANGLE)
 
 static bool gles_platform_context_create(void)
 {
@@ -667,7 +709,7 @@ static bool gles_platform_context_create(void)
             gh.api_version, glGetString(GL_RENDERER), glGetString(GL_VERSION));
     return true;
 }
-static void gles_platform_make_current(void) { CGLSetCurrentContext(gh.cgl); }
+static bool gles_platform_make_current(void) { return CGLSetCurrentContext(gh.cgl) == 0; }
 static bool gles_platform_attach_iosurface(void) { return false; }
 static void *gles_platform_frame_lock(size_t *stride) { return NULL; }
 static void gles_platform_frame_unlock(void) {}
@@ -679,9 +721,10 @@ static bool gles_platform_context_create(void)
     return gles_eagl_context_create();
 }
 
-static inline void gles_platform_make_current(void)
+static inline bool gles_platform_make_current(void)
 {
     gles_eagl_make_current();
+    return true;
 }
 
 /*
@@ -745,11 +788,12 @@ static bool gles_platform_context_create(void)
  * touches CGL, so after the first it is always already current -- and the
  * check is a thread-local read against a call into the GL stack.
  */
-static inline void gles_platform_make_current(void)
+static inline bool gles_platform_make_current(void)
 {
     if (CGLGetCurrentContext() != gh.cgl) {
-        CGLSetCurrentContext(gh.cgl);
+        return CGLSetCurrentContext(gh.cgl) == 0;
     }
+    return true;
 }
 
 /*
@@ -872,6 +916,27 @@ static GLenum gles_rb_format(uint32_t fmt)
     }
 }
 
+#ifdef GLES_HOST_EGL_ES
+typedef struct GLESDrawableInitDiagnostic {
+    const char *first_stage;
+    GLenum first_error;
+    GLenum color_status;
+} GLESDrawableInitDiagnostic;
+static void gles_drawable_init_record(GLESDrawableInitDiagnostic *d,
+                                      const char *stage)
+{
+    if (!d->first_error) {
+        d->first_error = gles_native_peek_error();
+        if (d->first_error) d->first_stage = stage;
+    }
+}
+#define GLES_DRAWABLE_INIT_RECORD(stage) gles_drawable_init_record(&diagnostic, stage)
+#else
+#define GLES_DRAWABLE_INIT_RECORD(stage) ((void)0)
+#endif
+
+#include "gles-host-drawable-depth.c.inc"
+
 static bool gles_host_init(void)
 {
     if (gh.inited) {
@@ -895,15 +960,21 @@ static bool gles_host_init(void)
         gh.failed = true;
         return false;
     }
+#ifdef GLES_HOST_EGL_ES
+    GLESDrawableInitDiagnostic diagnostic = {0};
+    GLES_DRAWABLE_INIT_RECORD("context-ready");
+#endif
 
     if (!gh.rb_sized) gh.rb_sized = g_hash_table_new(g_direct_hash, g_direct_equal);
     gh.fbo_drawable = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     gh.fbo = gles_private_name(glIsFramebufferEXT);
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, gh.fbo);
+    GLES_DRAWABLE_INIT_RECORD("bind-framebuffer");
 
     gh.tex = gles_private_name(glIsTexture);
     glBindTexture(GL_TEXTURE_2D, gh.tex);
+    GLES_DRAWABLE_INIT_RECORD("bind-color");
     /*
      * Storage for the color attachment, from one of two places. An IOSurface
      * gives the CPU a mapped view of the very memory the GPU renders into, so
@@ -916,22 +987,38 @@ static bool gles_host_init(void)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, GLES_FB_WIDTH, GLES_FB_HEIGHT,
                      0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     }
+    GLES_DRAWABLE_INIT_RECORD("color-storage");
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    GLES_DRAWABLE_INIT_RECORD("color-parameters");
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
                               GL_TEXTURE_2D, gh.tex, 0);
+    GLES_DRAWABLE_INIT_RECORD("color-attachment");
+#ifdef GLES_HOST_EGL_ES
+    diagnostic.color_status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    GLES_DRAWABLE_INIT_RECORD("color-status");
+#endif
 
-    /* Depth AND stencil, packed: OES_packed_depth_stencil and OES_stencil8 are on
-     * every one of these devices, and an app that attaches a stencil renderbuffer
-     * to its drawable framebuffer (which resolves to this one) gets it here. */
-    gh.depth = gles_private_name(glIsRenderbufferEXT);
-    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, gh.depth);
-    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_DEPTH24_STENCIL8_EXT,
-                             GLES_FB_WIDTH, GLES_FB_HEIGHT);
-    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT,
-                                 GL_RENDERBUFFER_EXT, gh.depth);
-    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_STENCIL_ATTACHMENT_EXT,
-                                 GL_RENDERBUFFER_EXT, gh.depth);
+    /* Optional packed storage is not implied by framebuffer-object support.
+     * Keep the desktop/EAGL recipe; native ES selects only actual capabilities. */
+    gh.drawable_depth_format = GL_DEPTH24_STENCIL8_EXT;
+#ifdef GLES_HOST_EGL_ES
+    gh.drawable_depth_format = gles_drawable_depth_select(
+        (const char *)glGetString(GL_VERSION),
+        (const char *)glGetString(GL_EXTENSIONS), gles_egl_current->api);
+    if (!gh.drawable_depth_format) {
+        fprintf(stderr, "[gles] unsupported required private drawable stencil8 storage\n");
+        if (legacy) gles_end_context();
+        gh.failed = true;
+        return false;
+    }
+#endif
+    gles_drawable_depth_allocate(gh.drawable_depth_format,
+                                GLES_FB_WIDTH, GLES_FB_HEIGHT,
+                                &gh.depth, &gh.stencil);
+    GLES_DRAWABLE_INIT_RECORD("depth-stencil-storage");
+    gles_drawable_depth_attach(gh.depth, gh.stencil);
+    GLES_DRAWABLE_INIT_RECORD("depth-stencil-attachment");
 
     /*
      * An IOSurface attachment that the driver accepts and then cannot render to
@@ -953,9 +1040,27 @@ static bool gles_host_init(void)
                                   GL_TEXTURE_2D, gh.tex, 0);
     }
 
-    if (glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT)
-        != GL_FRAMEBUFFER_COMPLETE_EXT) {
+    GLenum init_status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    if (init_status != GL_FRAMEBUFFER_COMPLETE_EXT) {
+#ifdef GLES_HOST_EGL_ES
+        GLES_DRAWABLE_INIT_RECORD("final-status");
+        const char *extensions = (const char *)glGetString(GL_EXTENSIONS);
+        fprintf(stderr, "[gles] FBO incomplete: status=0x%x color-status=0x%x "
+                "api=%u size=%ux%u fbo=%u texture=%u depth=%u stencil=%u depth-format=0x%x "
+                "first-stage=%s first-error=0x%x packed-depth-stencil=%u "
+                "full-npot=%u limited-npot=%u renderer=%s version=%s\n",
+                init_status, diagnostic.color_status, gh.api_version,
+                (unsigned)GLES_FB_WIDTH, (unsigned)GLES_FB_HEIGHT,
+                gh.fbo, gh.tex, gh.depth, gh.stencil, gh.drawable_depth_format,
+                diagnostic.first_stage ? diagnostic.first_stage : "none",
+                diagnostic.first_error,
+                gles_native_extension(extensions,"GL_OES_packed_depth_stencil"),
+                gles_native_extension(extensions,"GL_OES_texture_npot"),
+                gles_native_extension(extensions,"GL_APPLE_texture_2D_limited_npot"),
+                glGetString(GL_RENDERER), glGetString(GL_VERSION));
+#else
         fprintf(stderr, "[gles] FBO incomplete\n");
+#endif
         if (legacy) gles_end_context();
         gh.failed = true;
         return false;
@@ -986,10 +1091,12 @@ static bool gles_host_init(void)
      * which is what it would get on the device.
      */
     glViewport(0, 0, GLES_FB_WIDTH, GLES_FB_HEIGHT);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
+    if (gh.api_version != 2) {
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+    }
 
     gh.vertex.client_state   = GL_VERTEX_ARRAY;
     for (unsigned u = 0; u < GLES_MAX_TEXUNITS; u++) {
@@ -1009,9 +1116,14 @@ static bool gles_host_init(void)
     if (trace_event_get_state_backends(TRACE_GLES_CONTEXT_LOG)) TRACE_PRINTF(trace_gles_context_log, "[gles-context] initialized %p legacy=%d\n", (void *)gh_current, gh_current == &gh_legacy);
 
 
-    fprintf(stderr, "[gles] host GL up: %s / %s, present by %s\n",
+    fprintf(stderr, "[gles] host GL up: %s / %s, present by %s (guest-api=%u)\n",
             glGetString(GL_VERSION), glGetString(GL_RENDERER),
-            gh.iosurface ? "IOSurface" : "readback");
+            gh.iosurface ? "IOSurface" : "readback", gh.api_version == 2 ? 2u : 1u);
+#ifdef GLES_HOST_EGL_ES
+    fprintf(stderr, "[gles] private drawable depth-format=0x%x stencil=%s size=%ux%u\n",
+            gh.drawable_depth_format, gh.stencil ? "separate8" : "packed8",
+            gh.drawable_width, gh.drawable_height);
+#endif
     return true;
 }
 
@@ -1462,7 +1574,25 @@ static void gles_draw_tex(float x, float y, float z, float w, float h)
     glMatrixMode(mode);
     glPopAttrib();
 #else
+#ifdef GLES_HOST_EGL_ES
+    GLint crop[GLES_MAX_TEXUNITS][4]={0};
+    bool has_crop[GLES_MAX_TEXUNITS]={0};
+    GLint active, units;
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
+    glGetIntegerv(GL_MAX_TEXTURE_UNITS,&units);
+    for (unsigned unit=0;unit<GLES_MAX_TEXUNITS && unit<(unsigned)units;unit++) {
+        glActiveTexture(GL_TEXTURE0+unit);
+        GLint texture; glGetIntegerv(GL_TEXTURE_BINDING_2D,&texture);
+        const GLint *rect=gh.crop ? g_hash_table_lookup(gh.crop,GUINT_TO_POINTER(texture)) : NULL;
+        if (rect) { memcpy(crop[unit],rect,sizeof(crop[unit])); has_crop[unit]=true; }
+    }
+    glActiveTexture(active);
+    if (!gles_native_draw_tex(x,y,z,w,h,crop,has_crop,GLES_MAX_TEXUNITS))
+        gles_refuse("drawtex:host-error");
+
+#else
     (void)x; (void)y; (void)z; (void)w; (void)h;
+#endif
 #endif
 }
 
@@ -1854,7 +1984,7 @@ static unsigned gles_query_count(uint32_t pname)
     case GL_MAX_MODELVIEW_STACK_DEPTH:
     case GL_MAX_PROJECTION_STACK_DEPTH:
     case GL_MAX_TEXTURE_SIZE:
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
     case GL_MAX_RECTANGLE_TEXTURE_SIZE_ARB:
     case GL_TEXTURE_BINDING_RECTANGLE_ARB:
 #endif
@@ -2669,7 +2799,11 @@ static GLenum gles_texture_object(uint32_t target)
 
 static unsigned gles_texparam_nparams(uint32_t target, uint32_t pname)
 {
-    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) return 0;
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP
+#ifdef GLES_HOST_EGL_ES
+        && target != GL_TEXTURE_RECTANGLE_ARB
+#endif
+       ) return 0;
     switch (pname) {
     case GL_TEXTURE_MIN_FILTER: case GL_TEXTURE_MAG_FILTER:
     case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T:
@@ -2696,7 +2830,9 @@ static void gles_debug_texture(GLenum target)
         glTexImage2D(faces == 6 ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + f : target, 0, GL_RGBA,
                      1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
     }
+#ifndef GLES_HOST_EGL_ES
     glTexParameteri(object, GL_TEXTURE_MAX_LEVEL, 0);
+#endif
     while (glGetError() != GL_NO_ERROR) {
         /* the guest's error is the refusal's, not this paint's */
     }
@@ -2712,7 +2848,7 @@ static void gles_debug_mark(void)
     if (!gles_debug) return;
     glGetIntegerv(GL_MATRIX_MODE, &mode);
     glGetIntegerv(GL_CURRENT_PROGRAM, &program);
-    glGetIntegerv(GL_MAX_TEXTURE_UNITS, &units);
+    glGetIntegerv(gh.api_version == 2 ? GL_MAX_TEXTURE_IMAGE_UNITS : GL_MAX_TEXTURE_UNITS, &units);
     glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
                  GL_STENCIL_BUFFER_BIT | GL_TEXTURE_BIT | GL_POLYGON_BIT);
     if (program) glUseProgram(0);
@@ -2842,6 +2978,41 @@ static const uint8_t *gles_frame_lock(size_t *stride)
     return gles_platform_frame_lock(stride);
 }
 
+#include "gles-host-pixels.c.inc"
+
+static void gles_report_frame_pixels(const uint8_t *frame, size_t stride,
+                                     uint32_t width, uint32_t height,
+                                     unsigned bpp, bool bgra, hwaddr base,
+                                     const char *path)
+{
+    static int enabled = -1;
+    GlesFramePixels pixels;
+    uint64_t sequence = gh.presents + 1;
+
+    if (enabled < 0) {
+        const char *metrics = getenv("IT_GLES_FRAME_METRICS");
+        const char *verbose = getenv("IT_GLES_VERBOSE");
+        enabled = (metrics && atoi(metrics)) || (verbose && atoi(verbose));
+    }
+    if ((!enabled && !gles_prof) || (sequence != 1 && sequence % 60 != 0) ||
+        !gles_frame_pixels(frame, stride, width, height, bpp, bgra, &pixels)) {
+        return;
+    }
+    /* These are bytes actually copied, not a success assertion for GL or CA.
+     * Decode only the accepted dimensions, excluding row padding. In particular
+     * a transparent colored image differs from an opaque black one. */
+    fprintf(stderr, "[gles] copied frame=%" PRIu64 " api=%u fbo=%u base=0x%" PRIx64
+            " path=%s source=%s %ux%u stride=%zu pixels=%" PRIu64
+            " nonzero-rgb=%" PRIu64 " nonzero-alpha=%" PRIu64
+            " opaque=%" PRIu64 " mean-rgba=%" PRIu64 ",%" PRIu64 ",%" PRIu64
+            ",%" PRIu64 " rgba-fnv64=%016" PRIx64 "\n",
+            sequence, gh.api_version, gh.fbo, (uint64_t)base, path,
+            bpp == 2 ? "RGB565(alpha-implicit)" : bgra ? "BGRA" : "RGBA",
+            width, height, stride, pixels.pixels, pixels.nonzero_rgb,
+            pixels.nonzero_alpha, pixels.opaque, pixels.mean[0], pixels.mean[1],
+            pixels.mean[2], pixels.mean[3], pixels.hash);
+}
+
 static void gles_present_to_panel(void)
 {
     IPodTouchMachineState *nms;
@@ -2875,6 +3046,8 @@ static void gles_present_to_panel(void)
             cpu_physical_memory_write(fb + (hwaddr)y * GLES_FB_WIDTH * 4,
                                       src, GLES_FB_WIDTH * 4);
         }
+        gles_report_frame_pixels(frame, fstride, GLES_FB_WIDTH, GLES_FB_HEIGHT,
+                                 4, true, fb, "panel-IOSurface");
         gles_platform_frame_unlock();
         gh.presents++;
         gles_frame_end();
@@ -2908,6 +3081,9 @@ static void gles_present_to_panel(void)
         cpu_physical_memory_write(fb + (hwaddr)y * GLES_FB_WIDTH * 4,
                                   row, GLES_FB_WIDTH * 4);
     }
+    gles_report_frame_pixels(gh.readback, GLES_FB_WIDTH * 4,
+                             GLES_FB_WIDTH, GLES_FB_HEIGHT, 4, false, fb,
+                             "panel-readback");
     gh.presents++;
     gles_frame_end();
 }
@@ -3229,26 +3405,6 @@ static void gles_report_progress(void)
     gh.last_report_drawable = gh.draws_drawable;
     gh.last_report_offscreen = gh.draws_offscreen;
     gles_report_visibility();
-    {
-        /* What the DRAWABLE actually contains, read from the same buffer the
-         * present just wrote out. Distinguishes "the app drew nothing / drew
-         * the clear color" from "we drew a scene and lost it on the way to
-         * the panel" -- which no counter can. */
-        uint64_t r = 0, g = 0, b = 0;
-        unsigned i, n = gh.drawable_width * gh.drawable_height;
-
-        if (gh.readback) {
-            for (i = 0; i < n; i += 7) {
-                r += gh.readback[i * 4];
-                g += gh.readback[i * 4 + 1];
-                b += gh.readback[i * 4 + 2];
-            }
-            n = (n + 6) / 7;
-            fprintf(stderr, "[gles]   drawable mean rgb = %llu,%llu,%llu\n",
-                    (unsigned long long)(r / n), (unsigned long long)(g / n),
-                    (unsigned long long)(b / n));
-        }
-    }
 
     /*
      * The accounting line. Percentages are of WALL time over the same 60
@@ -3466,6 +3622,8 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                     return -1;
                 }
             }
+            gles_report_frame_pixels(frame, fstride, rw, rh, bpp, bgra, base,
+                                     "surface-IOSurface");
             gles_dump_frame(frame, fstride, rw, rh, bgra);
             gles_platform_frame_unlock();
             gh.presents++;
@@ -3571,6 +3729,8 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                 return -1;
             }
         }
+        gles_report_frame_pixels(gh.readback, (size_t)rw * bpp, rw, rh,
+                                 bpp, bgra, base, "surface-readback");
         /* The dump writes 32-bit pixels; a 565 frame is not its format. */
         if (bpp == 4) {
             gles_dump_frame(gh.readback, (size_t)rw * 4, rw, rh, bgra);
@@ -3812,7 +3972,9 @@ static int64_t gles_generate_mipmap(uint32_t target)
     gles_texture_begin();
     /* The level-0 upload capped MAX_LEVEL at 0 (below); desktop GL generates and samples no level past the cap,
      * so lift it to GL's default: the chain this makes is complete. */
+#ifndef GLES_HOST_EGL_ES
     glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, 1000);
+#endif
     glGenerateMipmapEXT(target);
     GLenum error = glGetError();
     if (error) {
@@ -3903,78 +4065,7 @@ static int64_t gles_pvrtc_upload(CPUState *cpu, uint32_t target, uint32_t level,
  * Allocate all drawable attachments together and publish them only after the
  * replacement is complete. A failed resize leaves the old storage usable.
  * Guest texture/renderbuffer/framebuffer bindings and viewport stay intact. */
-static int64_t gles_drawable_storage(uint32_t width, uint32_t height)
-{
-    GLint texture, renderbuffer, framebuffer;
-    GLuint color = 0, depth = 0, fbo = 0;
-    GLenum error, status;
-    uint8_t *readback;
-
-    if (!width || !height || width > 2048 || height > 2048) {
-        gles_refuse("drawable:size:%ux%u", width, height);
-        return gles_reject(GL_INVALID_VALUE);
-    }
-    gh.drawable_announced = true;
-    if (width == gh.drawable_width && height == gh.drawable_height) return 0;
-    readback = g_try_malloc0_n((size_t)width * height, 4);
-    if (!readback) {
-        gles_refuse("drawable:memory");
-        return gles_reject(GL_OUT_OF_MEMORY);
-    }
-
-    gles_texture_begin();
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
-    glGetIntegerv(GL_RENDERBUFFER_BINDING_EXT, &renderbuffer);
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING_EXT, &framebuffer);
-    color = gles_private_name(glIsTexture);
-    glBindTexture(GL_TEXTURE_2D, color);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height,
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    depth = gles_private_name(glIsRenderbufferEXT);
-    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, depth);
-    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_DEPTH24_STENCIL8_EXT, width, height);
-    fbo = gles_private_name(glIsFramebufferEXT);
-    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
-    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
-                              GL_TEXTURE_2D, color, 0);
-    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT,
-                                 GL_RENDERBUFFER_EXT, depth);
-    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_STENCIL_ATTACHMENT_EXT,
-                                 GL_RENDERBUFFER_EXT, depth);
-    status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
-    error = glGetError();
-    if (error == GL_NO_ERROR && status != GL_FRAMEBUFFER_COMPLETE_EXT)
-        error = GL_OUT_OF_MEMORY;
-    if (error != GL_NO_ERROR) gles_refuse("drawable:storage:0x%x", error);
-    if (error == GL_NO_ERROR) {
-        if ((GLuint)texture == gh.tex) texture = color;
-        if ((GLuint)renderbuffer == gh.depth) renderbuffer = depth;
-        if ((GLuint)framebuffer == gh.fbo) framebuffer = fbo;
-        glDeleteTextures(1, &gh.tex);
-        glDeleteRenderbuffersEXT(1, &gh.depth);
-        glDeleteFramebuffersEXT(1, &gh.fbo);
-        g_free(gh.readback);
-        gh.tex = color; gh.depth = depth; gh.fbo = fbo;
-        gh.readback = readback;
-        gh.drawable_width = width; gh.drawable_height = height;
-        /* The portable readback path handles resized layers on both hosts.
-         * The platform's original IOSurface remains owned by its context. */
-        gh.iosurface = false;
-        gh.fb_dirty = true;
-        gh.depth_cleared_this_frame = false;
-    } else {
-        glDeleteTextures(1, &color);
-        glDeleteRenderbuffersEXT(1, &depth);
-        glDeleteFramebuffersEXT(1, &fbo);
-        g_free(readback);
-    }
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, renderbuffer);
-    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, framebuffer);
-    return error == GL_NO_ERROR ? 0 : gles_reject(error);
-}
+#include "gles-host-drawable-storage.c.inc"
 
 static bool gles_surface_range(uint32_t base, uint32_t stride, unsigned rows,
                                unsigned rowbytes)
@@ -3996,7 +4087,7 @@ static bool gles_surface_read(CPUState *cpu, uint32_t base, uint32_t stride,
     return true;
 }
 
-#ifndef GLES_HOST_EAGL
+#if defined(__APPLE__) && !defined(GLES_HOST_EAGL)
 static bool gles_surface_nv12(unsigned w, unsigned h, OSType format,
                               uint8_t *input, uint8_t *bgra)
 {
@@ -4023,6 +4114,29 @@ done:
     if (dest) CVPixelBufferRelease(dest);
     if (source) CVPixelBufferRelease(source);
     return ok;
+}
+#endif
+
+#ifdef GLES_HOST_EGL
+/* CoreVideo 420v video-range / 420f full-range BT.601, CPU fallback. */
+static uint8_t gles_yuv_byte(int value) { return MIN(255,MAX(0,value)); }
+static bool gles_surface_nv12(unsigned width, unsigned height, uint32_t format,
+                              uint8_t *input, uint8_t *bgra)
+{
+    bool full=format==0x34323066;
+    if (!full && format!=0x34323076) return false;
+    for (unsigned row=0;row<height;row++) for (unsigned col=0;col<width;col++) {
+        size_t uv=(size_t)width*height+(size_t)(row/2)*width+(col&~1u);
+        int u=input[uv]-128,v=input[uv+1]-128;
+        int y=input[(size_t)row*width+col];
+        int luma=full?y*256:MAX(0,y-16)*298;
+        uint8_t *dst=bgra+((size_t)row*width+col)*4;
+        dst[0]=gles_yuv_byte((luma+(full?454:516)*u+128)>>8);
+        dst[1]=gles_yuv_byte((luma-(full?88:100)*u-(full?183:208)*v+128)>>8);
+        dst[2]=gles_yuv_byte((luma+(full?359:409)*v+128)>>8);
+        dst[3]=255;
+    }
+    return true;
 }
 #endif
 
@@ -4373,7 +4487,7 @@ static void gles_surface_forget(GLenum target)
     GLESSurface *s;
 
     if (!gh.surfaces) return;
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
     if (target == GL_TEXTURE_RECTANGLE_ARB) {
         glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE_ARB, &name);
     } else
@@ -4436,7 +4550,7 @@ static int64_t gles_bind_surface(CPUState *cpu, const uint32_t *a, uint32_t id)
     GLenum binding = GL_TEXTURE_BINDING_2D;
     g_autofree uint8_t *pixels = NULL;
     if (target != GL_TEXTURE_2D) {
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
         if (target != GL_TEXTURE_RECTANGLE_ARB) {
             gles_refuse("surface:target:0x%x", target);
             return -1;
@@ -4525,7 +4639,7 @@ static int64_t gles_bind_surface(CPUState *cpu, const uint32_t *a, uint32_t id)
     if (surface->npages) {
         gles_surface_fetch(surface, pixels);    /* every page was just mapped: no fault can come */
     } else if (nv12) {
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL)
         if ((w | h) & 1) {
             gles_refuse("surface:nv12:odd-size");
             gles_debug_texture(target);
@@ -4613,6 +4727,79 @@ static int64_t gles_sync_surface_1(CPUState *cpu)
     return 0;
 }
 
+static bool gles_surface_metrics_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *flag = getenv("IT_GLES_FRAME_METRICS");
+        enabled = flag && atoi(flag);
+    }
+    return enabled;
+}
+
+static void gles_report_surface_pixels(GLuint texture, const GLESSurface *s,
+                                      GLint binding, const uint8_t *pixels,
+                                      unsigned bpp, bool rgb555)
+{
+    static unsigned copied;
+    GlesFramePixels content;
+
+    if (!gles_surface_metrics_enabled() || copied >= 16 ||
+        !gles_frame_pixels_packed(pixels, (size_t)s->width * bpp,
+            s->width, s->height, bpp, s->format != GLES_SURFACE_RGBA32,
+            rgb555, &content)) {
+        return;
+    }
+    copied++;
+    /* Called only after every row reaches guest memory. These identifiers are
+     * in the executor's namespace; no new query of host GL state is needed. */
+    fprintf(stderr, "[gles] CA copied sample=%u/16 ctx=%08x api=%u "
+            "texture-key=%u bound-fbo=%u binding=%d readback-fbo=%u "
+            "base=%08x format=%08x target=%x %ux%u guest-stride=%u "
+            "readback-stride=%zu pages=%u window-flip=%u gen=%" PRIu64
+            " alpha=%s pixels=%" PRIu64 " nonzero-rgb=%" PRIu64
+            " nonzero-alpha=%" PRIu64 " opaque=%" PRIu64
+            " mean-rgba=%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+            " rgba-fnv64=%016" PRIx64 "\n",
+            copied, gles_cur_ctx, gh.api_version, texture, gh.bound_framebuffer,
+            binding, gh.sync_fbo, s->base, s->format, s->target,
+            s->width, s->height, s->stride, (size_t)s->width * bpp, s->npages,
+            (unsigned)s->window, s->gen, bpp == 2 ? "implicit" : "stored",
+            content.pixels, content.nonzero_rgb, content.nonzero_alpha,
+            content.opaque, content.mean[0], content.mean[1], content.mean[2],
+            content.mean[3], content.hash);
+}
+
+static void gles_report_surface_flush(uint32_t base, unsigned surfaces,
+                                     unsigned attempted, unsigned copied,
+                                     int result)
+{
+    static unsigned flushes, empty;
+    unsigned sample, limit;
+    if (!gles_surface_metrics_enabled()) {
+        return;
+    }
+    if (!attempted && !result) {
+        /* Imports may flush many clean aliases before the first draw. Their
+         * empty flushes must not exhaust the budget for real writebacks. */
+        if (empty >= 4) {
+            return;
+        }
+        sample = ++empty;
+        limit = 4;
+    } else {
+        if (flushes >= 16) {
+            return;
+        }
+        sample = ++flushes;
+        limit = 16;
+    }
+    fprintf(stderr, "[gles] CA flush sample=%u/%u ctx=%08x api=%u "
+            "requested-base=%08x surfaces=%u attempted=%u copied=%u result=%d\n",
+            sample, limit, gles_cur_ctx, gh.api_version, base, surfaces,
+            attempted, copied, result);
+}
+
 /* Texture `texture`'s pixels into its surface's guest memory. */
 static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
 {
@@ -4684,6 +4871,7 @@ static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
     /* Our own write: its aliases see a new generation, this texture already holds it. */
     gles_surface_changed(s);
     s->gen = gles_gen;
+    gles_report_surface_pixels(texture, s, framebuffer, pixels, bpp, rgb555);
     return 0;
 }
 
@@ -4694,14 +4882,27 @@ static int gles_surface_flush(CPUState *cpu, uint32_t base)
 {
     GHashTableIter it;
     gpointer key, value;
+    unsigned attempted = 0, copied = 0;
 
-    if (!gh.surfaces) return 0;
+    if (!gh.surfaces) {
+        gles_report_surface_flush(base, 0, 0, 0, 0);
+        return 0;
+    }
     g_hash_table_iter_init(&it, gh.surfaces);
     while (g_hash_table_iter_next(&it, &key, &value)) {
         GLESSurface *s = value;
-        if (s->dirty && (!base || s->base == base) &&
-            gles_surface_writeback(cpu, GPOINTER_TO_UINT(key), s)) return -1;
+        if (s->dirty && (!base || s->base == base)) {
+            attempted++;
+            if (gles_surface_writeback(cpu, GPOINTER_TO_UINT(key), s)) {
+                gles_report_surface_flush(base, g_hash_table_size(gh.surfaces),
+                                          attempted, copied, -1);
+                return -1;
+            }
+            copied++;
+        }
     }
+    gles_report_surface_flush(base, g_hash_table_size(gh.surfaces),
+                              attempted, copied, 0);
     return 0;
 }
 
@@ -4713,17 +4914,17 @@ static bool gles_refresh_surfaces_1(CPUState *cpu)
     if (!gh.surfaces || !g_hash_table_size(gh.surfaces)) return true;
     GLint active, units = 0, kind = 0, attachment = 0;
     GLenum targets[] = { GL_TEXTURE_2D,
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
         GL_TEXTURE_RECTANGLE_ARB,
 #endif
     };
     GLenum bindings[] = { GL_TEXTURE_BINDING_2D,
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
         GL_TEXTURE_BINDING_RECTANGLE_ARB,
 #endif
     };
     glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
-    glGetIntegerv(GL_MAX_TEXTURE_UNITS, &units);
+    glGetIntegerv(gh.api_version == 2 ? GL_MAX_TEXTURE_IMAGE_UNITS : GL_MAX_TEXTURE_UNITS, &units);
     glGetFramebufferAttachmentParameterivEXT(GL_FRAMEBUFFER_EXT,
         GL_COLOR_ATTACHMENT0_EXT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_EXT, &kind);
     if (kind == GL_TEXTURE) glGetFramebufferAttachmentParameterivEXT(GL_FRAMEBUFFER_EXT,
@@ -4740,6 +4941,10 @@ static bool gles_refresh_surfaces_1(CPUState *cpu)
             if (!gh.program && !glIsEnabled(targets[t])) continue;
             glGetIntegerv(bindings[t], &name);
             if (!name || name == attachment) continue;
+#ifdef GLES_HOST_EGL_ES
+            GLESEGLTexture *bound=gles_native_bound_texture(targets[t]);
+            if (bound && bound->deleted) continue;
+#endif
             GLESSurface *surface = g_hash_table_lookup(gh.surfaces, GUINT_TO_POINTER(name));
             if (!surface || surface->dirty || surface->detached) continue;
             if (surface->npages) {      /* re-read only memory written since its upload */
@@ -4801,6 +5006,9 @@ static char *gles_es2_string(CPUState *cpu, uint32_t ptr, int32_t len)
  * this they failed to compile and the game's menu buttons never drew. */
 static char *gles_es2_glsl(const char *src)
 {
+#ifdef GLES_HOST_EGL_ES
+    return g_strdup(src);
+#else
     GString *out = g_string_new("#version 120\n"
                                 "#define lowp\n#define mediump\n#define highp\n#define ES_GL_ES 1\n");
     GString *es = g_string_new(NULL);
@@ -4841,6 +5049,7 @@ static char *gles_es2_glsl(const char *src)
     }
     g_string_free(es, true);
     return g_string_free(out, false);
+#endif
 }
 
 /* In ES 2.0 a vertex shader's gl_PointSize sizes a point and gl_PointCoord is defined for it; a legacy desktop context
@@ -5350,6 +5559,9 @@ static bool gles_es2_call(CPUState *cpu, uint32_t slot, uint32_t argc,
         bool is_float = a[1] <= 0x8DF2;         /* LOW/MEDIUM/HIGH_FLOAT */
         GLint range[2] = { is_float ? 127 : 31, is_float ? 127 : 30 };
         GLint precision = is_float ? 23 : 0;
+#ifdef GLES_HOST_EGL_ES
+        glGetShaderPrecisionFormat(a[0], a[1], range, &precision);
+#endif
         gles_es2_write(cpu, a[2], range, 8);
         gles_es2_write(cpu, a[3], &precision, 4);
         break;
@@ -5864,6 +6076,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
          * share that cap, so only a face's level 0 on a fresh cube (still at
          * GL's default of 1000) resets it; face-major mip uploads keep theirs.
          */
+#ifndef GLES_HOST_EGL_ES
         {
             GLenum object = gles_texture_object(target);
             GLint cap = 0;
@@ -5874,6 +6087,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
                 glTexParameteri(object, GL_TEXTURE_MAX_LEVEL, (GLint)level);
             }
         }
+#endif
         /*
          * What actually went INTO each texture, and whether it has the mip
          * chain its filter needs. A texture that samples black takes an entire
@@ -6283,9 +6497,13 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
             break;
         /* ES 2.0 names desktop GL 2.1 spells in components, or lacks. */
         case 0x8DFB: case 0x8DFC: case 0x8DFD: {    /* MAX_{VERTEX_UNIFORM,VARYING,FRAGMENT_UNIFORM}_VECTORS */
+#ifdef GLES_HOST_EGL_ES
+            glGetIntegerv(pname, v.i);
+#else
             GLenum comps = pname == 0x8DFB ? 0x8B4A : pname == 0x8DFC ? 0x8B4B : 0x8B49;
             glGetIntegerv(comps, v.i);
             v.i[0] /= 4;
+#endif
             break;
         }
         case 0x8B8D: v.i[0] = gh.program; break;    /* CURRENT_PROGRAM */
@@ -6737,7 +6955,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         else glGetTexParameterfv(a[0], a[1], p);
         return gles_write_xparams(cpu, a[2], a[1], n, p);
     }
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
     case 774: case 775: {                       /* glGetClipPlanef/x(plane, equation[4]) */
         double d[4] = { 0 };
         float p[4];
@@ -6747,6 +6965,8 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         return gles_write_xparams(cpu, a[1], 0, 4, p);
     }
 
+#endif
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL)
     /* APPLE_fence, which the desktop has under the same names. Every engine of
      * these firmwares fills the eight; game engines fence their streamed
      * vertex buffers with them. */
@@ -7355,7 +7575,7 @@ void gles_host_set_allowed(bool allowed)
     gles_allowed = allowed;
 }
 
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
 static GHashTable *gles_contexts, *gles_groups;
 static uint32_t gles_handle = 0x80000000;
 
@@ -7371,6 +7591,8 @@ static void gles_group_unref(GLESGroup *group)
     if (group->uloc) g_hash_table_destroy(group->uloc);
     g_free(group);
 }
+
+#include "gles-host-context-cleanup.c.inc"
 
 static void gles_context_free(GLESHost *state)
 {
@@ -7395,13 +7617,7 @@ static void gles_context_free(GLESHost *state)
     if (state->glsl) g_hash_table_destroy(state->glsl);
     if (state->uloc) g_hash_table_destroy(state->uloc);
     if (state->cgl) {
-        CGLSetCurrentContext(state->cgl);
-        glDeleteFramebuffersEXT(1, &state->fbo);
-        if (state->sync_fbo) glDeleteFramebuffersEXT(1, &state->sync_fbo);
-        if (state->copy_fbo) glDeleteFramebuffersEXT(1, &state->copy_fbo);
-        glDeleteTextures(1, &state->tex);
-        glDeleteRenderbuffersEXT(1, &state->depth);
-        CGLSetCurrentContext(NULL);
+        gles_context_delete_objects(state);
         CGLReleaseContext(state->cgl);
     }
     gles_group_unref(state->group);
@@ -7481,7 +7697,7 @@ static int64_t gles_context_operation(unsigned slot, unsigned ctx, unsigned argc
 }
 
 static void gles_drop_all(void);
-#ifdef GLES_HOST_ANGLE
+#if defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
 static void gles_snapshot_register(void) {} /* migration blocker is held for live EGL state */
 #else
 #include "gles-host-snapshot.c.inc"
@@ -7512,7 +7728,7 @@ static void gles_drop_all(void)
 
 void gles_host_reset(void)
 {
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     gles_snapshot_register();
     gles_drop_all();
 #endif
@@ -7529,7 +7745,7 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
     }
 
     if (slot >= GLES_OP_NEW_SHAREGROUP && slot <= GLES_OP_DELETE_CONTEXT) {
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
         r = gles_context_operation(slot, ctx, argc, a);
         if (r < 0) gles_refuse("context:op:%u", slot);
         return r;
@@ -7537,7 +7753,7 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
         return 0; /* legacy EAGL backend, no native-context handles */
 #endif
     }
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     GLESHost *state = gles_contexts ? g_hash_table_lookup(gles_contexts, GUINT_TO_POINTER(ctx)) : NULL;
     if (ctx >= 0x80000000 && !state) {
         gles_refuse("context:unknown");
@@ -7551,7 +7767,10 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
         return -1;
     }
 
-    gles_platform_make_current();
+    if (!gles_platform_make_current()) {
+        gles_refuse("host:make-current");
+        return -1;
+    }
 
     gh.calls++;
     gles_cur_ctx = ctx;

@@ -82,7 +82,7 @@ python = import('python').find_installation()
 cc = meson.get_compiler('c')
 all_languages = ['c']
 # Darwin's guest GL executor uses Imagination's reference PVRTC decoder.
-enable_cpp = host_os in ['windows', 'darwin'] or get_option('plugins')
+enable_cpp = host_os in ['windows', 'darwin', 'linux'] or get_option('plugins')
 if enable_cpp and add_languages('cpp', required: host_os == 'darwin', native: false)
   all_languages += ['cpp']
   cxx = meson.get_compiler('cpp')
@@ -1246,6 +1246,29 @@ host_gles = dependency('appleframeworks',
                                  'CoreFoundation'],
                        required: false)
 
+# Real offscreen renderers for the portable engine. Android executes GLES1 and
+# GLES2 natively; Linux uses a Mesa compatibility context as the reference.
+host_egl = not_found
+if host_os in ['linux', 'android']
+  egl_dep = dependency('egl', required: false)
+  if not egl_dep.found()
+    egl_dep = cc.find_library('EGL', required: false)
+  endif
+  if cc.get_define('__ANDROID__') != ''
+    es1 = cc.find_library('GLESv1_CM', required: true)
+    es2 = cc.find_library('GLESv2', required: true)
+    egl_loader = cc.find_library('dl', required: true)
+    host_egl = declare_dependency(dependencies: [egl_dep, es2, es1, egl_loader],
+      compile_args: ['-DGLES_HOST_EGL=1', '-DGLES_HOST_EGL_ES=1'])
+  else
+    gl_dep = dependency('gl', required: false)
+    if egl_dep.found() and gl_dep.found()
+      host_egl = declare_dependency(dependencies: [egl_dep, gl_dep],
+        compile_args: ['-DGLES_HOST_EGL=1'])
+    endif
+  endif
+endif
+
 vmnet = dependency('appleframeworks', modules: 'vmnet', required: get_option('vmnet'))
 if vmnet.found() and not cc.has_header_symbol('vmnet/vmnet.h',
                                               'VMNET_BRIDGED_MODE',
@@ -1402,7 +1425,7 @@ endif
 spice_headers = spice.partial_dependency(compile_args: true, includes: true)
 
 rt = not_found
-if host_os != 'windows'
+if host_os != 'windows' and cc.get_define('__ANDROID__') == ''
   have_shm_open = cc.has_function('shm_open')
   if not have_shm_open
     rt = cc.find_library('rt', required: true)

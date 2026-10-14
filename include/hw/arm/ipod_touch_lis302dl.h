@@ -62,6 +62,9 @@ typedef struct LIS302DLState {
     int64_t motion_start_ns, motion_ns;
     double motion_from[3], motion_axis[3], motion_angle;
     uint32_t noise_state;
+    uint32_t host_fields;
+    int64_t host_accel_until_ns, host_gyro_until_ns;
+    double host_acceleration[3], host_angular_velocity[3];
     int64_t last_sample_ns, shake_start_ns;
     int64_t trace_last_poll_ns, trace_last_report_ns;
     uint32_t trace_polls;
@@ -75,5 +78,8 @@ void lis302dl_shake(LIS302DLState *s);
 /* The device's rotation rate (rad/s, device axes) at `now` while an attitude change turns it; false at rest. */
 bool lis302dl_motion_rate(LIS302DLState *s, int64_t now, double w[3]);
 void lis302dl_set_axis_value(LIS302DLState *s, char axis, int v);
+
+void lis302dl_set_host_motion(LIS302DLState *s, uint32_t fields, const double a[3], const double w[3]);
+void lis302dl_clear_host_motion(LIS302DLState *s);
 
 #endif

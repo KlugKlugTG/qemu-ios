@@ -167,6 +167,77 @@ QemuIosSnapshotStatus qemu_ios_snapshot_status(char *errbuf, unsigned long errle
  * (qemu_ios_set_foreground(true) is the only other thing that restarts it). */
 void qemu_ios_snapshot_resume(void);
 
+/* Portable extension 1.0. Existing qemu_ios API 2.2 remains unchanged.
+ * Caller owns all structs/buffers. Calls may originate on the host thread;
+ * queued input executes on the engine thread. One engine per process. */
+#define QEMU_IOS_PORTABLE_VERSION 1u
+#define QEMU_IOS_PORTABLE_MAX_CONTACTS 8u
+#define QEMU_IOS_CAP_ACCEL (1ull << 0)
+#define QEMU_IOS_CAP_GYRO (1ull << 1)
+#define QEMU_IOS_CAP_MULTITOUCH (1ull << 2)
+#define QEMU_IOS_CAP_FRAME_COPY (1ull << 3)
+#define QEMU_IOS_TOUCH_CANCEL 3
+#define QEMU_IOS_MOTION_ACCEL 1u
+#define QEMU_IOS_MOTION_GYRO 2u
+
+typedef enum {
+    QEMU_IOS_OK = 0, QEMU_IOS_QUEUED = 1, QEMU_IOS_NO_FRAME = 2,
+    QEMU_IOS_INVALID = -1, QEMU_IOS_NOT_READY = -2,
+    QEMU_IOS_UNSUPPORTED = -3, QEMU_IOS_BUFFER_SMALL = -4,
+    QEMU_IOS_BUSY = -5, QEMU_IOS_STALE = -6,
+} QemuIosResult;
+
+typedef struct {
+    uint32_t size, version;
+    char machine[32], board[16];
+    uint32_t width, height, scale, orientation, max_contacts;
+    uint64_t capabilities;
+} QemuIosPortableBoard;
+
+typedef struct {
+    uint32_t size, version;
+    uint32_t width, height, stride, format; /* format 1: tightly packed BGRA8 */
+    uint64_t serial, timestamp_ns, required_bytes;
+} QemuIosPortableFrame;
+
+typedef struct {
+    uint32_t size, version;
+    uint32_t contact_id, phase;
+    double x, y; /* normalized panel coordinates, x right / y down */
+} QemuIosPortableContact;
+
+typedef struct {
+    uint32_t size, version;
+    uint64_t timestamp_ns; /* monotonic host clock, strictly increasing per field */
+    uint32_t fields, reserved;
+    /* Guest portrait axes: x right, y up, z toward viewer.
+     * Acceleration includes gravity in m/s^2; angular velocity in rad/s.
+     * Samples expire after 250 ms virtual time; no host input is migrated. */
+    double acceleration[3], angular_velocity[3];
+} QemuIosPortableMotion;
+
+uint32_t qemu_ios_portable_version(void);
+int qemu_ios_portable_board(const char *machine, QemuIosPortableBoard *out);
+int qemu_ios_portable_board_at(int index, QemuIosPortableBoard *out);
+bool qemu_ios_ui_paused(void);
+/* Copy holds the frame mutex until memcpy completes. On BUFFER_SMALL,
+ * metadata describes the required buffer; serial is not acknowledged.
+ * last_serial is caller's previous frame. timestamp_ns is publication time:
+ * host CLOCK_MONOTONIC nanoseconds on Linux/Bionic, continuing while paused.
+ * It is not a wall-clock epoch or VM virtual time. */
+int qemu_ios_portable_frame_copy(void *pixels, size_t capacity,
+    uint64_t last_serial, QemuIosPortableFrame *out);
+/* Entire batch validates before injection; stable IDs survive slot reuse.
+ * Return QUEUED means accepted into bounded engine queue, not delivered.
+ * status(id) returns QUEUED/OK or rejection; poll newest submission id only.
+ * Each batch closes with exactly one sync, DATA before BEGIN/UPDATE. */
+int qemu_ios_portable_touch(uint64_t id, uint64_t timestamp_ns,
+    const QemuIosPortableContact *contacts, size_t count);
+int qemu_ios_portable_input_status(uint64_t id);
+/* Release all owned touch/buttons and clear live motion, including paused VM. */
+int qemu_ios_portable_cancel_input(void);
+int qemu_ios_portable_motion(const QemuIosPortableMotion *sample);
+
 #ifdef __cplusplus
 }
 #endif

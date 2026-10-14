@@ -231,6 +231,38 @@ void page_init(void)
     page_table_config_init();
 }
 
+/* A physical address can have TBs with different instruction modes/counts. */
+static void tb_remember_io_insn_limit(tb_page_addr_t phys_pc, int limit)
+{
+    gpointer key = (gpointer)(uintptr_t)phys_pc;
+    int previous;
+
+    assert(limit > 0);
+    qemu_mutex_lock(&tb_ctx.io_insn_lock);
+    previous = GPOINTER_TO_INT(g_hash_table_lookup(tb_ctx.io_insn_limits, key));
+    if (!previous || limit < previous) {
+        g_hash_table_insert(tb_ctx.io_insn_limits, key, GINT_TO_POINTER(limit));
+    }
+    qemu_mutex_unlock(&tb_ctx.io_insn_lock);
+}
+
+static int tb_apply_io_insn_limit(tb_page_addr_t phys_pc, uint32_t cflags,
+                                 int max_insns)
+{
+    int limit;
+
+    /* Explicit-count replay TBs must retain their requested instruction count,
+     * including branch plus delay slot on targets that have delay slots. */
+    if (phys_pc == (tb_page_addr_t)-1 || (cflags & CF_COUNT_MASK)) {
+        return max_insns;
+    }
+    qemu_mutex_lock(&tb_ctx.io_insn_lock);
+    limit = GPOINTER_TO_INT(g_hash_table_lookup(tb_ctx.io_insn_limits,
+                                               (gpointer)(uintptr_t)phys_pc));
+    qemu_mutex_unlock(&tb_ctx.io_insn_lock);
+    return limit ? MIN(max_insns, limit) : max_insns;
+}
+
 /*
  * Isolate the portion of code gen which can setjmp/longjmp.
  * Return the size of the generated code, or negative on error.
@@ -283,6 +315,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         max_insns = TCG_MAX_INSNS;
     }
     QEMU_BUILD_BUG_ON(CF_COUNT_MASK + 1 != TCG_MAX_INSNS);
+    max_insns = tb_apply_io_insn_limit(phys_pc, s.cflags, max_insns);
 
  buffer_overflow:
     assert_no_pages_locked();
@@ -585,6 +618,21 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
                   (void *)retaddr);
     }
     cpu_restore_state_from_tb(cpu, tb, retaddr);
+
+    /*
+     * The access was not the TB's last insn.  A device polled in a loop
+     * would bring us here on every pass, so retranslate the TB to end at
+     * the access: remember how far it may go, and drop this translation.
+     */
+    if (!(tb_cflags(tb) & CF_COUNT_MASK) && tb_page_addr0(tb) != -1) {
+        uint64_t data[INSN_START_WORDS];
+        int left = cpu_unwind_data_from_tb(tb, retaddr, data);
+
+        if (left > 1) {
+            tb_remember_io_insn_limit(tb_page_addr0(tb), tb->icount - left + 1);
+            tb_phys_invalidate(tb, -1);
+        }
+    }
 
     /*
      * Some guests must re-execute the branch when re-executing a delay

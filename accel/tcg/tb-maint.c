@@ -69,6 +69,8 @@ void tb_htable_init(void)
     unsigned int mode = QHT_MODE_AUTO_RESIZE;
 
     qht_init(&tb_ctx.htable, tb_cmp, CODE_GEN_HTABLE_SIZE, mode);
+    tb_ctx.io_insn_limits = g_hash_table_new(NULL, NULL);
+    qemu_mutex_init(&tb_ctx.io_insn_lock);
 }
 
 typedef struct PageDesc PageDesc;
@@ -782,6 +784,11 @@ void tb_flush__exclusive_or_serial(void)
     }
 
     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
+    /* Hints describe discarded translations. Bound their lifetime to the code
+     * cache, rather than accumulating physical PCs across full flushes. */
+    qemu_mutex_lock(&tb_ctx.io_insn_lock);
+    g_hash_table_remove_all(tb_ctx.io_insn_limits);
+    qemu_mutex_unlock(&tb_ctx.io_insn_lock);
     tb_remove_all();
 
     tcg_region_reset_all();

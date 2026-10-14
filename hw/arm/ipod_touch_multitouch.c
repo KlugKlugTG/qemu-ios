@@ -268,6 +268,26 @@ static void prepare_short_control_response(IPodTouchMultitouchState *s, uint8_t 
 }
 
 /*
+ * Both packets of a frame read start with the command the driver read them
+ * with: 0xEA, or 0xEB, which 3.1.3 always uses and 2.x after re-reading the
+ * device properties (Martijn de Vos found the 2.x and 3.0 drivers check it).
+ * Frames are built with 0xEA; this restamps one and keeps the length packet's
+ * u16 sum and the frame packet's sum-to-zero pad right.
+ */
+static void mt_stamp_frame_cmd(MTFrame *f, uint8_t cmd)
+{
+    int delta = cmd - f->frame_length.cmd;
+    uint16_t sum = f->frame_length.checksum1 | f->frame_length.checksum2 << 8;
+
+    sum += delta;
+    f->frame_length.cmd = cmd;
+    f->frame_length.checksum1 = sum & 0xff;
+    f->frame_length.checksum2 = sum >> 8;
+    f->frame_packet.cmd = cmd;
+    f->frame_packet.checksum_pad -= delta;
+}
+
+/*
  * N1 frame read (AppleMultitouchN1SPI, 8C148 0x80584bb0 and 0x80583fe0). The
  * driver clocks 0xEE twice: a 16-byte length query (tx[2] = 0), answered
  * {0xEA, len lo, len hi, 0..., sum of bytes 0-13 as u16 LE}; then a read of
@@ -277,6 +297,65 @@ static void prepare_short_control_response(IPodTouchMultitouchState *s, uint8_t 
  * Both answers start {0xEA, len lo} before tx[2] says which it is; the frame
  * packet's pad byte absorbs that second byte (mt_n1_select).
  */
+bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
+                                   unsigned begins, unsigned ends, unsigned moves)
+{
+#if defined(__linux__) && !defined(__APPLE__)
+    unsigned used = s->queued_count + !!s->next_frame;
+    unsigned needed = begins + ends;
+    if (begins) {
+        needed += MT_MAX_FINGERS + 1; /* END for every contact, plus FULL_END */
+    }
+    if (moves) {
+        bool tail_motion = s->queued_count ? s->queued_motion[s->queued_count - 1]
+                                          : s->next_frame && s->next_frame_motion;
+        /* Mixed batches can be preempted between events; reserve every
+         * UPDATE rather than relying on their wall-time execution speed. */
+        needed += begins || ends ? moves : !tail_motion;
+    }
+    return needed <= MT_REPORT_QUEUE_SIZE - used;
+#else
+    return true;
+#endif
+}
+
+static void mt_clear_pending(IPodTouchMultitouchState *s)
+{
+    g_free(s->next_frame);
+    s->next_frame = NULL;
+    s->next_frame_len = 0;
+#if defined(__linux__) && !defined(__APPLE__)
+    for (unsigned i = 0; i < s->queued_count; i++) {
+        g_free(s->queued_frames[i]);
+    }
+    s->queued_count = 0;
+    s->next_frame_motion = false;
+#endif
+}
+
+static MTFrame *mt_take_pending(IPodTouchMultitouchState *s, uint32_t *length)
+{
+    MTFrame *frame = s->next_frame;
+    *length = s->next_frame_len;
+    s->next_frame = NULL;
+    s->next_frame_len = 0;
+#if defined(__linux__) && !defined(__APPLE__)
+    if (s->queued_count) {
+        s->next_frame = s->queued_frames[0];
+        s->next_frame_len = s->queued_lengths[0];
+        s->next_frame_motion = s->queued_motion[0];
+        s->queued_count--;
+        memmove(s->queued_frames, s->queued_frames + 1,
+                s->queued_count * sizeof(s->queued_frames[0]));
+        memmove(s->queued_lengths, s->queued_lengths + 1,
+                s->queued_count * sizeof(s->queued_lengths[0]));
+        memmove(s->queued_motion, s->queued_motion + 1,
+                s->queued_count * sizeof(s->queued_motion[0]));
+    }
+#endif
+    return frame;
+}
+
 static void mt_n1_read(IPodTouchMultitouchState *s)
 {
     uint32_t len;
@@ -284,10 +363,7 @@ static void mt_n1_read(IPodTouchMultitouchState *s)
 
     if (!s->n1_frame) {
         if (s->next_frame) {
-            s->n1_frame = (uint8_t *) s->next_frame;
-            len = s->next_frame_len;
-            s->next_frame = NULL;
-            s->next_frame_len = 0;
+            s->n1_frame = (uint8_t *) mt_take_pending(s, &len);
         } else {
             s->n1_frame = (uint8_t *) mt_build_frame(s, NULL, &len);
         }
@@ -493,16 +569,13 @@ static uint32_t ipod_touch_multitouch_transfer(SSIPeripheral *dev, uint32_t valu
                 if (every > 0 && s->next_frame &&
                     (s->frame_counter % every) == 0) {
                     MTT("EMPTY_TEST: dropping pending frame %d", s->frame_counter);
-                    g_free(s->next_frame);
-                    s->next_frame = NULL;
+                    uint32_t dropped_len;
+                    g_free(mt_take_pending(s, &dropped_len));
                 }
             }
             g_free(s->out_buffer);
             if (s->next_frame) {
-                s->out_buffer = (uint8_t *) s->next_frame;
-                s->buf_size = s->next_frame_len;
-                s->next_frame = NULL;
-                s->next_frame_len = 0;
+                s->out_buffer = (uint8_t *) mt_take_pending(s, &s->buf_size);
             } else {
                 /*
                  * No new frame. Handing the guest a block of ZEROS here is not
@@ -518,6 +591,7 @@ static uint32_t ipod_touch_multitouch_transfer(SSIPeripheral *dev, uint32_t valu
                 s->out_buffer = (uint8_t *) mt_build_frame(s, NULL, &len);
                 s->buf_size = len;
             }
+            mt_stamp_frame_cmd((MTFrame *) s->out_buffer, value);
         }
         else if(value == 0x00) {
             /* SPI idle byte, not a command. */
@@ -1020,14 +1094,46 @@ static void mt_emit_frame(IPodTouchMultitouchState *s)
     s->fingers[0].y = s->touch_y;
 
     /*
-     * A frame the guest never collected. next_frame is a single slot and the
-     * guest polls slower than we can produce, so this used to leak one frame
-     * buffer per skipped report. It is never aliased into out_buffer without
-     * being cleared, so freeing here is safe.
+     * Portable hosts retain transitions until collected. Only trailing motion
+     * reports can replace one another; a release must precede reuse of its ID.
+     * The original Apple path retains its single pending report behavior.
      */
-    g_free(s->next_frame);
+#if defined(__linux__) && !defined(__APPLE__)
+    bool motion = true;
+    for (i = 0; i < MT_MAX_FINGERS; i++) {
+        MTFingerState *f = &s->fingers[i];
+        if ((f->phase == MT_FINGER_DOWN && !f->started) ||
+            f->phase == MT_FINGER_LIFTED || f->phase == MT_FINGER_ENDING) {
+            motion = false;
+        }
+    }
+    bool replace = motion && s->next_frame &&
+        (s->queued_count ? s->queued_motion[s->queued_count - 1]
+                         : s->next_frame_motion);
+    if (!replace && s->next_frame &&
+        s->queued_count == MT_REPORT_QUEUE_SIZE - 1) {
+        return; /* timer-generated FULL_END retries; never discard an edge */
+    }
+    MTFrame *frame = mt_build_frame(s, s->fingers, &len);
+    if (!s->next_frame || (replace && !s->queued_count)) {
+        g_free(s->next_frame);
+        s->next_frame = frame;
+        s->next_frame_len = len;
+        s->next_frame_motion = motion;
+    } else {
+        unsigned tail = replace ? s->queued_count - 1 : s->queued_count++;
+        if (replace) {
+            g_free(s->queued_frames[tail]);
+        }
+        s->queued_frames[tail] = frame;
+        s->queued_lengths[tail] = len;
+        s->queued_motion[tail] = motion;
+    }
+#else
+    mt_clear_pending(s);
     s->next_frame = mt_build_frame(s, s->fingers, &len);
     s->next_frame_len = len;
+#endif
 
     /* mt_build_frame advanced prev_x/prev_y for the fingers it reported. */
     s->prev_touch_x = s->fingers[0].prev_x;
@@ -1094,6 +1200,12 @@ void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
         return;
     }
     f = &s->fingers[slot];
+#if defined(__linux__) && !defined(__APPLE__)
+    if (down != (f->phase == MT_FINGER_DOWN) &&
+        !ipod_touch_multitouch_can_queue(s, down, !down, false)) {
+        return; /* portable batch caller preflights and reports BUSY */
+    }
+#endif
 
     /*
      * A contact that leaves the panel ends, it does not slide along the bezel.
@@ -1162,7 +1274,14 @@ void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
     if (mt_any_down(s)) {
         timer_mod(s->touch_timer, now + mt_frame_period_ns());
     } else {
-        timer_del(s->touch_timer);
+#if defined(__linux__) && !defined(__APPLE__)
+        if (s->next_frame) {
+            timer_mod(s->touch_timer, now + mt_frame_period_ns());
+        } else
+#endif
+        {
+            timer_del(s->touch_timer);
+        }
         if (mt_any_active(s)) {
             timer_mod(s->touch_end_timer, now + NANOSECONDS_PER_SECOND / 10);
         }
@@ -1198,6 +1317,12 @@ static void touch_timer_tick(void *opaque)
     IPodTouchMultitouchState *s = (IPodTouchMultitouchState *)opaque;
 
     if (!mt_any_active(s)) {
+#if defined(__linux__) && !defined(__APPLE__)
+        if (s->next_frame) {
+            ipod_touch_multitouch_inform_frame_ready(s);
+            timer_mod(s->touch_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns());
+        }
+#endif
         return;
     }
     mt_emit_frame(s);
@@ -1206,6 +1331,12 @@ static void touch_timer_tick(void *opaque)
         s->last_motion_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         timer_mod(s->touch_timer, s->last_motion_ns + mt_frame_period_ns());
     }
+#if defined(__linux__) && !defined(__APPLE__)
+    else if (s->next_frame) {
+        ipod_touch_multitouch_inform_frame_ready(s);
+        timer_mod(s->touch_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns());
+    }
+#endif
 }
 
 static void touch_end_timer_tick(void *opaque)
@@ -1216,6 +1347,11 @@ static void touch_end_timer_tick(void *opaque)
         return;
     }
     mt_emit_frame(s);
+#if defined(__linux__) && !defined(__APPLE__)
+    if (mt_any_active(s)) {
+        timer_mod(s->touch_end_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns());
+    }
+#endif
 }
 
 static void ipod_touch_multitouch_realize(SSIPeripheral *d, Error **errp)
@@ -1261,9 +1397,7 @@ static void ipod_touch_multitouch_reset(DeviceState *dev)
     s->in_buffer_size = 0;
     memset(s->hbpp_atn_ack_response, 0, sizeof(s->hbpp_atn_ack_response));
 
-    g_free(s->next_frame);
-    s->next_frame = NULL;
-    s->next_frame_len = 0;
+    mt_clear_pending(s);
     g_free(s->n1_frame);
     s->n1_frame = NULL;
     s->frame_counter = 0;
@@ -1296,8 +1430,12 @@ static int ipod_touch_multitouch_post_load(void *opaque, int version_id)
 {
     IPodTouchMultitouchState *s = opaque;
 
-    s->next_frame = NULL;
-    s->next_frame_len = 0;
+    mt_clear_pending(s);
+#if defined(__linux__) && !defined(__APPLE__)
+    g_free(s->n1_frame);
+    s->n1_frame = NULL;
+    s->n1_frame_len = 0;
+#endif
     s->buf_ind = 0;
     s->in_buffer_ind = 0;
     /* out_buffer is a pointer and is NOT migrated, so a snapshot taken mid-SPI
@@ -1348,11 +1486,31 @@ static void ipod_touch_multitouch_class_init(ObjectClass *klass, const void *dat
     dc->vmsd = &vmstate_ipod_touch_multitouch;
 }
 
+#if defined(__linux__) && !defined(__APPLE__)
+static void ipod_touch_multitouch_finalize(Object *obj)
+{
+    IPodTouchMultitouchState *s = IPOD_TOUCH_MULTITOUCH(obj);
+    mt_clear_pending(s);
+    g_free(s->out_buffer);
+    g_free(s->in_buffer);
+    g_free(s->n1_frame);
+    if (s->touch_timer) {
+        timer_free(s->touch_timer);
+    }
+    if (s->touch_end_timer) {
+        timer_free(s->touch_end_timer);
+    }
+}
+#endif
+
 static const TypeInfo ipod_touch_multitouch_type_info = {
     .name = TYPE_IPOD_TOUCH_MULTITOUCH,
     .parent = TYPE_SSI_PERIPHERAL,
     .instance_size = sizeof(IPodTouchMultitouchState),
     .class_init = ipod_touch_multitouch_class_init,
+#if defined(__linux__) && !defined(__APPLE__)
+    .instance_finalize = ipod_touch_multitouch_finalize,
+#endif
 };
 
 static void ipod_touch_multitouch_register_types(void)

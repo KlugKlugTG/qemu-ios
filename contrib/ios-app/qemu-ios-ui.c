@@ -18,12 +18,18 @@
 #include "qemu/main-loop.h"
 #include "qemu/timer.h"
 #include "qemu/seqlock.h"
+#include "qemu/cutils.h"
+#include "hw/arm/ipod_touch_lis302dl.h"
 #include "qemu/aio.h"
+#include "system/runstate.h"
 #include "ui/console.h"
 #include "ui/surface.h"
 #include "ui/input.h"
 #include "qapi/error.h"
 #include "hw/arm/ipod_touch_buttons.h"
+#if defined(__linux__) && !defined(__APPLE__)
+#include "hw/arm/ipod_touch_multitouch.h"
+#endif
 #include "hw/core/boards.h"
 
 void gles_host_set_allowed(bool allowed);
@@ -35,13 +41,32 @@ bool s5l8930_d1815_guest_shutdown_confirmed(void);
 
 #include "qemu-ios-ui.h"
 #include "virtual-input.h"
+#include "qemu-ios-input.h"
+#include "qemu-ios-input.c.inc"
 
 static void ios_sequence_cancel_current(void);
 static bool ios_manual_touch;
 static bool ios_manual_touch2;
+static bool portable_has_gyro;
+static int portable_paused;
+static void portable_runstate_changed(void *opaque, bool running, RunState state)
+{
+    qatomic_set(&portable_paused, !running);
+}
+static void portable_release_all(void);
+static void portable_release_input(bool preserve_buttons);
+#ifndef __APPLE__
+static void ios_cancel_publish(bool stopping);
+#endif
 static void ios_sequence_reset(void *opaque)
 {
     ios_sequence_cancel_current();
+#ifndef __APPLE__
+    ios_cancel_publish(false);
+    portable_release_input(ipod_touch_ap_wake_reset_pending());
+#else
+    portable_release_all();
+#endif
 }
 #include "hw/arm/ipod_touch_pcf50633_pmu.h"
 #include "hw/arm/ipod_touch_lcd.h"
@@ -85,6 +110,7 @@ static struct {
     int published;            /* index of the newest complete frame, -1 if none */
     int width, height;
     uint64_t serial;          /* bumped on every completed frame */
+    uint64_t timestamp_ns;
 
     qemu_ios_frame_cb cb;
     void *cb_opaque;
@@ -93,6 +119,10 @@ static struct {
 
     /* Set by a partial update, cleared when a whole frame is published. */
     bool pending;
+#ifndef __APPLE__
+    /* Main AioContext/BQL only; never retains a DisplaySurface pointer. */
+    QEMUBH *publish_bh;
+#endif
 } ios;
 
 /* Frame polling can begin even when startup fails before attach(). Initialize
@@ -234,6 +264,7 @@ static void ios_capture(DisplaySurface *surface)
     ios.height = h;
     ios.published = next;
     ios.serial++;
+    ios.timestamp_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     qemu_mutex_unlock(&ios.frame_lock);
 
     ios_report_first_lit_frame(dst, w, h);
@@ -250,13 +281,18 @@ static void ios_capture(DisplaySurface *surface)
  * SEVERAL partial updates. Publishing each one hands the app a frame caught
  * mid-paint, which is visible as the screen wiping top-to-bottom instead of
  * changing at once -- and costs a full-surface copy per fragment rather than
- * per frame. Frames are published at the refresh boundary instead, where the
- * picture is whole.
+ * per frame. Portable hosts defer publication until the panel paint returns;
+ * Apple hosts retain the original display-refresh publication boundary.
  */
 static void ios_gfx_update(DisplayChangeListener *dcl,
                            int x, int y, int w, int h)
 {
     ios.pending = true;
+#ifndef __APPLE__
+    if (ios.publish_bh) {
+        qemu_bh_schedule(ios.publish_bh);
+    }
+#endif
 }
 
 static void ios_gfx_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
@@ -266,17 +302,62 @@ static void ios_gfx_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
      * do NOT capture it here: on a rotation the console resize happens in the
      * middle of the panel's refresh, BEFORE it has blitted anything into the
      * new surface, so capturing now publishes one all-black frame at the new
-     * size and the app visibly blinks. Marking it pending instead lets
-     * ios_refresh publish it right after graphic_hw_update returns, by which
-     * point the same refresh has painted the surface.
+     * size and the app visibly blinks. Mark it pending without scheduling a
+     * capture here: the ensuing dirty update schedules portable publication
+     * after the paint returns; ios_refresh remains the fallback boundary.
      */
     if (surface) {
         ios.pending = true;
     }
 }
 
+#ifndef __APPLE__
+/* Adapted from upstream 97860b36b0e9fcdd008e95e58efff9609ca44aee.
+ * Coalesce dirty rectangles until the whole panel paint has returned, rather
+ * than resampling its vsync at QEMU's 30 ms display-refresh interval. */
+static void ios_publish(QemuConsole *con)
+{
+    DisplaySurface *surface;
+
+    if (!ios.attached || !qatomic_read(&ios_vm_alive) || !con ||
+        !ios.pending) {
+        return;
+    }
+    surface = qemu_console_surface(con);
+    if (surface) {
+        ios_capture(surface);
+        ios.pending = false;
+    }
+}
+
+static void ios_publish_bh(void *opaque)
+{
+    ios_publish(ios.con);
+}
+
+static void ios_cancel_publish(bool stopping)
+{
+    if (ios.publish_bh) {
+        qemu_bh_cancel(ios.publish_bh);
+        if (stopping) {
+            qemu_bh_delete(ios.publish_bh);
+            ios.publish_bh = NULL;
+        }
+    }
+    ios.pending = false;
+}
+#endif
+
 static void ios_refresh(DisplayChangeListener *dcl)
 {
+#ifndef __APPLE__
+    /* Display cleanup can still notify listeners after the main loop ends. */
+    if (!ios.attached || !qatomic_read(&ios_vm_alive)) {
+        return;
+    }
+    graphic_hw_update(dcl->con);
+    ios_publish(dcl->con);
+#else
     DisplaySurface *surface;
 
     graphic_hw_update(dcl->con);
@@ -289,6 +370,7 @@ static void ios_refresh(DisplayChangeListener *dcl)
         ios_capture(surface);
         ios.pending = false;
     }
+#endif
 }
 
 static const DisplayChangeListenerOps ios_dcl_ops = {
@@ -349,8 +431,17 @@ bool qemu_ios_ui_storage_failed(void)
 
 void qemu_ios_ui_vm_stopped(void)
 {
-    ios_sequence_cancel_current();
+#if !defined(__APPLE__)
     qatomic_set(&ios_vm_alive, 0);
+    /* Called under BQL before qemu_cleanup: a deleted BH cannot capture a
+     * surface or notify the app during console/AioContext teardown. */
+    ios_cancel_publish(true);
+    ios_input_discard_pending();
+    qemu_ios_ui_cancel_input();
+#else
+    qemu_ios_ui_cancel_input();
+    qatomic_set(&ios_vm_alive, 0);
+#endif
     /* Also drop `attached`. It used to stay true for the life of the process,
      * so every entry point below that guarded on it kept accepting work after
      * the main loop had gone -- most damagingly snapshot_save2, which then
@@ -368,9 +459,6 @@ void qemu_ios_ui_vm_started(void)
         return;
     }
     ios.con = qemu_console_lookup_by_index(0);
-    if (!ios.con) {
-        return;
-    }
     qatomic_set(&ios_is_ipad1, object_dynamic_cast(qdev_get_machine(),
                                                    MACHINE_TYPE_NAME("ipad1")) != NULL);
     qatomic_set(&ios_dsi_panel, qatomic_read(&ios_is_ipad1) ||
@@ -378,11 +466,20 @@ void qemu_ios_ui_vm_started(void)
     for (i = 0; i < INPUT_EVENT_SLOTS_MAX; i++) {
         ios.slots[i].tracking_id = -1;
     }
-    ios.dcl.ops = &ios_dcl_ops;
-    ios.dcl.con = ios.con;
-    register_displaychangelistener(&ios.dcl);
+    if (ios.con) {
+        ios.dcl.ops = &ios_dcl_ops;
+        ios.dcl.con = ios.con;
+#ifndef __APPLE__
+        ios.publish_bh = qemu_bh_new(ios_publish_bh, NULL);
+#endif
+        register_displaychangelistener(&ios.dcl);
+    }
+    qatomic_set(&portable_paused, !runstate_is_running());
+    qemu_add_vm_change_state_handler(portable_runstate_changed, NULL);
     ios.attached = true;
     qemu_register_reset(ios_sequence_reset, NULL);
+    portable_has_gyro = object_dynamic_cast(qdev_get_machine(), MACHINE_TYPE_NAME("iPod-Touch-4G")) ||
+                        object_dynamic_cast(qdev_get_machine(), MACHINE_TYPE_NAME("iPhone-4"));
     qatomic_set(&ios_vm_alive, 1);
 }
 
@@ -540,7 +637,9 @@ void qemu_ios_ui_touch(int slot, int phase, double nx, double ny)
     t->nx = nx;
     t->ny = ny;
     t->down = (phase != QEMU_IOS_TOUCH_END);
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_touch_bh, t);
+    if (!ios_input_enqueue(ios_touch_bh, t, g_free)) {
+        g_free(t);
+    }
 }
 
 /* --- hardware buttons -------------------------------------------------- */
@@ -625,7 +724,9 @@ void qemu_ios_ui_button(int button, bool down)
     b = g_new0(struct ios_button, 1);
     b->button = button;
     b->down = down;
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_button_bh, b);
+    if (!ios_input_enqueue(ios_button_bh, b, g_free)) {
+        g_free(b);
+    }
 }
 
 /* --- generic host input sequence ---------------------------------------- */
@@ -697,6 +798,7 @@ void qemu_ios_ui_manual_touch2(bool down)
 void qemu_ios_ui_cancel_input(void)
 {
     ios_sequence_cancel_current();
+    portable_release_all();
 }
 
 static void ios_sequence_tick(void *opaque)
@@ -763,7 +865,9 @@ bool qemu_ios_ui_input_sequence(uint64_t id, size_t count,
         g_free(r);
         return false;
     }
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_sequence_submit_bh, r);
+    if (!ios_input_enqueue(ios_sequence_submit_bh, r, g_free)) {
+        g_free(r);
+    }
     return true;
 }
 
@@ -794,7 +898,9 @@ void qemu_ios_ui_input_sequence_cancel(uint64_t id)
     if (id && qemu_ios_ui_ready()) {
         uint64_t *copy = g_new(uint64_t, 1);
         *copy = id;
-        aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_sequence_cancel_bh, copy);
+        if (!ios_input_enqueue(ios_sequence_cancel_bh, copy, g_free)) {
+            g_free(copy);
+        }
     }
 }
 
@@ -986,4 +1092,257 @@ void qemu_ios_set_foreground(bool foreground)
     if (foreground && qemu_ios_ui_ready()) {
         aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_resume_bh, NULL);
     }
+}
+
+/* Portable frame/board ABI. All output storage is caller owned. */
+uint32_t qemu_ios_portable_version(void) { return QEMU_IOS_PORTABLE_VERSION; }
+bool qemu_ios_ui_paused(void) { return qemu_ios_ui_ready() && qatomic_read(&portable_paused); }
+int qemu_ios_portable_board(const char *machine, QemuIosPortableBoard *out)
+{
+    const QemuIosDeviceInfo *d = qemu_ios_device_info(machine);
+    if (!out || out->size < sizeof(*out) || out->version != 1 || !d) return QEMU_IOS_INVALID;
+    memset(out, 0, sizeof(*out));
+    out->size = sizeof(*out); out->version = 1;
+    pstrcpy(out->machine, sizeof(out->machine), d->machine);
+    pstrcpy(out->board, sizeof(out->board), d->board);
+    out->width = d->screen_width; out->height = d->screen_height;
+    out->scale = d->screen_scale; out->orientation = d->default_orientation;
+    out->max_contacts = 5;
+    out->capabilities = QEMU_IOS_CAP_ACCEL | QEMU_IOS_CAP_MULTITOUCH | QEMU_IOS_CAP_FRAME_COPY;
+    if (!strcmp(d->board, "n81ap") || !strcmp(d->board, "n90ap")) out->capabilities |= QEMU_IOS_CAP_GYRO;
+    return QEMU_IOS_OK;
+}
+int qemu_ios_portable_board_at(int index, QemuIosPortableBoard *out)
+{
+    const QemuIosDeviceInfo *d = qemu_ios_device_info_at(index);
+    return d ? qemu_ios_portable_board(d->machine, out) : QEMU_IOS_UNSUPPORTED;
+}
+int qemu_ios_portable_frame_copy(void *pixels, size_t capacity,
+                               uint64_t last_serial, QemuIosPortableFrame *out)
+{
+    if (!out || out->size < sizeof(*out) || out->version != 1) return QEMU_IOS_INVALID;
+    ios_init_frame_lock();
+    qemu_mutex_lock(&ios.frame_lock);
+    if (ios.published < 0 || ios.serial == last_serial) {
+        qemu_mutex_unlock(&ios.frame_lock); return QEMU_IOS_NO_FRAME;
+    }
+    *out = (QemuIosPortableFrame){ .size = sizeof(*out), .version = 1,
+        .width = ios.width, .height = ios.height, .stride = ios.width * 4,
+        .format = 1, .serial = ios.serial, .timestamp_ns = ios.timestamp_ns,
+        .required_bytes = (uint64_t)ios.width * ios.height * 4 };
+    int result = QEMU_IOS_BUFFER_SMALL;
+    if (pixels && capacity >= out->required_bytes) {
+        memcpy(pixels, ios.buf[ios.published], out->required_bytes);
+        result = QEMU_IOS_OK;
+    }
+    qemu_mutex_unlock(&ios.frame_lock);
+    return result;
+}
+
+/* Stable host IDs map to controller slots, never to transient pointer indices. */
+static struct { bool active; uint32_t id; double x, y; } portable_contacts[5];
+static uint64_t portable_touch_timestamp, portable_motion_timestamp[2];
+static uint64_t portable_status_id;
+static int portable_status, portable_pending;
+static LIS302DLState *portable_accel(void)
+{
+    Object *obj = object_resolve_path_type("", TYPE_LIS302DL, NULL);
+    return obj ? LIS302DL(obj) : NULL;
+}
+static void portable_emit(int slot, int phase, double x, double y)
+{
+    /* Send directly under BQL so releases also work while paused. Coordinates
+     * always precede commit. Controller models apply their existing transforms. */
+    InputMultiTouchEvent mtt = { .slot = slot, .tracking_id = slot + 1 };
+    InputEvent event = { .type = INPUT_EVENT_KIND_MTT, .u.mtt.data = &mtt };
+    if (phase != QEMU_IOS_TOUCH_END && phase != QEMU_IOS_TOUCH_CANCEL) {
+        mtt.type = INPUT_MULTI_TOUCH_TYPE_DATA; mtt.axis = INPUT_AXIS_X;
+        mtt.value = x * INPUT_EVENT_ABS_MAX;
+        qemu_input_event_send_impl(ios.con, &event);
+        mtt.axis = INPUT_AXIS_Y; mtt.value = y * INPUT_EVENT_ABS_MAX;
+        qemu_input_event_send_impl(ios.con, &event);
+    }
+    mtt.type = phase == QEMU_IOS_TOUCH_BEGIN ? INPUT_MULTI_TOUCH_TYPE_BEGIN :
+               phase == QEMU_IOS_TOUCH_UPDATE ? INPUT_MULTI_TOUCH_TYPE_UPDATE : INPUT_MULTI_TOUCH_TYPE_END;
+    qemu_input_event_send_impl(ios.con, &event);
+}
+static void portable_release_input(bool preserve_buttons)
+{
+    if (ios.con) {
+        for (int i = 0; i < 5; i++) {
+            if (portable_contacts[i].active) portable_emit(i, QEMU_IOS_TOUCH_END, 0, 0);
+            portable_contacts[i].active = false;
+        }
+        if (ios_manual_touch2) portable_emit(1, QEMU_IOS_TOUCH_END, 0, 0);
+        if (ios_manual_touch) {
+            InputBtnEvent btn = { .button = INPUT_BUTTON_LEFT, .down = false };
+            InputEvent ev = { .type = INPUT_EVENT_KIND_BTN, .u.btn.data = &btn };
+            qemu_input_event_send_impl(ios.con, &ev);
+        }
+        qemu_input_event_sync_impl();
+    }
+    ios_manual_touch = ios_manual_touch2 = false;
+    if (!preserve_buttons) {
+        for (int i = 0; i < 4; i++) {
+            if (ios_button_holds[i].release) timer_del(ios_button_holds[i].release);
+            if (ios_button_holds[i].down) ios_button_release(&ios_button_holds[i]);
+        }
+    }
+    LIS302DLState *a = portable_accel();
+    if (a) lis302dl_clear_host_motion(a);
+    portable_touch_timestamp = 0;
+    portable_motion_timestamp[0] = portable_motion_timestamp[1] = 0;
+}
+static void portable_release_all(void)
+{
+    portable_release_input(false);
+}
+static void portable_cancel_bh(void *unused) { qemu_ios_ui_cancel_input(); }
+int qemu_ios_portable_cancel_input(void)
+{
+    if (!qemu_ios_ui_ready()) return QEMU_IOS_NOT_READY;
+    return ios_input_enqueue(portable_cancel_bh, NULL, NULL)
+        ? QEMU_IOS_QUEUED : QEMU_IOS_NOT_READY;
+}
+struct portable_touch_request {
+    uint64_t id, timestamp; size_t count;
+    QemuIosPortableContact contacts[QEMU_IOS_PORTABLE_MAX_CONTACTS];
+};
+static bool portable_touch_capacity(unsigned begins, unsigned ends, unsigned moves)
+{
+#if defined(__linux__) && !defined(__APPLE__)
+    Object *obj = object_resolve_path_type("", TYPE_IPOD_TOUCH_MULTITOUCH, NULL);
+    return !obj || ipod_touch_multitouch_can_queue(IPOD_TOUCH_MULTITOUCH(obj), begins, ends, moves);
+#else
+    return true;
+#endif
+}
+static void portable_touch_bh(void *opaque)
+{
+    struct portable_touch_request *r = opaque;
+    typeof(portable_contacts) next;
+    int slots[QEMU_IOS_PORTABLE_MAX_CONTACTS];
+    int result = QEMU_IOS_OK;
+    unsigned begins = 0, ends = 0;
+    unsigned moves = 0;
+    memcpy(next, portable_contacts, sizeof(next));
+    if (r->timestamp <= portable_touch_timestamp) result = QEMU_IOS_STALE;
+    if (!ios.con) result = QEMU_IOS_NOT_READY;
+    for (size_t i = 0; result == QEMU_IOS_OK && i < r->count; i++) {
+        QemuIosPortableContact *c = &r->contacts[i];
+        int slot = -1;
+        for (int j = 0; j < 5; j++) if (next[j].active && next[j].id == c->contact_id) slot = j;
+        if (c->phase == QEMU_IOS_TOUCH_BEGIN) {
+            if (slot >= 0) { result = QEMU_IOS_INVALID; break; }
+            for (int j = 0; j < 5; j++) if (!next[j].active) { slot = j; break; }
+            if (slot < 0) { result = QEMU_IOS_UNSUPPORTED; break; }
+        } else if (slot < 0) { result = QEMU_IOS_INVALID; break; }
+        if (!runstate_is_running() && !runstate_check(RUN_STATE_SUSPENDED) &&
+            c->phase < QEMU_IOS_TOUCH_END) { result = QEMU_IOS_NOT_READY; break; }
+        slots[i] = slot;
+        next[slot].active = c->phase < QEMU_IOS_TOUCH_END;
+        next[slot].id = c->contact_id; next[slot].x = c->x; next[slot].y = c->y;
+        begins += c->phase == QEMU_IOS_TOUCH_BEGIN;
+        ends += c->phase >= QEMU_IOS_TOUCH_END;
+        moves += c->phase == QEMU_IOS_TOUCH_UPDATE;
+    }
+    if (result == QEMU_IOS_OK) {
+        ios_sequence_cancel_current();
+        if (!portable_touch_capacity(begins, ends, moves)) {
+            result = QEMU_IOS_BUSY;
+        } else {
+            for (size_t i = 0; i < r->count; i++) {
+                QemuIosPortableContact *c = &r->contacts[i];
+                portable_emit(slots[i], c->phase, c->x, c->y);
+            }
+            qemu_input_event_sync_impl();
+            memcpy(portable_contacts, next, sizeof(next));
+            portable_touch_timestamp = r->timestamp;
+        }
+    }
+    qemu_mutex_lock(&ios.frame_lock);
+    if (portable_status_id == r->id) portable_status = result;
+    portable_pending--;
+    qemu_mutex_unlock(&ios.frame_lock);
+    g_free(r);
+}
+static void portable_touch_discard(void *opaque)
+{
+    struct portable_touch_request *r = opaque;
+    qemu_mutex_lock(&ios.frame_lock);
+    if (portable_status_id == r->id) portable_status = QEMU_IOS_NOT_READY;
+    portable_pending--;
+    qemu_mutex_unlock(&ios.frame_lock);
+    g_free(r);
+}
+int qemu_ios_portable_touch(uint64_t id, uint64_t timestamp,
+                           const QemuIosPortableContact *contacts, size_t count)
+{
+    if (!id || !timestamp || !contacts || !count || count > 8) return QEMU_IOS_INVALID;
+    for (size_t i = 0; i < count; i++) {
+        const QemuIosPortableContact *c = &contacts[i];
+        if (c->size < sizeof(*c) || c->version != 1 || c->phase > QEMU_IOS_TOUCH_CANCEL ||
+            !isfinite(c->x) || !isfinite(c->y) || c->x < 0 || c->x > 1 || c->y < 0 || c->y > 1) return QEMU_IOS_INVALID;
+        for (size_t j = 0; j < i; j++) if (contacts[j].contact_id == c->contact_id) return QEMU_IOS_INVALID;
+    }
+    if (!qemu_ios_ui_ready()) return QEMU_IOS_NOT_READY;
+    struct portable_touch_request *r = g_new0(struct portable_touch_request, 1);
+    r->id = id; r->timestamp = timestamp; r->count = count;
+    memcpy(r->contacts, contacts, count * sizeof(*contacts));
+    ios_init_frame_lock(); qemu_mutex_lock(&ios.frame_lock);
+    if (portable_pending >= 32 || id <= portable_status_id) {
+        qemu_mutex_unlock(&ios.frame_lock);
+        g_free(r);
+        return QEMU_IOS_BUSY;
+    }
+    portable_pending++; portable_status_id = id; portable_status = QEMU_IOS_QUEUED;
+    /* Admission and FIFO insertion are one transaction for concurrent callers.
+     * The drain never holds its queue mutex while invoking a callback. */
+    bool queued = ios_input_enqueue(portable_touch_bh, r, portable_touch_discard);
+    if (!queued) {
+        portable_pending--;
+        portable_status = QEMU_IOS_NOT_READY;
+    }
+    qemu_mutex_unlock(&ios.frame_lock);
+    if (!queued) g_free(r);
+    return queued ? QEMU_IOS_QUEUED : QEMU_IOS_NOT_READY;
+}
+int qemu_ios_portable_input_status(uint64_t id)
+{
+    ios_init_frame_lock(); qemu_mutex_lock(&ios.frame_lock);
+    int result = id == portable_status_id ? portable_status : QEMU_IOS_STALE;
+    qemu_mutex_unlock(&ios.frame_lock); return result;
+}
+static void portable_motion_bh(void *opaque)
+{
+    QemuIosPortableMotion *m = opaque;
+    LIS302DLState *a = portable_accel();
+    if (a && runstate_is_running()) {
+        uint32_t accepted = 0;
+        for (int field = 0; field < 2; field++) {
+            if ((m->fields & (1u << field)) && m->timestamp_ns > portable_motion_timestamp[field]) {
+                accepted |= 1u << field;
+                portable_motion_timestamp[field] = m->timestamp_ns;
+            }
+        }
+        if (accepted) lis302dl_set_host_motion(a, accepted, m->acceleration, m->angular_velocity);
+    }
+    qemu_mutex_lock(&ios.frame_lock); portable_pending--; qemu_mutex_unlock(&ios.frame_lock);
+    g_free(m);
+}
+int qemu_ios_portable_motion(const QemuIosPortableMotion *m)
+{
+    if (!m || m->size < sizeof(*m) || m->version != 1 || !m->timestamp_ns ||
+        !m->fields || (m->fields & ~3u)) return QEMU_IOS_INVALID;
+    for (int i = 0; i < 3; i++) if (!isfinite(m->acceleration[i]) || !isfinite(m->angular_velocity[i]) ||
+        fabs(m->acceleration[i]) > 200 || fabs(m->angular_velocity[i]) > 100) return QEMU_IOS_INVALID;
+    if (!qemu_ios_ui_ready()) return QEMU_IOS_NOT_READY;
+    /* Board capability was latched on engine thread before ready publication. */
+    if ((m->fields & 2) && !portable_has_gyro) return QEMU_IOS_UNSUPPORTED;
+    qemu_mutex_lock(&ios.frame_lock);
+    if (portable_pending >= 32) { qemu_mutex_unlock(&ios.frame_lock); return QEMU_IOS_BUSY; }
+    portable_pending++; qemu_mutex_unlock(&ios.frame_lock);
+    QemuIosPortableMotion *copy = g_memdup2(m, sizeof(*m));
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), portable_motion_bh, copy);
+    return QEMU_IOS_QUEUED;
 }

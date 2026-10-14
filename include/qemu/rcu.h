@@ -125,6 +125,8 @@ void synchronize_rcu(void);
  */
 void rcu_register_thread(void);
 void rcu_unregister_thread(void);
+/* Current OS-thread membership; does not enter a read-side critical section. */
+bool rcu_thread_is_registered(void);
 
 /*
  * Support for fork().  fork() support is enabled at startup.

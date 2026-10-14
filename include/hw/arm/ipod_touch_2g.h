@@ -101,8 +101,6 @@
 
 extern const int S5L8900_GPIO_IRQS[5];
 
-#define IT2G_CPREG_VAR_NAME(name) cpreg_##name
-#define IT2G_CPREG_VAR_DEF(name) uint64_t IT2G_CPREG_VAR_NAME(name)
 
 #define TYPE_IPOD_TOUCH_MACHINE   MACHINE_TYPE_NAME(TYPE_IPOD_TOUCH)
 #define IPOD_TOUCH_MACHINE(obj) \
@@ -199,6 +197,7 @@ typedef struct {
 	QEMUTimer *boot_args_timer;
 	unsigned boot_args_writes;
     uint64_t boot_args_scan_deadline;
+    uint64_t boot_args_scan_started_ms, boot_args_scan_attempts;
     uint32_t boot_args_delay_ms, boot_args_repeat, boot_args_interval_ms;
     bool boot_args_delay_ms_explicit, boot_args_repeat_explicit;
     bool boot_args_interval_ms_explicit;
@@ -229,6 +228,11 @@ typedef struct {
 	IPodTouchFMSSState *fmss_state;
     Notifier compat_nand_read;
     uint32_t compat_command_line;
+#ifndef __APPLE__
+    Notifier boot_args_nand_read;
+    uint32_t boot_args_format, boot_args_command_line;
+    bool boot_args_reported;
+#endif
 	IPodTouchMBXState *mbx_state;
 	IPodTouchSDIOState *sdio_state;
 	IPodTouchTVOutState *tvout_state;
@@ -256,9 +260,6 @@ typedef struct {
 	bool usb_patch_mux_gate;  /* retired option, always false */
 	bool wifi;                /* present a BCM4325 on the SDIO bus */
 	bool gles_debug;          /* paint what the GL bridge refuses magenta (tests) */
-	IT2G_CPREG_VAR_DEF(REG0);
-	IT2G_CPREG_VAR_DEF(REG1);
-	IT2G_CPREG_VAR_DEF(QEMU_CALL);
 
 	/*
 	 * Host keyboard -> guest text input (see ipod_touch_kbd_event). Bare
