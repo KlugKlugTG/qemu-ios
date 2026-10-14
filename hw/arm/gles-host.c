@@ -5441,6 +5441,9 @@ static bool gles_es2_call(CPUState *cpu, uint32_t slot, uint32_t argc,
         bool is_float = a[1] <= 0x8DF2;         /* LOW/MEDIUM/HIGH_FLOAT */
         GLint range[2] = { is_float ? 127 : 31, is_float ? 127 : 30 };
         GLint precision = is_float ? 23 : 0;
+#ifdef GLES_HOST_EGL_ES
+        glGetShaderPrecisionFormat(a[0], a[1], range, &precision);
+#endif
         gles_es2_write(cpu, a[2], range, 8);
         gles_es2_write(cpu, a[3], &precision, 4);
         break;
@@ -6376,9 +6379,13 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
             break;
         /* ES 2.0 names desktop GL 2.1 spells in components, or lacks. */
         case 0x8DFB: case 0x8DFC: case 0x8DFD: {    /* MAX_{VERTEX_UNIFORM,VARYING,FRAGMENT_UNIFORM}_VECTORS */
+#ifdef GLES_HOST_EGL_ES
+            glGetIntegerv(pname, v.i);
+#else
             GLenum comps = pname == 0x8DFB ? 0x8B4A : pname == 0x8DFC ? 0x8B4B : 0x8B49;
             glGetIntegerv(comps, v.i);
             v.i[0] /= 4;
+#endif
             break;
         }
         case 0x8B8D: v.i[0] = gh.program; break;    /* CURRENT_PROGRAM */

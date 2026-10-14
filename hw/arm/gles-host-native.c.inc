@@ -139,12 +139,17 @@ static void gles_native_tex_sub_image(GLenum target, GLint level, GLint x, GLint
 static void gles_native_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h,
                                     GLenum format, GLenum type, void *pixels)
 {
-    if (format != GL_BGRA && !(format == GL_RGB && type == GL_UNSIGNED_SHORT_5_6_5)) {
+    bool rgba=format==GL_RGBA || format==GL_BGRA;
+    bool packed32=type==GL_UNSIGNED_INT_8_8_8_8 || type==GL_UNSIGNED_INT_8_8_8_8_REV;
+    bool packed16=type==GL_UNSIGNED_SHORT_4_4_4_4 || type==GL_UNSIGNED_SHORT_5_5_5_1 ||
+                  type==GL_UNSIGNED_SHORT_4_4_4_4_REV || type==GL_UNSIGNED_SHORT_1_5_5_5_REV;
+    bool rgb565=format==GL_RGB && type==GL_UNSIGNED_SHORT_5_6_5;
+    if (format==GL_RGBA && type==GL_UNSIGNED_BYTE) {
         glReadPixels(x,y,w,h,format,type,pixels); return;
     }
-    if (format == GL_BGRA && type != GL_UNSIGNED_BYTE &&
-        type != GL_UNSIGNED_INT_8_8_8_8 && type != GL_UNSIGNED_INT_8_8_8_8_REV) {
-        gles_native_error(GL_INVALID_ENUM); return;
+    if (!(rgba && (type==GL_UNSIGNED_BYTE || packed16 || packed32)) &&
+        !(format==GL_RGB && type==GL_UNSIGNED_BYTE) && !rgb565) {
+        glReadPixels(x,y,w,h,format,type,pixels); return;
     }
     if (w <= 0 || h <= 0 || (size_t)w > 64*1024*1024u/4/(unsigned)h) {
         glReadPixels(x,y,w,h,format,type,pixels); return;
@@ -158,15 +163,22 @@ static void gles_native_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h,
     GLenum error=glGetError();
     glPixelStorei(GL_PACK_ALIGNMENT,alignment);
     if (error != GL_NO_ERROR) { gles_native_error(error); free(copy); return; }
-    unsigned bpp=format==GL_BGRA?4:2;
+    unsigned bpp=packed16 || rgb565 ? 2 : format==GL_RGB ? 3 : 4;
     size_t stride=((size_t)w*bpp+alignment-1)&~(size_t)(alignment-1);
     for (unsigned row=0;row<(unsigned)h;row++) for (unsigned col=0;col<(unsigned)w;col++) {
         unsigned char *src=copy+((size_t)row*w+col)*4, *dst=(unsigned char *)pixels+row*stride+col*bpp;
-        if (bpp==4) {
-            unsigned char q[4]={src[2],src[1],src[0],src[3]};
+        unsigned char q[4]={src[format==GL_BGRA?2:0],src[1],src[format==GL_BGRA?0:2],src[3]};
+        if (packed32) {
             for (unsigned k=0;k<4;k++) dst[k]=q[type==GL_UNSIGNED_INT_8_8_8_8?3-k:k];
-        }
-        else { unsigned v=(src[0]>>3)<<11 | (src[1]>>2)<<5 | src[2]>>3;dst[0]=v;dst[1]=v>>8; }
+        } else if (packed16 || rgb565) {
+            unsigned v;
+            if (rgb565) v=(q[0]>>3)<<11 | (q[1]>>2)<<5 | q[2]>>3;
+            else if (type==GL_UNSIGNED_SHORT_4_4_4_4) v=(q[0]>>4)<<12 | (q[1]>>4)<<8 | (q[2]>>4)<<4 | q[3]>>4;
+            else if (type==GL_UNSIGNED_SHORT_5_5_5_1) v=(q[0]>>3)<<11 | (q[1]>>3)<<6 | (q[2]>>3)<<1 | q[3]>>7;
+            else if (type==GL_UNSIGNED_SHORT_4_4_4_4_REV) v=(q[3]>>4)<<12 | (q[2]>>4)<<8 | (q[1]>>4)<<4 | q[0]>>4;
+            else v=(q[3]>>7)<<15 | (q[2]>>3)<<10 | (q[1]>>3)<<5 | q[0]>>3;
+            dst[0]=v;dst[1]=v>>8;
+        } else memcpy(dst,q,bpp);
     }
     free(copy);
 }

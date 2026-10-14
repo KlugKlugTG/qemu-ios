@@ -69,6 +69,39 @@ int main(void)
     glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
     assert(glGetError() == GL_NO_ERROR && px[0] > 240 && px[1] < 5 && px[2] < 5 && px[3] > 240);
     printf("GLES1 triangle rgba=%u,%u,%u,%u renderer=%s\n",px[0],px[1],px[2],px[3],glGetString(GL_RENDERER));
+    /* ES1 texture units and client coordinate arrays exercise the CA path. */
+    const GLfloat uv[]={0,0, 1,0, .5f,1};
+    const unsigned char blue[]={0,0,255,255},red[]={255,0,0,255};
+    glBindTexture(GL_TEXTURE_2D,0x40000001u);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,blue);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+    glTexEnvf(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_REPLACE);
+    glEnable(GL_TEXTURE_2D); glTexCoordPointer(2,GL_FLOAT,0,uv); glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDrawArrays(GL_TRIANGLES,0,3); glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    assert(glGetError()==GL_NO_ERROR && px[0]<5 && px[1]<5 && px[2]>240);
+    glActiveTexture(GL_TEXTURE1); glClientActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D,0x40000002u);
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,red);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+    glTexEnvf(GL_TEXTURE_ENV,GL_TEXTURE_ENV_MODE,GL_ADD);
+    glEnable(GL_TEXTURE_2D); glTexCoordPointer(2,GL_FLOAT,0,uv); glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glDrawArrays(GL_TRIANGLES,0,3); glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    assert(glGetError()==GL_NO_ERROR && px[0]>240 && px[1]<5 && px[2]>240);
+#ifdef GLES_HOST_EGL_ES
+    typedef void (*DrawTex)(GLfloat,GLfloat,GLfloat,GLfloat,GLfloat);
+    DrawTex draw=(DrawTex)eglGetProcAddress("glDrawTexfOES");
+    assert(draw);
+    GLint crop[]={0,0,1,1};
+    glTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_CROP_RECT_OES,crop);
+    glActiveTexture(GL_TEXTURE0);
+    glTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_CROP_RECT_OES,crop);
+    glClear(GL_COLOR_BUFFER_BIT); draw(0,0,0,32,32);
+    glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    assert(glGetError()==GL_NO_ERROR && px[0]>240 && px[1]<5 && px[2]>240);
+#endif
+    printf("GLES1 texture/multitexture rgba=%u,%u,%u,%u\n",px[0],px[1],px[2],px[3]);
     assert(gles_egl_create(c1, 2, &c2));
     assert(glIsTexture(texture));
     GLuint fb2; glGenFramebuffers(1,&fb2); glBindFramebuffer(GL_FRAMEBUFFER,fb2);
@@ -100,6 +133,6 @@ int main(void)
     CGLRetainContext(c1); CGLReleaseContext(c1);
     CGLReleaseContext(c2); CGLReleaseContext(c1);
     assert(eglGetCurrentContext()==EGL_NO_CONTEXT);
-    puts("PASS private object names, packed depth/stencil, context switching, cross-version texture sharing, render/readback, teardown");
+    puts("PASS private object names, packed depth/stencil, GLES1 textures/multitexture, context switching, cross-version texture sharing, render/readback, teardown");
     return 0;
 }
