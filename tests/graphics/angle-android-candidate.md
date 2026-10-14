@@ -1,10 +1,11 @@
 # Pinned Android ANGLE candidate
 
 The pinned x86_64 GLES backend builds, passes ELF closure inspection, and passes
-the complete shell adapter probes on both 4 KiB and 16 KiB AVDs. Packaged-worker
-loading and actual guest graphics remain unqualified. The physical Poco native
-path remains the default. Shell probe success does not qualify the required
-guest workloads in the app UID.
+the complete shell adapter probes on both 4 KiB and 16 KiB AVDs. The candidate14
+packaged worker also verifies provider dispatch under its normal app UID on
+4 KiB. Visible guest graphics and the 16 KiB packaged path remain unqualified.
+The physical Poco native path remains the default. Dispatch or shell probe
+success does not qualify the required visible guest workloads.
 
 ## Why a separate frontend is needed
 
@@ -154,8 +155,9 @@ actual library owner of resolved addresses; do not rely on a filename suffix or
 assume `RTLD_LOCAL` alone prevents interposition. Validate in the app worker after
 system graphics libraries have loaded, including cross-version texture sharing
 and teardown. The source loader cross-builds on both Android ABIs. Its runtime
-address checks and complete shell probes passed on both AVD page sizes; app-UID
-loading after system-library initialization still requires validation.
+address checks and complete shell probes passed on both AVD page sizes. The
+4 KiB candidate14 packaged worker now confirms its own addresses after engine
+dependency loading; the 16 KiB packaged path still requires validation.
 
 Choose the backing renderer explicitly through ANGLE's public
 `eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, ...)`, with
@@ -230,3 +232,43 @@ base revision; the downstream compiler's reported revision differs, so the
 bundle preserves that provenance qualification. Complete corresponding-source
 and application license compatibility review remain open. A broad upstream
 license inventory or shell rendering pass cannot decide those questions.
+
+## Actual packaged 4 KiB worker milestone
+
+One bounded candidate14 host/Mesa AVD attempt used the unchanged candidate02
+libraries, main APK SHA256
+`cd730877f22b9345f226141e2f72ed0917e277f39cf38080d8d424676ed7d537`
+and test APK SHA256
+`b3d4e9bb4249b655edf74bbfc1785e345684b56ccf46c8c88381cd12d8b80629`.
+It ran API35/x86_64 with actual page size 4096, two cores, 2048 MB RAM and an
+isolated Xvfb host backing. Read-only verified n72/7E18 handoff inputs were
+staged into an independent app library/state; no shell graphics probe was
+repeated and no source fixture changed.
+
+The production Binder import's actual app receipt passed after 209.219 seconds,
+with maximum status latency 76 ms. An initial 120-second transport timeout was
+retained separately; the progressing import continued to its real terminal
+receipt before guest start. The fixed-provider test passed in 72.305 seconds
+under the normal app UID with a distinct engine PID. It verified all three
+packaged library hashes, immutable enum selection and 197 unique public address
+owners in the APK's own EGL/GLESv2 libraries. The real guest initialized ANGLE
+GLES1, and the subsequent complete engine log contains CoreAnimation attachment
+and offscreen `glDrawElements` calls. This establishes packaged provider loading
+and real guest command execution, not visible workload completion.
+
+The inspected copied provider image still shows the Apple boot logo. The test
+captures as soon as dispatch appears, so its nonzero-pixel check can pass before
+visible GLES-rendered UI. Its receipt correctly leaves guest/visible/audio
+acceptance false. A same-worker FRONTMOST followup timed out with native request
+state 5; its JUnit failure is retained despite ADB returning zero. Balanced Wake
+diagnosis retained Apple-logo images while the panel was on, then black images
+after Power reported sleep/backlight zero; Return Home did not verify wake.
+Android captures repeatedly showed host-mode System UI not responding.
+
+No visible Lock Screen/Home/CA pixels, GLES2 guest workload, wake or orderly
+shutdown was qualified. Normal UI Stop was attempted but not confirmed through
+the host UI blocker. The owned app/emulator/Xvfb processes were stopped, exact
+PIDs verified gone, the dirty private library preserved and the resource slot
+released. Future visible guest validation needs a bounded backing-driver/UI
+and guest-state investigation; it must not relabel the software boot logo as
+GLES-rendered guest acceptance.
