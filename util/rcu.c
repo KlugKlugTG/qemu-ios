@@ -53,6 +53,15 @@ static int in_drain_call_rcu;
 static int rcu_call_count;
 static QemuMutex rcu_registry_lock;
 static QemuMutex rcu_sync_lock;
+/* Membership belongs to this OS thread, not to the lifetime of a loaded DSO. */
+static __thread bool rcu_registered;
+
+#if defined(__linux__)
+/* This hidden link-local hook is supplied only by the shared app entry. A
+ * similarly named symbol in another DSO cannot change standalone ownership. */
+extern bool qemu_rcu_embedded_main(void)
+    __attribute__((weak, visibility("hidden")));
+#endif
 
 /*
  * Check whether a quiescent state was crossed between the beginning of
@@ -395,17 +404,26 @@ void drain_call_rcu(void)
 
 void rcu_register_thread(void)
 {
+    assert(!rcu_registered);
     assert(get_ptr_rcu_reader()->ctr == 0);
     qemu_mutex_lock(&rcu_registry_lock);
     QLIST_INSERT_HEAD(&registry, get_ptr_rcu_reader(), node);
+    rcu_registered = true;
     qemu_mutex_unlock(&rcu_registry_lock);
 }
 
 void rcu_unregister_thread(void)
 {
+    assert(rcu_registered);
     qemu_mutex_lock(&rcu_registry_lock);
     QLIST_REMOVE(get_ptr_rcu_reader(), node);
+    rcu_registered = false;
     qemu_mutex_unlock(&rcu_registry_lock);
+}
+
+bool rcu_thread_is_registered(void)
+{
+    return rcu_registered;
 }
 
 void rcu_add_force_rcu_notifier(Notifier *n)
@@ -422,7 +440,7 @@ void rcu_remove_force_rcu_notifier(Notifier *n)
     qemu_mutex_unlock(&rcu_registry_lock);
 }
 
-static void rcu_init_complete(void)
+static void rcu_init_complete(bool register_current)
 {
     QemuThread thread;
 
@@ -438,7 +456,9 @@ static void rcu_init_complete(void)
     qemu_thread_create(&thread, "call_rcu", call_rcu_thread,
                        NULL, QEMU_THREAD_DETACHED);
 
-    rcu_register_thread();
+    if (register_current) {
+        rcu_register_thread();
+    }
 }
 
 static int atfork_depth = 1;
@@ -481,7 +501,8 @@ static void rcu_init_child(void)
     }
 
     memset(&registry, 0, sizeof(registry));
-    rcu_init_complete();
+    rcu_registered = false;
+    rcu_init_complete(true);
 }
 #endif
 
@@ -491,5 +512,11 @@ static void __attribute__((__constructor__)) rcu_init(void)
 #ifdef CONFIG_POSIX
     pthread_atfork(rcu_init_lock, rcu_init_unlock, rcu_init_child);
 #endif
-    rcu_init_complete();
+#if defined(__linux__)
+    /* An app's loader can be an ordinary, short-lived host thread. The shared
+     * entry registers its actual guest thread before entering QEMU instead. */
+    rcu_init_complete(!qemu_rcu_embedded_main || !qemu_rcu_embedded_main());
+#else
+    rcu_init_complete(true);
+#endif
 }
