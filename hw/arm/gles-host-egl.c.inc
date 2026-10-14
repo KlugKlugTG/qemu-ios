@@ -10,13 +10,22 @@
 #include <stdio.h>
 
 typedef struct GLESEGLTexture {
-    unsigned name, width, height;
+    unsigned name, native_name, width, height, target, refs;
+    bool deleted, hidden;
     struct GLESEGLTexture *next;
 } GLESEGLTexture;
 typedef struct GLESEGLTextures {
     unsigned refs;
     GLESEGLTexture *head;
+    unsigned next_name;
+    struct GLESEGLContext *contexts;
 } GLESEGLTextures;
+
+typedef struct GLESEGLTextureUnit {
+    unsigned texture_2d, rectangle;
+    GLESEGLTexture *object_2d, *object_rectangle, *object_cube;
+    bool enabled_2d, enabled_rectangle;
+} GLESEGLTextureUnit;
 
 typedef struct GLESEGLContext {
     EGLContext context;
@@ -25,10 +34,18 @@ typedef struct GLESEGLContext {
     unsigned unpack_alignment, unpack_row_length, errors;
     bool fbo_checked, fbo_supported;
     GLESEGLTextures *textures;
-    GLESEGLTexture default_texture;
+    GLESEGLTexture default_texture, default_cube;
+    GLESEGLTexture *default_rectangle;
+    GLESEGLTextureUnit texture_units[32];
+    struct GLESEGLContext *next_context;
+    void (*texture_cleanup)(struct GLESEGLContext *, bool);
+    void *texture_attachments;
+    unsigned rectangle_zero;
+    bool drawing_window_quad;
 } *CGLContextObj;
 static EGLDisplay gles_egl_display = EGL_NO_DISPLAY;
 static EGLConfig gles_egl_config;
+static unsigned gles_egl_rectangle_zero=0x60000000u;
 static __thread CGLContextObj gles_egl_current;
 
 static int CGLSetCurrentContext(CGLContextObj c)
@@ -48,7 +65,15 @@ static CGLContextObj CGLRetainContext(CGLContextObj c) { c->refs++; return c; }
 static void CGLReleaseContext(CGLContextObj c)
 {
     if (!c || --c->refs) return;
-    if (gles_egl_current == c) CGLSetCurrentContext(NULL);
+    CGLContextObj previous=gles_egl_current;
+    if (c->texture_cleanup) {
+        bool current=CGLSetCurrentContext(c)==0;
+        c->texture_cleanup(c,current);
+    }
+    if (gles_egl_current==c) CGLSetCurrentContext(previous==c ? NULL : previous);
+    struct GLESEGLContext **slot=&c->textures->contexts;
+    while (*slot && *slot!=c) slot=&(*slot)->next_context;
+    if (*slot) *slot=c->next_context;
     eglDestroyContext(gles_egl_display, c->context);
     eglDestroySurface(gles_egl_display, c->surface);
     if (!--c->textures->refs) {
@@ -96,6 +121,7 @@ static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *ou
     CGLContextObj c = calloc(1, sizeof(*c));
     if (!c) return false;
     c->refs = 1;
+    c->rectangle_zero=++gles_egl_rectangle_zero;
     c->unpack_alignment = 4;
     c->textures=share ? share->textures : calloc(1,sizeof(*c->textures));
     if (!c->textures) { free(c); return false; }
@@ -112,6 +138,8 @@ static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *ou
         free(c);
         return false;
     }
+    c->next_context=c->textures->contexts;
+    c->textures->contexts=c;
     *out = c;
     return true;
 }
