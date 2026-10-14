@@ -45,6 +45,15 @@ static GLenum gles_native_get_error(void)
     }
     return glGetError();
 }
+/* Host-setup diagnostics must not consume the context's guest-visible error
+ * flags. Save driver flags in the existing per-context store, then inspect it. */
+static GLenum gles_native_peek_error(void)
+{
+    gles_native_save_errors();
+    for (unsigned bit=0;bit<=GL_INVALID_FRAMEBUFFER_OPERATION-GL_INVALID_ENUM;bit++)
+        if (gles_egl_current->errors & (1u<<bit)) return GL_INVALID_ENUM+bit;
+    return GL_NO_ERROR;
+}
 static bool gles_native_extension(const char *extensions, const char *name)
 {
     size_t length=strlen(name);

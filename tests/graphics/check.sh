@@ -17,7 +17,7 @@ cc -Wall -Wextra -Wno-unused-function -DGLES_HOST_EGL_ES tests/graphics/egl-limi
 if [ "$#" -gt 1 ]; then
     ndk=$2
     for arch in aarch64 x86_64; do
-        for probe in render pixels core-fbo combine; do
+        for probe in render pixels core-fbo combine drawable-init; do
             "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/$arch-linux-android26-clang" \
                 -Wall -Wextra -Wno-unused-function -DGLES_HOST_EGL_ES \
                 "tests/graphics/egl-$probe.c" -o "$output/egl-$probe-$arch" \
