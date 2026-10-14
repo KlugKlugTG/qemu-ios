@@ -302,6 +302,7 @@ typedef struct IPodTouchMultitouchState {
      * mt_frame_period_ns() in ipod_touch_multitouch.c.
      */
     int64_t last_motion_ns;
+    uint32_t report_hz;    /* "report-hz": frames a second while touched; 0, IT_MT_HZ or 60 */
 } IPodTouchMultitouchState;
 
 /*
