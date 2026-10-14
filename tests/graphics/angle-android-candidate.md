@@ -49,10 +49,24 @@ bash tests/graphics/build-angle-android.sh NEW_PRIVATE_DIRECTORY x64 gl
 ```
 
 A separate Vulkan build is supported by the candidate script if the GLES
-backend proves insufficient. No script has been executed beyond syntax/help;
-GN generation, dependency bootstrap and linking remain unverified. Root must
-allocate the heavy slot before running it. Public Android dependencies and
-build outputs require substantial disk space; keep them outside Git.
+backend proves insufficient. Source acquisition can run independently without
+hooks or compilation, then resume from the verified checkout after the heavy
+slot is allocated:
+
+```sh
+bash tests/graphics/build-angle-android.sh --fetch-only NEW_PRIVATE_DIRECTORY x64 gl
+bash tests/graphics/build-angle-android.sh --build-only SAME_PRIVATE_DIRECTORY x64 gl
+```
+
+The fetch phase records actual dependency revisions in `source-receipt.txt`.
+Use `angle-license-inventory.py --checkout SAME_PRIVATE_DIRECTORY --output
+NEW_PRIVATE_INVENTORY.json` to record retained license files, notices and
+Chromium dependency metadata with hashes. Preserve this checkout as the
+corresponding-source input and inspect the libraries' actual linked dependency
+closure before distribution. The inventory does not decide license
+compatibility. Source acquisition is underway; GN generation, dependency hooks
+and linking remain unverified. Public Android dependencies and build outputs
+require substantial disk space; keep them outside Git.
 
 The [official Android setup](https://chromium.googlesource.com/angle/angle/+/8cd050f07ebd65cce269fc92e36699fc03b20ac3/doc/DevSetupAndroid.md)
 requires Linux and gclient Android dependencies. The selected pin's build
