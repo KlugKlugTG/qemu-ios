@@ -9,7 +9,7 @@ p=argparse.ArgumentParser();p.add_argument('runner');p.add_argument('library');a
 with tempfile.TemporaryDirectory(prefix='lt-tcg-') as tmp:
  root=pathlib.Path(tmp);guest=root/'guest.bin';dump=root/'word.bin';qmp=root/'qmp.sock'
  guest.write_bytes(struct.pack('<4I',0xe3a0002a,0xe3a01101,0xe5810100,0xeafffffe))
- args=[a.runner,a.library,'qemu','-M','virt','-cpu','cortex-a15','-m','16M','-nodefaults','-display','none','-serial','none','-monitor','none','-qmp',f'unix:{qmp},server=on,wait=off','-device',f'loader,file={guest},addr=0x40000000,cpu-num=0']
+ args=[a.runner,a.library,'qemu','-M','virt','-cpu','cortex-a15','-m','16M','-nodefaults','-display','none','-serial','none','-monitor','none','-qmp',f'unix:{qmp},server=on,wait=off','-device',f'loader,file={guest},addr=0x40200000,cpu-num=0']
  with open(root/'engine.log','w') as log:
   process=subprocess.Popen(args,stdout=log,stderr=log)
   try:
@@ -35,5 +35,9 @@ with tempfile.TemporaryDirectory(prefix='lt-tcg-') as tmp:
    else:raise RuntimeError('TCG guest did not store expected word42')
    command('quit');process.wait(timeout=10);assert process.returncode==0
    print('PASS: actual shared QEMU ARM TCG MOV/MOV/STR guest produced RAM word42; fresh worker clean exit')
+  except BaseException:
+   print('engine exit:',process.poll(),flush=True)
+   print((root/'engine.log').read_text(),flush=True)
+   raise
   finally:
    if process.poll() is None:process.kill();process.wait()
