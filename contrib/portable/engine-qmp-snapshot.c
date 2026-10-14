@@ -62,7 +62,7 @@ static int snapshot_line(int fd, char *line, int64_t deadline)
 {
     size_t used = 0;
     /* One-byte reads intentionally avoid stealing a later response from the
-     * socket. Only four bounded responses are requested by this diagnostic. */
+     * socket. Only seven bounded responses are requested by this diagnostic. */
     while (used < SNAPSHOT_MAX_LINE - 1) {
         if (snapshot_wait(fd, POLLIN, deadline)) return -1;
         ssize_t n = recv(fd, line + used, 1, 0);
@@ -136,6 +136,9 @@ int lighttouch_debug_qmp_snapshot(const char *logical_path, int output_fd)
         { "lt-status", "{\"execute\":\"query-status\",\"id\":\"lt-status\"}\n" },
         { "lt-cpus", "{\"execute\":\"query-cpus-fast\",\"id\":\"lt-cpus\"}\n" },
         { "lt-registers", "{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"info registers\"},\"id\":\"lt-registers\"}\n" },
+        { "lt-cpu-state", "{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"info cpus\"},\"id\":\"lt-cpu-state\"}\n" },
+        { "lt-instructions", "{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"x /16i 0xc0567e20\"},\"id\":\"lt-instructions\"}\n" },
+        { "lt-caller", "{\"execute\":\"human-monitor-command\",\"arguments\":{\"command-line\":\"x /12i 0xc0567ca0\"},\"id\":\"lt-caller\"}\n" },
     };
     for (size_t i = 0; i < sizeof(requests) / sizeof(requests[0]); i++) {
         int64_t deadline = snapshot_now() + SNAPSHOT_TIMEOUT_MS;

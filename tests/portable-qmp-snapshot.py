@@ -40,11 +40,16 @@ with tempfile.TemporaryDirectory(prefix='qmp-snapshot-') as temp:
             result = subprocess.run([a.client, str(sock)], capture_output=True,
                                     text=True, timeout=15, check=True)
             lines = [json.loads(line) for line in result.stdout.splitlines()]
-            assert len(lines) == 5
+            assert len(lines) == 8
             by_id = {line.get('id'): line for line in lines}
             assert by_id['lt-status']['return']['running']
             assert len(by_id['lt-cpus']['return']) == 1
             assert 'R15=40200000' in by_id['lt-registers']['return']
+            assert 'CPU #0' in by_id['lt-cpu-state']['return']
+            # This legal virt guest has no XNU mapping: the fixed RAM reads
+            # return a bounded inaccessible-memory report, never MMIO data.
+            assert 'return' in by_id['lt-instructions']
+            assert 'return' in by_id['lt-caller']
             with socket.socket(socket.AF_UNIX) as connection:
                 connection.connect(short)
                 stream = connection.makefile('rwb', buffering=0)
