@@ -1053,9 +1053,9 @@ static bool gles_host_init(void)
     if (trace_event_get_state_backends(TRACE_GLES_CONTEXT_LOG)) TRACE_PRINTF(trace_gles_context_log, "[gles-context] initialized %p legacy=%d\n", (void *)gh_current, gh_current == &gh_legacy);
 
 
-    fprintf(stderr, "[gles] host GL up: %s / %s, present by %s\n",
+    fprintf(stderr, "[gles] host GL up: %s / %s, present by %s (guest-api=%u)\n",
             glGetString(GL_VERSION), glGetString(GL_RENDERER),
-            gh.iosurface ? "IOSurface" : "readback");
+            gh.iosurface ? "IOSurface" : "readback", gh.api_version == 2 ? 2u : 1u);
     return true;
 }
 
