@@ -1,12 +1,18 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Build candidate only: run after root allocates the heavy build slot.
+# Fetch public sources independently; compile only with the allocated heavy slot.
 set -euo pipefail
 if [ "${1:-}" = --help ]; then
-    echo 'Usage: build-angle-android.sh NEW_PRIVATE_DIRECTORY [x64|arm64] [gl|vulkan]'
+    echo 'Usage: build-angle-android.sh [--fetch-only|--build-only] PRIVATE_DIRECTORY [x64|arm64] [gl|vulkan]'
     echo 'Downloads pinned public Android dependencies and builds three Bionic libraries with at most two jobs.'
+    echo '--fetch-only requires a new directory, skips hooks and compilation; --build-only resumes that pinned checkout.'
     exit 0
 fi
+ANGLE_STAGE=all
+case "${1:-}" in
+    --fetch-only) ANGLE_STAGE=fetch; shift;;
+    --build-only) ANGLE_STAGE=build; shift;;
+esac
 ANGLE_DEST=${1:?Usage: build-angle-android.sh NEW_PRIVATE_DIRECTORY [x64|arm64] [gl|vulkan]}
 ANGLE_CPU=${2:-x64}
 ANGLE_BACKEND=${3:-gl}
@@ -15,7 +21,11 @@ case "$ANGLE_CPU" in x64|arm64) ;; *) echo 'CPU must be x64 or arm64' >&2; exit 
 case "$ANGLE_BACKEND" in gl|vulkan) ;; *) echo 'Backend must be gl or vulkan' >&2; exit 2;; esac
 case "$ANGLE_JOBS" in 1|2) ;; *) echo 'ANGLE_JOBS must be 1 or 2' >&2; exit 2;; esac
 [ "$(uname -s)" = Linux ] || { echo 'Android ANGLE requires Linux' >&2; exit 2; }
-[ ! -e "$ANGLE_DEST" ] || { echo 'Use a new private directory' >&2; exit 2; }
+if [ "$ANGLE_STAGE" = build ]; then
+    [ -f "$ANGLE_DEST/source-receipt.txt" ] || { echo 'Missing completed pinned fetch receipt' >&2; exit 2; }
+else
+    [ ! -e "$ANGLE_DEST" ] || { echo 'Use a new private directory' >&2; exit 2; }
+fi
 ANGLE_NINJA=$(command -v ninja)
 [ -x "$ANGLE_NINJA" ] || { echo 'Native Ninja is required' >&2; exit 2; }
 mkdir -p "$ANGLE_DEST"
@@ -27,15 +37,28 @@ fetch_pinned() {
     git -C "$1" checkout --detach FETCH_HEAD
     [ "$(git -C "$1" rev-parse HEAD)" = "$3" ]
 }
-fetch_pinned "$ANGLE_DEST/angle" https://chromium.googlesource.com/angle/angle 8cd050f07ebd65cce269fc92e36699fc03b20ac3
-fetch_pinned "$ANGLE_DEST/depot_tools" https://chromium.googlesource.com/chromium/tools/depot_tools.git 9b264039190fa270f3fc44779b4e26b43008ba41
+if [ "$ANGLE_STAGE" != build ]; then
+    fetch_pinned "$ANGLE_DEST/angle" https://chromium.googlesource.com/angle/angle 8cd050f07ebd65cce269fc92e36699fc03b20ac3
+    fetch_pinned "$ANGLE_DEST/depot_tools" https://chromium.googlesource.com/chromium/tools/depot_tools.git 9b264039190fa270f3fc44779b4e26b43008ba41
+fi
+[ "$(git -C "$ANGLE_DEST/angle" rev-parse HEAD)" = 8cd050f07ebd65cce269fc92e36699fc03b20ac3 ]
+[ "$(git -C "$ANGLE_DEST/depot_tools" rev-parse HEAD)" = 9b264039190fa270f3fc44779b4e26b43008ba41 ]
 export PATH="$ANGLE_DEST/depot_tools:$PATH" DEPOT_TOOLS_UPDATE=0
+if [ "$ANGLE_STAGE" != build ]; then
 cat > "$ANGLE_DEST/.gclient" <<'GCLIENT'
 solutions=[{"name":"angle","url":"https://chromium.googlesource.com/angle/angle","managed":False,"custom_deps":{},"custom_vars":{"checkout_angle_cl_deps":False,"checkout_angle_dawn_deps":False,"checkout_angle_internal":False,"checkout_angle_restricted_traces":False,"checkout_angle_mesa":False,"download_remoteexec_cfg":False}}]
 target_os=['android']
 GCLIENT
 cd "$ANGLE_DEST"
-gclient sync --shallow --no-history -j"$ANGLE_JOBS"
+gclient sync --shallow --no-history --nohooks -j"$ANGLE_JOBS"
+gclient revinfo --actual > "$ANGLE_DEST/source-receipt.txt"
+fi
+if [ "$ANGLE_STAGE" = fetch ]; then
+    echo "Pinned sources synchronized without hooks or compilation: $ANGLE_DEST"
+    exit 0
+fi
+cd "$ANGLE_DEST"
+gclient runhooks
 cd angle
 # Synchronization must not move the selected frontend revision.
 [ "$(git rev-parse HEAD)" = 8cd050f07ebd65cce269fc92e36699fc03b20ac3 ]
