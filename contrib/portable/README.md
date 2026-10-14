@@ -24,15 +24,20 @@ The platform provides zlib; its metadata version is read from the NDK header.
 # MESON is Meson 1.10.0; its Python needs packaging 24.0.
 # Install host tools in a private venv when unavailable, never change system Python.
 python3 contrib/portable/build-deps.py /private/builds/deps-linux --only ffmpeg
+python3 contrib/portable/build-crypto-deps.py /private/builds/crypto-linux
 python3 contrib/portable/build-engine.py /private/builds/linux \
-  --prefix /private/builds/deps-linux/prefix
+  --prefix /private/builds/deps-linux/prefix \
+  --crypto-prefix /private/builds/crypto-linux/prefix
 
 python3 contrib/portable/build-deps.py /private/builds/deps-arm64 \
   --abi arm64-v8a --ndk "$ANDROID_NDK_ROOT" --meson "$MESON"
+python3 contrib/portable/build-crypto-deps.py /private/builds/crypto-arm64 \
+  --abi arm64-v8a --ndk "$ANDROID_NDK_ROOT"
 python3 contrib/portable/build-engine.py /private/builds/arm64-v8a \
   --abi arm64-v8a --ndk "$ANDROID_NDK_ROOT" \
-  --prefix /private/builds/deps-arm64/prefix
-# Repeat both commands with --abi x86_64 and distinct output/prefix paths.
+  --prefix /private/builds/deps-arm64/prefix \
+  --crypto-prefix /private/builds/crypto-arm64/prefix
+# Repeat all three commands with --abi x86_64 and distinct output/prefix paths.
 ```
 
 Each compiler stage uses at most two jobs. The shared library relinker uses
@@ -43,6 +48,18 @@ with its Mach-O image identity replaced by a compiled Git revision; its pause
 handler also cancels live host input. ELF exports only `qemu_ios_*`. Inspect
 `readelf -d libqemu-arm.so` before packaging, including any NDK C++ runtime.
 `portable-link.json` records the exact final link arguments.
+
+The portable recipe selects QEMU's existing public-domain AES implementation
+for the Apple AES model and pinned libgcrypt MPI for its signed Montgomery PKE
+operations. The original macOS OpenSSL implementation remains selected without
+`QEMU_IOS_PORTABLE_CRYPTO`. Separate crypto prefixes avoid changing OpenSSL
+inputs used by the firmware tool. `crypto-dependencies.json` pins release
+archives, and the builder retains their COPYING/COPYING.LIB/LICENSES notices.
+The libgpg-error patch generates mutex storage from the target Bionic compiler
+instead of borrowing a glibc layout. QEMU's existing libgcrypt initialization
+also supplies its shared cipher/hash backend. Unused virtio IOThread mapping is
+selected only when virtio block or SCSI is present; neither is selected by the
+portable device config.
 
 `portable.mak` selects the existing iOS models plus ARM virt for legal TCG
 smoke programs. Device prerequisites are explicitly selected in Kconfig, as in
@@ -81,6 +98,8 @@ tests/slice/run.sh tests/slice/ipod-portable-touch.c
 tests/slice/run.sh tests/slice/ipod-accel-sampling.c
 tests/slice/run.sh tests/slice/ipod-attitude.c
 tests/slice/run.sh tests/slice/ipod-multitouch-frames.c
+tests/slice/run.sh tests/slice/ipod-pke.c
+python3 tests/portable-crypto.py /private/builds/linux
 ```
 
 These checks establish frame ownership, stable contact identity/crossing,
@@ -90,7 +109,11 @@ physical gyroscope acceptance, ARM64 JIT qualification, or guest graphics.
 
 QEMU and reused glue retain upstream GPL terms. GLib is LGPL-2.1-or-later,
 proxy-libintl retains its GNU Library GPL v2 notice, PCRE2 BSD, libffi MIT,
-pixman MIT, OpenSSL Apache-2.0, and the restricted FFmpeg configuration LGPL.
+pixman MIT, libgcrypt/libgpg-error LGPL-2.1-or-later library terms, OpenSSL
+Apache-2.0 for the separate firmware dependency, and the restricted FFmpeg
+configuration LGPL. Distribution eligibility remains unresolved pending the
+actual selected-source and complete application dependency audit. Vector tests
+and source changes alone do not qualify a rebuilt engine or resolve licensing.
 Retain upstream source/license notices and provide the corresponding source,
 patches, and reproducible build/relink material when distributing engine
 binaries; LGPL static dependencies also require their applicable relinking

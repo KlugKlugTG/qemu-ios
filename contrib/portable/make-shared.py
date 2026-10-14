@@ -59,6 +59,29 @@ for arg in args:
  if candidate.suffix in ['.o','.a'] or '.so' in candidate.name:
   if not candidate.is_absolute():candidate=build/candidate
   if candidate.is_file():link_inputs[str(candidate)]=hashlib.sha256(candidate.read_bytes()).hexdigest()
-manifest={'schema':1,'source_status':source_status,'source_inputs':source_inputs,'link_inputs':link_inputs,'tools':{'compiler':subprocess.check_output(compiler+['--version'],cwd=build,text=True).splitlines()[0],'ninja':subprocess.check_output(['ninja','--version'],text=True).strip()},'source_revision':revision,'source_dirty':dirty,'api_major':2,'portable_version':1,'library_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'link_argv':args,'inputs':{str(path.relative_to(src)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [src/'contrib/ios-app/qemu-ios-ui.h',src/'contrib/ios-app/qemu-ios-ui.c',src/'contrib/macos-app/qemu-macos-extras.c',src/'contrib/portable/dependencies.json']}}
+library_dirs=[]
+for index,arg in enumerate(args):
+ if arg=='-L':library_dirs.append(pathlib.Path(args[index+1]))
+ elif arg.startswith('-L'):library_dirs.append(pathlib.Path(arg[2:]))
+resolved_libraries={}; static=False
+for arg in args:
+ if arg in ['-static','-Wl,-Bstatic']:static=True
+ elif arg=='-Wl,-Bdynamic':static=False
+ if not arg.startswith('-l'):continue
+ names=[arg[3:]] if arg.startswith('-l:') else ([f'lib{arg[2:]}.a'] if static else [f'lib{arg[2:]}.so',f'lib{arg[2:]}.a'])
+ candidate=None
+ for directory in library_dirs:
+  directory=directory if directory.is_absolute() else build/directory
+  candidate=next((directory/name for name in names if (directory/name).is_file()),None)
+  if candidate:break
+ if candidate is None:
+  for name in names:
+   path=pathlib.Path(subprocess.check_output(compiler+['-print-file-name='+name],cwd=build,text=True).strip())
+   if path.is_file():candidate=path;break
+ if candidate is None:raise RuntimeError('Cannot record resolved library input '+arg)
+ candidate=candidate.resolve()
+ resolved_libraries[arg]=str(candidate)
+ link_inputs[str(candidate)]=hashlib.sha256(candidate.read_bytes()).hexdigest()
+manifest={'schema':1,'source_status':source_status,'source_inputs':source_inputs,'link_inputs':link_inputs,'resolved_libraries':resolved_libraries,'tools':{'compiler':subprocess.check_output(compiler+['--version'],cwd=build,text=True).splitlines()[0],'ninja':subprocess.check_output(['ninja','--version'],text=True).strip()},'source_revision':revision,'source_dirty':dirty,'api_major':2,'portable_version':1,'library_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'link_argv':args,'inputs':{str(path.relative_to(src)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [src/'contrib/ios-app/qemu-ios-ui.h',src/'contrib/ios-app/qemu-ios-ui.c',src/'contrib/macos-app/qemu-macos-extras.c',src/'contrib/portable/dependencies.json']}}
 (build/'portable-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(output)

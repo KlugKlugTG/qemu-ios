@@ -3,7 +3,10 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/arm/ipod_touch_sha1.h"
 #include "qemu/log.h"
+#include "hw/arm/portable-crypto.h"
+#ifndef QEMU_IOS_PORTABLE_CRYPTO
 #include <openssl/bn.h>
+#endif
 
 /*
  * Forging an img3 signature check.
@@ -77,12 +80,18 @@ static void pke_execute(IPodTouchPKEState *s, uint32_t command)
         return;
     }
     uint8_t result[256], expected[256];
+    unsigned bits = ((s->key_len & 3) + 1) * ((((s->key_len >> 3) & 15) + 1) * 32 + 16);
+#ifdef QEMU_IOS_PORTABLE_CRYPTO
+    bool ok = portable_pke_product(s->modulus, s->segments + a * size,
+        one ? NULL : s->segments + b * size, size, bits,
+        s->seg_sign & (1u << a), !one && (s->seg_sign & (1u << b)),
+        one, result);
+#else
     BIGNUM *mod = BN_lebin2bn(s->modulus, size, NULL);
     BIGNUM *left = BN_lebin2bn(s->segments + a * size, size, NULL);
     BIGNUM *right = one ? BN_new() : BN_lebin2bn(s->segments + b * size, size, NULL);
     BIGNUM *radix = BN_new(), *inverse = BN_new(), *value = BN_new();
     BN_CTX *ctx = BN_CTX_new();
-    unsigned bits = ((s->key_len & 3) + 1) * ((((s->key_len >> 3) & 15) + 1) * 32 + 16);
     bool ok = mod && left && right && radix && inverse && value && ctx;
     if (ok) {
         if (s->seg_sign & (1u << a)) { BN_set_negative(left, 1); }
@@ -98,6 +107,7 @@ static void pke_execute(IPodTouchPKEState *s, uint32_t command)
     }
     BN_free(mod); BN_free(left); BN_free(right); BN_free(radix);
     BN_free(inverse); BN_free(value); BN_CTX_free(ctx);
+#endif
     if (!ok) {
         qemu_log_mask(LOG_GUEST_ERROR, "[PKE] Montgomery operation failed\n");
         return;
