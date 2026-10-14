@@ -1,6 +1,8 @@
 system_virtio_ss = ss.source_set()
 system_virtio_ss.add(files('virtio-bus.c'))
-system_virtio_ss.add(files('iothread-vq-mapping.c'))
+if config_all_devices.has_key('CONFIG_VIRTIO_BLK') or config_all_devices.has_key('CONFIG_VIRTIO_SCSI')
+  system_virtio_ss.add(files('iothread-vq-mapping.c'))
+endif
 system_virtio_ss.add(files('virtio-config-io.c'))
 system_virtio_ss.add(when: 'CONFIG_VIRTIO_PCI', if_true: files('virtio-pci.c'))
 system_virtio_ss.add(when: 'CONFIG_VIRTIO_MMIO', if_true: files('virtio-mmio.c'))

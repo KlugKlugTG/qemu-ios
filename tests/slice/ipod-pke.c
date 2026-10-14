@@ -2,6 +2,10 @@
  *
  * SLICE hw/arm/ipod_touch_pke.c range static const uint8_t sha1_digestinfo | static const MemoryRegionOps
  * PKG openssl
+ * PKG libgcrypt
+ * CFLAGS -I$ROOT/include
+ * VARIANT
+ * VARIANT -DQEMU_IOS_PORTABLE_CRYPTO
  */
 #include <stdint.h>
 #include <stdbool.h>
@@ -12,6 +16,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <openssl/bn.h>
+#include "hw/arm/portable-crypto.h"
 typedef uint64_t hwaddr;
 typedef struct {void *sha1;bool forge_sigcheck;uint8_t segments[2048],modulus[256];uint32_t seg_size_reg,segment_size,modulus_size,key_len,seg_id,seg_sign;} IPodTouchPKEState;
 #define REG_PKE_START 8
@@ -46,6 +51,10 @@ static void exponentiate(IPodTouchPKEState *s,unsigned exponent, BIGNUM *mod) {
     BN_free(r);BN_CTX_free(ctx);
 }
 int main(void) {
+#ifdef QEMU_IOS_PORTABLE_CRYPTO
+    assert(gcry_check_version(NULL));
+    gcry_control(GCRYCTL_INITIALIZATION_FINISHED, 0);
+#endif
     for(unsigned length=64;length<=256;length*=2) {
         IPodTouchPKEState s={0};
         ipod_touch_pke_write(&s,REG_PKE_SEG_SIZE,length==64 ? 129:length==128 ? 65:1,4);
@@ -79,6 +88,10 @@ int main(void) {
             uint64_t expected=1;for(unsigned i=0;i<exponent;i++)expected*=3;
             for(unsigned i=0;i<length;i++)assert(s.segments[length+i]==(i<8 ? (expected>>(8*i))&255:0));
         }
+        /* One mode ignores b entirely, even when its register is 255. */
+        memcpy(block,s.segments+length,length);
+        op(&s,2,255,1,true,false);
+        assert(!memcmp(block,s.segments+length,length));
         memset(s.segments+length,0,length);exponentiate(&s,3,n);
         for(unsigned i=0;i<length;i++)assert(s.segments[length+i]==0);
         /* No preload, invalid segment IDs, and even modulus do not publish. */

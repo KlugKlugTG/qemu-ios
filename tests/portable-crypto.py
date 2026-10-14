@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Compare production portable crypto under sanitizers using a QEMU build's flags."""
+import argparse
+import json
+import os
+import pathlib
+import shlex
+import subprocess
+import tempfile
+
+p = argparse.ArgumentParser()
+p.add_argument('build', type=pathlib.Path)
+a = p.parse_args()
+src = pathlib.Path(__file__).resolve().parents[1]
+build = a.build.resolve()
+commands = json.loads((build / 'compile_commands.json').read_text())
+aes = next(c for c in commands if c['file'].endswith('/crypto/aes.c'))
+argv = shlex.split(aes['command'])
+flags, skip = [], False
+for arg in argv[1:]:
+    if skip:
+        skip = False
+        continue
+    if arg in ['-o', '-MF', '-MQ', '-MT']:
+        skip = True
+        continue
+    if arg in ['-c', '-MD', '-MMD'] or arg.endswith('/crypto/aes.c'):
+        continue
+    flags.append(arg)
+sanitize = ['-fsanitize=address,undefined', '-fno-sanitize-recover=all',
+            '-fno-omit-frame-pointer', '-g']
+env = os.environ.copy()
+env['ASAN_OPTIONS'] = 'detect_leaks=1'
+env['UBSAN_OPTIONS'] = 'halt_on_error=1:print_stacktrace=1'
+with tempfile.TemporaryDirectory(prefix='portable-crypto-') as temp:
+    obj = pathlib.Path(temp) / 'aes.o'
+    subprocess.run([argv[0]] + flags + sanitize + ['-c', str(src / 'crypto/aes.c'),
+                   '-o', str(obj)], cwd=build, check=True)
+    pkg = shlex.split(subprocess.check_output(
+        ['pkg-config', '--cflags', '--libs', 'libgcrypt', 'openssl'], text=True))
+    exe = pathlib.Path(temp) / 'check'
+    subprocess.run([argv[0], '-std=gnu11', '-Wno-deprecated-declarations',
+                    '-I' + str(src / 'include')] + sanitize +
+                   [str(src / 'tests/portable-crypto.c'),
+                    str(src / 'tests/portable-crypto-reference.c'), str(obj)] + pkg +
+                   ['-o', str(exe)], cwd=build, check=True)
+    subprocess.run([str(exe)], env=env, check=True)
