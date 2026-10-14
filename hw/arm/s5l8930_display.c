@@ -386,6 +386,16 @@ static void vbl_tick(void *opaque)
     s->pipe[1].swap_pending = false;
     pipe_frame_end(&s->pipe[0]);
     pipe_frame_end(&s->pipe[1]);
+    /*
+     * Paint the latched frame now, at the vsync, when something shows the
+     * console, as ipod_touch_lcd's refresh_timer_tick does. Left to QEMU's
+     * 30 ms display refresh, a guest swapping every vsync reached the host
+     * at under 33 fps, unevenly. display_update returns at once when the
+     * surface already holds this frame.
+     */
+    if (s->con && qemu_console_is_visible(s->con)) {
+        graphic_hw_update(s->con);
+    }
     /* ponytail: the frame is the only CLCD source raised, the one AppleCLCD enables (its LUT and dither updates). */
     s->clcd_status |= CLCD_IRQ_FRAME;
     clcd_update_irq(s);

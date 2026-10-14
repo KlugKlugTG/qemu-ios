@@ -93,6 +93,8 @@ static struct {
 
     /* Set by a partial update, cleared when a whole frame is published. */
     bool pending;
+    /* Publishes a frame once the update that painted it has returned. */
+    QEMUBH *publish_bh;
 } ios;
 
 /* Frame polling can begin even when startup fails before attach(). Initialize
@@ -244,7 +246,7 @@ static void ios_capture(DisplaySurface *surface)
 }
 
 /*
- * Note what changed; do not publish yet.
+ * Note what changed; publish once the update that painted it has returned.
  *
  * Now that the panel does proper dirty tracking, one guest frame arrives as
  * SEVERAL partial updates. Publishing each one hands the app a frame caught
@@ -257,6 +259,15 @@ static void ios_gfx_update(DisplayChangeListener *dcl,
                            int x, int y, int w, int h)
 {
     ios.pending = true;
+    /*
+     * A panel paints each frame in one call (the LCD's vsync push, the iPad's
+     * display_update), so a bottom half publishes it whole, right after it is
+     * painted. Waiting for ios_refresh, on QEMU's 30 ms display timer, showed a
+     * 60 Hz guest at under 33 fps, with frames dropped unevenly.
+     */
+    if (ios.publish_bh) {
+        qemu_bh_schedule(ios.publish_bh);
+    }
 }
 
 static void ios_gfx_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
@@ -275,20 +286,29 @@ static void ios_gfx_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
     }
 }
 
-static void ios_refresh(DisplayChangeListener *dcl)
+static void ios_publish(QemuConsole *con)
 {
     DisplaySurface *surface;
-
-    graphic_hw_update(dcl->con);
 
     if (!ios.pending) {
         return;
     }
-    surface = qemu_console_surface(dcl->con);
+    surface = qemu_console_surface(con);
     if (surface) {
         ios_capture(surface);
         ios.pending = false;
     }
+}
+
+static void ios_publish_bh(void *opaque)
+{
+    ios_publish(ios.con);
+}
+
+static void ios_refresh(DisplayChangeListener *dcl)
+{
+    graphic_hw_update(dcl->con);
+    ios_publish(dcl->con);
 }
 
 static const DisplayChangeListenerOps ios_dcl_ops = {
@@ -380,6 +400,7 @@ void qemu_ios_ui_vm_started(void)
     }
     ios.dcl.ops = &ios_dcl_ops;
     ios.dcl.con = ios.con;
+    ios.publish_bh = qemu_bh_new(ios_publish_bh, NULL);
     register_displaychangelistener(&ios.dcl);
     ios.attached = true;
     qemu_register_reset(ios_sequence_reset, NULL);
