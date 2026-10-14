@@ -14,7 +14,7 @@ if a.abi!='linux':
  bin=a.ndk.resolve()/'toolchains/llvm/prebuilt/linux-x86_64/bin';arch='aarch64' if a.abi=='arm64-v8a' else 'x86_64';triple='aarch64-linux-android' if arch=='aarch64' else 'x86_64-linux-android'
  env['PATH']=str(bin)+':'+env['PATH']
  for key,name in [('AR','llvm-ar'),('RANLIB','llvm-ranlib'),('NM','llvm-nm'),('STRIP','llvm-strip'),('READELF','llvm-readelf')]:env[key]=str(bin/name)
- args+=['--cpu='+arch,'--cc='+str(bin/(triple+'28-clang')),'--cxx='+str(bin/(triple+'28-clang++')),'--disable-containers']
+ args+=['--cross-prefix=','--host-cc=/usr/bin/cc','--cpu='+arch,'--cc='+str(bin/(triple+'28-clang')),'--cxx='+str(bin/(triple+'28-clang++')),'--disable-containers']
 revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=src,text=True).strip()
 status=subprocess.check_output(['git','status','--porcelain=v1','--untracked-files=all'],cwd=src,text=True)
 if status:raise RuntimeError('Commit source changes before a reproducible engine build: '+status)
