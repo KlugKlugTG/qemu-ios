@@ -1116,11 +1116,11 @@ struct portable_touch_request {
     uint64_t id, timestamp; size_t count;
     QemuIosPortableContact contacts[QEMU_IOS_PORTABLE_MAX_CONTACTS];
 };
-static bool portable_touch_capacity(unsigned begins, unsigned ends, bool motion)
+static bool portable_touch_capacity(unsigned begins, unsigned ends, unsigned moves)
 {
 #if defined(__linux__) && !defined(__APPLE__)
     Object *obj = object_resolve_path_type("", TYPE_IPOD_TOUCH_MULTITOUCH, NULL);
-    return !obj || ipod_touch_multitouch_can_queue(IPOD_TOUCH_MULTITOUCH(obj), begins, ends, motion);
+    return !obj || ipod_touch_multitouch_can_queue(IPOD_TOUCH_MULTITOUCH(obj), begins, ends, moves);
 #else
     return true;
 #endif
@@ -1132,7 +1132,7 @@ static void portable_touch_bh(void *opaque)
     int slots[QEMU_IOS_PORTABLE_MAX_CONTACTS];
     int result = QEMU_IOS_OK;
     unsigned begins = 0, ends = 0;
-    bool motion = false;
+    unsigned moves = 0;
     memcpy(next, portable_contacts, sizeof(next));
     if (r->timestamp <= portable_touch_timestamp) result = QEMU_IOS_STALE;
     if (!ios.con) result = QEMU_IOS_NOT_READY;
@@ -1152,11 +1152,11 @@ static void portable_touch_bh(void *opaque)
         next[slot].id = c->contact_id; next[slot].x = c->x; next[slot].y = c->y;
         begins += c->phase == QEMU_IOS_TOUCH_BEGIN;
         ends += c->phase >= QEMU_IOS_TOUCH_END;
-        motion |= c->phase == QEMU_IOS_TOUCH_UPDATE;
+        moves += c->phase == QEMU_IOS_TOUCH_UPDATE;
     }
     if (result == QEMU_IOS_OK) {
         ios_sequence_cancel_current();
-        if (!portable_touch_capacity(begins, ends, motion)) {
+        if (!portable_touch_capacity(begins, ends, moves)) {
             result = QEMU_IOS_BUSY;
         } else {
             for (size_t i = 0; i < r->count; i++) {

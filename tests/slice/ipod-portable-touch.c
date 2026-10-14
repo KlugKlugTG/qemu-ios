@@ -32,7 +32,7 @@ struct portable_touch_request {
  QemuIosPortableContact contacts[8];
 };
 static bool capacity=true;
-static bool portable_touch_capacity(unsigned begins,unsigned ends,bool motion){return capacity;}
+static bool portable_touch_capacity(unsigned begins,unsigned ends,unsigned moves){return capacity;}
 static unsigned emits,syncs;
 static struct {int slot,phase;double x,y;} events[100];
 static void portable_emit(int slot,int phase,double x,double y) {

@@ -331,6 +331,6 @@ void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
                                       float x, float y, bool down);
 /* Internal admission check; reserves room for cancellation releases. */
 bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
-                                   unsigned begins, unsigned ends, bool motion);
+                                   unsigned begins, unsigned ends, unsigned moves);
 
 #endif
