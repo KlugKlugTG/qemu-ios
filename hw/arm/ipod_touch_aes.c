@@ -395,6 +395,22 @@ void ipod_touch_aes_set_uid_engine(bool on)
     it_aes_uid_engine = on;
 }
 
+/*
+ * aes-uid=hardware: the engine path, and the mode register (0x14) reads back.
+ * iBoot sets the mode with read-modify-write -- 7E18 writes 6, then the read
+ * | 1 (encrypt), then the read | 8 -- so with 0x14 reading 0 every request
+ * lost its encrypt bit: iBoot's UID derivation of the SHSH wrapping key (the
+ * 16-byte seed at the start of its first request) ran as a decrypt, and NORs
+ * made for that (LightTouchMac's N72NOR before the change) wrap with that key.
+ * Off for aes-uid=engine and legacy, so those images keep booting.
+ */
+static bool it_aes_mode_readback;
+
+void ipod_touch_aes_set_mode_readback(bool on)
+{
+    it_aes_mode_readback = on;
+}
+
 bool ipod_touch_aes_set_gid_blobs(const uint8_t *data, size_t size)
 {
     if (!size || size % (2 * IT_AES_GID_BLOB_SIZE)) {
@@ -437,6 +453,8 @@ static uint64_t ipod_touch_aes_read(void *opaque, hwaddr offset, unsigned size)
             return aesop->outaddr + aesop->addr_offset;
         case AES_AUXSIZE:
             return aesop->auxsize;
+        case AES_KEYLEN:
+            return it_aes_mode_readback ? aesop->keylen : 0;
       default:
             //fprintf(stderr, "%s: UNMAPPED AES_ADDR @ offset 0x%08x\n", __FUNCTION__, offset);
             break;
