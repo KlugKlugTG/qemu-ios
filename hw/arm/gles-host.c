@@ -61,18 +61,22 @@
  * glOrtho/glFrustum/glClearDepth take doubles on the desktop and floats in ES.
  * Nothing here is a reimplementation; each shim below is a rename.
  */
+#ifdef __APPLE__
 #include <TargetConditionals.h>
-#if !TARGET_OS_IPHONE
+#else
+#define TARGET_OS_IPHONE 0
+#endif
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 #include <VideoToolbox/VideoToolbox.h>
 #endif
 
-#if TARGET_OS_IPHONE || defined(GLES_HOST_ANGLE)
+#if TARGET_OS_IPHONE || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL_ES)
 #define GLES_HOST_EAGL 1
 #endif
 
 #ifdef GLES_HOST_EAGL
 
-#ifdef GLES_HOST_ANGLE
+#if defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL_ES)
 #define GL_GLES_PROTOTYPES 1
 #define GL_GLEXT_PROTOTYPES 1
 #include <GLES/gl.h>
@@ -84,7 +88,11 @@
 #define GL_UNSIGNED_SHORT_1_5_5_5_REV 0x8366
 #define GL_UNSIGNED_INT_8_8_8_8 0x8035
 #define GL_UNSIGNED_INT_8_8_8_8_REV 0x8367
+#ifdef GLES_HOST_ANGLE
 #include "gles-host-angle.c.inc"
+#else
+#include "gles-host-egl.c.inc"
+#endif
 #else
 #include <OpenGLES/ES1/gl.h>
 #include <OpenGLES/ES1/glext.h>
@@ -180,12 +188,26 @@ void gles_eagl_iosurface_unlock(void);
 
 #else /* macOS: legacy CGL */
 
+#ifdef GLES_HOST_EGL
+#define GL_GLEXT_PROTOTYPES 1
+#include <GL/gl.h>
+#include <GL/glext.h>
+#include "gles-host-egl.c.inc"
+#else
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
+#endif
 
 #define GLES_BGRA_READ_TYPE           GL_UNSIGNED_INT_8_8_8_8_REV
 
+#endif
+
+#ifdef GLES_HOST_EGL
+#include "gles-host-fence.c.inc"
+#endif
+#ifdef GLES_HOST_EGL_ES
+#include "gles-host-native.c.inc"
 #endif
 
 /* The physical LCD remains portrait. Individual CA drawables can be landscape
@@ -305,7 +327,7 @@ typedef struct {
 } GLESPVRTC;
 
 typedef struct {
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     CGLContextObj root;
 #endif
     unsigned refs;
@@ -324,7 +346,7 @@ typedef struct {
     bool failed;
     /* 0: older guest did not supply its API; 1/2: explicit GLES version. */
     uint32_t api_version;
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     CGLContextObj cgl;
 #endif
     GLuint fbo, tex, depth, sync_fbo;   /* sync_fbo: gles_surface_writeback's scratch */
@@ -545,7 +567,7 @@ static Error *gles_save_blocker;
 
 static bool gles_begin_context(void)
 {
-#ifdef GLES_HOST_EAGL
+#if defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL)
     /* The CGL backend saves live GL state (gles-host-snapshot.c.inc); the
      * iOS-host EAGL backend cannot yet. */
     if (!qatomic_read(&gles_live_contexts)) {
@@ -656,7 +678,18 @@ static inline uint64_t gles_t(void)
  * returns -1, which is the guest's cue to fall back to its software renderer.
  * A missing context is therefore never fatal to the emulator.
  */
-#if defined(GLES_HOST_ANGLE)
+#if defined(GLES_HOST_EGL)
+static bool gles_platform_context_create(void)
+{
+    if (!gles_egl_create(gh.group ? gh.group->root : NULL, gh.api_version, &gh.cgl)) return false;
+    if (gh.group && !gh.group->root) gh.group->root = CGLRetainContext(gh.cgl);
+    return true;
+}
+static void gles_platform_make_current(void) { CGLSetCurrentContext(gh.cgl); }
+static bool gles_platform_attach_iosurface(void) { return false; }
+static void *gles_platform_frame_lock(size_t *stride) { return NULL; }
+static void gles_platform_frame_unlock(void) {}
+#elif defined(GLES_HOST_ANGLE)
 
 static bool gles_platform_context_create(void)
 {
@@ -986,10 +1019,12 @@ static bool gles_host_init(void)
      * which is what it would get on the device.
      */
     glViewport(0, 0, GLES_FB_WIDTH, GLES_FB_HEIGHT);
-    glMatrixMode(GL_PROJECTION);
-    glLoadIdentity();
-    glMatrixMode(GL_MODELVIEW);
-    glLoadIdentity();
+    if (gh.api_version != 2) {
+        glMatrixMode(GL_PROJECTION);
+        glLoadIdentity();
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+    }
 
     gh.vertex.client_state   = GL_VERTEX_ARRAY;
     for (unsigned u = 0; u < GLES_MAX_TEXUNITS; u++) {
@@ -2696,7 +2731,9 @@ static void gles_debug_texture(GLenum target)
         glTexImage2D(faces == 6 ? GL_TEXTURE_CUBE_MAP_POSITIVE_X + f : target, 0, GL_RGBA,
                      1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, magenta);
     }
+#ifndef GLES_HOST_EGL_ES
     glTexParameteri(object, GL_TEXTURE_MAX_LEVEL, 0);
+#endif
     while (glGetError() != GL_NO_ERROR) {
         /* the guest's error is the refusal's, not this paint's */
     }
@@ -2712,7 +2749,7 @@ static void gles_debug_mark(void)
     if (!gles_debug) return;
     glGetIntegerv(GL_MATRIX_MODE, &mode);
     glGetIntegerv(GL_CURRENT_PROGRAM, &program);
-    glGetIntegerv(GL_MAX_TEXTURE_UNITS, &units);
+    glGetIntegerv(gh.api_version == 2 ? GL_MAX_TEXTURE_IMAGE_UNITS : GL_MAX_TEXTURE_UNITS, &units);
     glPushAttrib(GL_ENABLE_BIT | GL_CURRENT_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
                  GL_STENCIL_BUFFER_BIT | GL_TEXTURE_BIT | GL_POLYGON_BIT);
     if (program) glUseProgram(0);
@@ -3812,7 +3849,9 @@ static int64_t gles_generate_mipmap(uint32_t target)
     gles_texture_begin();
     /* The level-0 upload capped MAX_LEVEL at 0 (below); desktop GL generates and samples no level past the cap,
      * so lift it to GL's default: the chain this makes is complete. */
+#ifndef GLES_HOST_EGL_ES
     glTexParameteri(target, GL_TEXTURE_MAX_LEVEL, 1000);
+#endif
     glGenerateMipmapEXT(target);
     GLenum error = glGetError();
     if (error) {
@@ -3996,7 +4035,7 @@ static bool gles_surface_read(CPUState *cpu, uint32_t base, uint32_t stride,
     return true;
 }
 
-#ifndef GLES_HOST_EAGL
+#if defined(__APPLE__) && !defined(GLES_HOST_EAGL)
 static bool gles_surface_nv12(unsigned w, unsigned h, OSType format,
                               uint8_t *input, uint8_t *bgra)
 {
@@ -4525,7 +4564,7 @@ static int64_t gles_bind_surface(CPUState *cpu, const uint32_t *a, uint32_t id)
     if (surface->npages) {
         gles_surface_fetch(surface, pixels);    /* every page was just mapped: no fault can come */
     } else if (nv12) {
-#ifndef GLES_HOST_EAGL
+#if defined(__APPLE__) && !defined(GLES_HOST_EAGL)
         if ((w | h) & 1) {
             gles_refuse("surface:nv12:odd-size");
             gles_debug_texture(target);
@@ -4723,7 +4762,7 @@ static bool gles_refresh_surfaces_1(CPUState *cpu)
 #endif
     };
     glGetIntegerv(GL_ACTIVE_TEXTURE, &active);
-    glGetIntegerv(GL_MAX_TEXTURE_UNITS, &units);
+    glGetIntegerv(gh.api_version == 2 ? GL_MAX_TEXTURE_IMAGE_UNITS : GL_MAX_TEXTURE_UNITS, &units);
     glGetFramebufferAttachmentParameterivEXT(GL_FRAMEBUFFER_EXT,
         GL_COLOR_ATTACHMENT0_EXT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_EXT, &kind);
     if (kind == GL_TEXTURE) glGetFramebufferAttachmentParameterivEXT(GL_FRAMEBUFFER_EXT,
@@ -4801,6 +4840,9 @@ static char *gles_es2_string(CPUState *cpu, uint32_t ptr, int32_t len)
  * this they failed to compile and the game's menu buttons never drew. */
 static char *gles_es2_glsl(const char *src)
 {
+#ifdef GLES_HOST_EGL_ES
+    return g_strdup(src);
+#else
     GString *out = g_string_new("#version 120\n"
                                 "#define lowp\n#define mediump\n#define highp\n#define ES_GL_ES 1\n");
     GString *es = g_string_new(NULL);
@@ -4841,6 +4883,7 @@ static char *gles_es2_glsl(const char *src)
     }
     g_string_free(es, true);
     return g_string_free(out, false);
+#endif
 }
 
 /* In ES 2.0 a vertex shader's gl_PointSize sizes a point and gl_PointCoord is defined for it; a legacy desktop context
@@ -5864,6 +5907,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
          * share that cap, so only a face's level 0 on a fresh cube (still at
          * GL's default of 1000) resets it; face-major mip uploads keep theirs.
          */
+#ifndef GLES_HOST_EGL_ES
         {
             GLenum object = gles_texture_object(target);
             GLint cap = 0;
@@ -5874,6 +5918,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
                 glTexParameteri(object, GL_TEXTURE_MAX_LEVEL, (GLint)level);
             }
         }
+#endif
         /*
          * What actually went INTO each texture, and whether it has the mip
          * chain its filter needs. A texture that samples black takes an entire
@@ -6747,6 +6792,8 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         return gles_write_xparams(cpu, a[1], 0, 4, p);
     }
 
+#endif
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL)
     /* APPLE_fence, which the desktop has under the same names. Every engine of
      * these firmwares fills the eight; game engines fence their streamed
      * vertex buffers with them. */
@@ -7355,7 +7402,7 @@ void gles_host_set_allowed(bool allowed)
     gles_allowed = allowed;
 }
 
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
 static GHashTable *gles_contexts, *gles_groups;
 static uint32_t gles_handle = 0x80000000;
 
@@ -7481,7 +7528,7 @@ static int64_t gles_context_operation(unsigned slot, unsigned ctx, unsigned argc
 }
 
 static void gles_drop_all(void);
-#ifdef GLES_HOST_ANGLE
+#if defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
 static void gles_snapshot_register(void) {} /* migration blocker is held for live EGL state */
 #else
 #include "gles-host-snapshot.c.inc"
@@ -7512,7 +7559,7 @@ static void gles_drop_all(void)
 
 void gles_host_reset(void)
 {
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     gles_snapshot_register();
     gles_drop_all();
 #endif
@@ -7529,7 +7576,7 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
     }
 
     if (slot >= GLES_OP_NEW_SHAREGROUP && slot <= GLES_OP_DELETE_CONTEXT) {
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
         r = gles_context_operation(slot, ctx, argc, a);
         if (r < 0) gles_refuse("context:op:%u", slot);
         return r;
@@ -7537,7 +7584,7 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
         return 0; /* legacy EAGL backend, no native-context handles */
 #endif
     }
-#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE)
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     GLESHost *state = gles_contexts ? g_hash_table_lookup(gles_contexts, GUINT_TO_POINTER(ctx)) : NULL;
     if (ctx >= 0x80000000 && !state) {
         gles_refuse("context:unknown");
