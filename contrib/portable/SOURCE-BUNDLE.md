@@ -81,7 +81,24 @@ their SHA256), Python 3, Meson 1.10.0 with packaging 24.0, Ninja and pkg-config.
 ```sh
 python3 prepare-bundle-source.py . /private/writable-qemu \
   --manifest-sha256 RECEIPT_SHA256
-# Run from /private/writable-qemu; ABI is the bundle.json value.
+# Stage the included pinned release archives before invoking the builders.
+# This reads only source metadata and copies files; it does not download/build.
+python3 - . /private/writable-qemu /private/builds/deps /private/builds/crypto <<'PYSEED'
+import json
+import pathlib
+import shutil
+import sys
+bundle, source, deps, crypto = map(pathlib.Path, sys.argv[1:])
+for filename, output in [('dependencies.json', deps),
+                         ('crypto-dependencies.json', crypto)]:
+    output.mkdir(parents=True, exist_ok=False)
+    pins = json.loads((source / 'contrib/portable' / filename).read_text())
+    for package in pins['packages']:
+        archive = package['archive']
+        shutil.copyfile(bundle / 'source/dependencies' / archive, output / archive)
+PYSEED
+# ABI is the bundle.json value.
+cd /private/writable-qemu
 python3 contrib/portable/build-deps.py /private/builds/deps \
   --abi arm64-v8a --ndk /path/to/android-ndk-28.2.13676358 --meson /path/to/meson
 python3 contrib/portable/build-crypto-deps.py /private/builds/crypto \
@@ -91,8 +108,10 @@ python3 contrib/portable/build-engine.py /private/builds/engine \
   --prefix /private/builds/deps/prefix --crypto-prefix /private/builds/crypto/prefix
 ```
 
-Use `x86_64` for an x86 bundle. Seed the dependency output directories with the
-included release archives to avoid network downloads. The original generator
+Use `x86_64` for an x86 bundle. Each builder verifies the staged archive hashes
+before extraction. Use fresh output directories to preserve its configuration
+guards. `--prepare-only` verifies and extracts without compiling; the exact
+source/dependency configuration and rebuild still require separate validation. The original generator
 and selected-source audit are available in the source reference recorded in
 `bundle.json`. A rebuild embeds the new local Git identity; it is not silently
 represented as the publisher's original binary.
