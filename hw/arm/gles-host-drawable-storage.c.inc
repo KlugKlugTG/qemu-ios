@@ -74,4 +74,3 @@ static int64_t gles_drawable_storage(uint32_t width, uint32_t height)
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, framebuffer);
     return error == GL_NO_ERROR ? 0 : gles_reject(error);
 }
-
