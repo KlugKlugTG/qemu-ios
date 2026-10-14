@@ -41,6 +41,8 @@ bool s5l8930_d1815_guest_shutdown_confirmed(void);
 
 #include "qemu-ios-ui.h"
 #include "virtual-input.h"
+#include "qemu-ios-input.h"
+#include "qemu-ios-input.c.inc"
 
 static void ios_sequence_cancel_current(void);
 static bool ios_manual_touch;
@@ -370,8 +372,14 @@ bool qemu_ios_ui_storage_failed(void)
 
 void qemu_ios_ui_vm_stopped(void)
 {
+#if !defined(__APPLE__)
+    qatomic_set(&ios_vm_alive, 0);
+    ios_input_discard_pending();
+    qemu_ios_ui_cancel_input();
+#else
     qemu_ios_ui_cancel_input();
     qatomic_set(&ios_vm_alive, 0);
+#endif
     /* Also drop `attached`. It used to stay true for the life of the process,
      * so every entry point below that guarded on it kept accepting work after
      * the main loop had gone -- most damagingly snapshot_save2, which then
@@ -564,7 +572,9 @@ void qemu_ios_ui_touch(int slot, int phase, double nx, double ny)
     t->nx = nx;
     t->ny = ny;
     t->down = (phase != QEMU_IOS_TOUCH_END);
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_touch_bh, t);
+    if (!ios_input_enqueue(ios_touch_bh, t, g_free)) {
+        g_free(t);
+    }
 }
 
 /* --- hardware buttons -------------------------------------------------- */
@@ -649,7 +659,9 @@ void qemu_ios_ui_button(int button, bool down)
     b = g_new0(struct ios_button, 1);
     b->button = button;
     b->down = down;
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_button_bh, b);
+    if (!ios_input_enqueue(ios_button_bh, b, g_free)) {
+        g_free(b);
+    }
 }
 
 /* --- generic host input sequence ---------------------------------------- */
@@ -788,7 +800,9 @@ bool qemu_ios_ui_input_sequence(uint64_t id, size_t count,
         g_free(r);
         return false;
     }
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_sequence_submit_bh, r);
+    if (!ios_input_enqueue(ios_sequence_submit_bh, r, g_free)) {
+        g_free(r);
+    }
     return true;
 }
 
@@ -819,7 +833,9 @@ void qemu_ios_ui_input_sequence_cancel(uint64_t id)
     if (id && qemu_ios_ui_ready()) {
         uint64_t *copy = g_new(uint64_t, 1);
         *copy = id;
-        aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_sequence_cancel_bh, copy);
+        if (!ios_input_enqueue(ios_sequence_cancel_bh, copy, g_free)) {
+            g_free(copy);
+        }
     }
 }
 
@@ -1120,8 +1136,8 @@ static void portable_cancel_bh(void *unused) { qemu_ios_ui_cancel_input(); }
 int qemu_ios_portable_cancel_input(void)
 {
     if (!qemu_ios_ui_ready()) return QEMU_IOS_NOT_READY;
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), portable_cancel_bh, NULL);
-    return QEMU_IOS_QUEUED;
+    return ios_input_enqueue(portable_cancel_bh, NULL, NULL)
+        ? QEMU_IOS_QUEUED : QEMU_IOS_NOT_READY;
 }
 struct portable_touch_request {
     uint64_t id, timestamp; size_t count;
@@ -1185,6 +1201,15 @@ static void portable_touch_bh(void *opaque)
     qemu_mutex_unlock(&ios.frame_lock);
     g_free(r);
 }
+static void portable_touch_discard(void *opaque)
+{
+    struct portable_touch_request *r = opaque;
+    qemu_mutex_lock(&ios.frame_lock);
+    if (portable_status_id == r->id) portable_status = QEMU_IOS_NOT_READY;
+    portable_pending--;
+    qemu_mutex_unlock(&ios.frame_lock);
+    g_free(r);
+}
 int qemu_ios_portable_touch(uint64_t id, uint64_t timestamp,
                            const QemuIosPortableContact *contacts, size_t count)
 {
@@ -1196,17 +1221,26 @@ int qemu_ios_portable_touch(uint64_t id, uint64_t timestamp,
         for (size_t j = 0; j < i; j++) if (contacts[j].contact_id == c->contact_id) return QEMU_IOS_INVALID;
     }
     if (!qemu_ios_ui_ready()) return QEMU_IOS_NOT_READY;
-    ios_init_frame_lock(); qemu_mutex_lock(&ios.frame_lock);
-    if (portable_pending >= 32 || id <= portable_status_id) {
-        qemu_mutex_unlock(&ios.frame_lock); return QEMU_IOS_BUSY;
-    }
-    portable_pending++; portable_status_id = id; portable_status = QEMU_IOS_QUEUED;
-    qemu_mutex_unlock(&ios.frame_lock);
     struct portable_touch_request *r = g_new0(struct portable_touch_request, 1);
     r->id = id; r->timestamp = timestamp; r->count = count;
     memcpy(r->contacts, contacts, count * sizeof(*contacts));
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), portable_touch_bh, r);
-    return QEMU_IOS_QUEUED;
+    ios_init_frame_lock(); qemu_mutex_lock(&ios.frame_lock);
+    if (portable_pending >= 32 || id <= portable_status_id) {
+        qemu_mutex_unlock(&ios.frame_lock);
+        g_free(r);
+        return QEMU_IOS_BUSY;
+    }
+    portable_pending++; portable_status_id = id; portable_status = QEMU_IOS_QUEUED;
+    /* Admission and FIFO insertion are one transaction for concurrent callers.
+     * The drain never holds its queue mutex while invoking a callback. */
+    bool queued = ios_input_enqueue(portable_touch_bh, r, portable_touch_discard);
+    if (!queued) {
+        portable_pending--;
+        portable_status = QEMU_IOS_NOT_READY;
+    }
+    qemu_mutex_unlock(&ios.frame_lock);
+    if (!queued) g_free(r);
+    return queued ? QEMU_IOS_QUEUED : QEMU_IOS_NOT_READY;
 }
 int qemu_ios_portable_input_status(uint64_t id)
 {

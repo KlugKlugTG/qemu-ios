@@ -28,6 +28,12 @@ for arg in compile_args[1:]:
  base.append(arg)
 base.extend(['-iquote', str(src/'target/arm'),'-iquote',str(build/'arm-softmmu'),'-fPIC','-I'+str(src/'contrib/ios-app'),'-I'+str(src/'contrib/macos-app')])
 extras=(src/'contrib/macos-app/qemu-macos-extras.c').read_text().replace('#include <mach-o/loader.h>','')
+# Portable controls share admission ordering with input. The original macOS
+# source and scheduling are preserved; this affects only generated ELF extras.
+extras=extras.replace('#include "qemu-macos-extras.h"', '#include "qemu-macos-extras.h"\n#include "qemu-ios-input.h"')
+control_schedule='aio_bh_schedule_oneshot(qemu_get_aio_context(), qmp_bh, (void *)fn);'
+if extras.count(control_schedule) != 1: raise RuntimeError('Control scheduling recipe changed')
+extras=extras.replace(control_schedule, 'ios_input_enqueue(qmp_bh, (void *)fn, NULL);')
 extras=extras.replace('fn == qmp_system_reset || fn == qmp_quit || fn == qmp_system_powerdown', 'fn == qmp_stop || fn == qmp_system_reset || fn == qmp_quit || fn == qmp_system_powerdown')
 start=extras.index('const char *qemu_ios_build_id(void)');end=extras.index('/* Guest output capture',start)
 revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=src,text=True).strip()
