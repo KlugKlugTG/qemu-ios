@@ -68,7 +68,7 @@ def main():
                         continue
                     if name.is_absolute() or '..' in name.parts:
                         raise RuntimeError('Unsafe immutable source archive path')
-                    if (name.suffix.lower() in ASSET_SUFFIXES or name.parts[0] in ['manifests', 'pyvenv']
+                    if (name.suffix.lower() in ASSET_SUFFIXES or name.parts[0] == 'manifests'
                             or 'screens' in name.parts or 'screenshots' in name.parts
                             or (name.parts[0] == 'docs' and name.as_posix() not in
                                 ['docs/meson.build', 'docs/conf.py', 'docs/interop/firmware.json',
