@@ -96,7 +96,9 @@ int main(void)
     glEnableClientState(GL_VERTEX_ARRAY); glDrawArrays(GL_TRIANGLES,0,3);
     unsigned char px[4];
     glReadPixels(16,16,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
-    assert(glGetError() == GL_NO_ERROR && px[0] > 240 && px[1] < 5 && px[2] < 5 && px[3] > 240);
+    GLenum triangle_error=glGetError();
+    fprintf(stderr,"[probe] first triangle rgba=%u,%u,%u,%u error=0x%x\n",px[0],px[1],px[2],px[3],triangle_error);
+    assert(triangle_error == GL_NO_ERROR && px[0] > 240 && px[1] < 5 && px[2] < 5 && px[3] > 240);
     printf("GLES1 triangle rgba=%u,%u,%u,%u renderer=%s\n",px[0],px[1],px[2],px[3],glGetString(GL_RENDERER));
     /* ES1 texture units and client coordinate arrays exercise the CA path. */
     const GLfloat uv[]={0,0, 1,0, .5f,1};
