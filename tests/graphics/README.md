@@ -73,3 +73,10 @@ python3 tests/graphics/run-avd-probes.py \
 
 Add `--core-diagnostic` only for the experimental core/OES comparison; its
 results remain separate from the two complete production probes.
+
+`egl-combine` is a bounded raw EGL/GLES1 diagnostic using generated objects,
+OES framebuffer dispatch and two enabled texture stages. It requires the same
+magenta ADD result with active texture 0 and 1, independent of the portability
+wrappers. It cross-builds with `check.sh`; actual Android execution is pending.
+See [pinned ANGLE Android candidate](angle-android-candidate.md) for the supported
+frontend alternative and the unexecuted heavy-build recipe.
