@@ -1111,3 +1111,89 @@ guest PMU-confirmed shutdowns and durable cold-boot persistence/fsck. This
 qualifies the combined build, not an isolated FIFO binary. NAND FMC40=0xc1
 transmission and ECC/OOB routing
 remain unimplemented; this change does not claim physical restore completion.
+
+## In-emulator stock restore (2026-10-13)
+
+A stock 3.1.3 (7E18) erase restore now runs to "Status: Restore Finished" inside the emulator, from SecureROM DFU on
+a NOR with only its superblock, SysCfg and nvram, onto an empty NAND directory, in about 130 s on the Mac mini. The
+emulator formats nothing: the restore kernel finds a blank NAND, production-formats it itself (it scans for initial
+bad blocks, writes its own BBT and NANDDRIVERSIGN, VSVFL and YAFTL), takes the filesystem over asr and writes the NOR
+with the NORData images.
+
+### What it needed
+
+- FMSS, physical images only (FMSS_PHYSICAL; generated images are unchanged):
+  - BLOCK ERASE through the sequencer. The stock erase program (AppleS5L8720xFMSS, VA 0xc074d328 in 7E18) selects the
+    chip in FMCTRL0, sends 0x60, the row in FMADDR0 (0x0C) and 0xD0, one block per D10 chip index and D0C row
+    entry, and counts D18 down in place (sequencer stores to D18 are now kept). fmss_run_script erases the block
+    in the overlay on the 0x60/0xD0 pair; FMSS_ERASE's inferred erase is not needed.
+  - CSSTATUS (0xC30) bit 29, clean, for the program run whose read found only erased pages. The driver checks
+    `status & 0x2000ffff == 0x20000000` and returns a blank page (0xc0743c78). The status belongs to that run:
+    left set until the next read, a following write or erase run read it as clean and the restore stopped at
+    "nand status = failed" (wait_for_storage_device).
+- No new host protocol code. Host side: upstream idevicerestore (4b3e847) linked against the libirecovery QEMU
+  transport and usb_recovery_bridge.py from the retired tree (git 5508b504b8), and the usbmuxd fork for restore mode.
+  The run script lives outside the repo.
+- Personalization: idevicerestore asks Apple's TSS for 3.x (build major <= 8 looks for a local record first).
+  A local SHSH record that is an empty dictionary (`cache/shsh/<ecid>-iPod2,1-3.1.3.shsh`) makes it send every
+  component unpersonalized ("Not personalizing component ..."). The emulated SecureROM 240.4, iBSS and the restore
+  kernel accept the stock IPSW signatures; no forge-sigcheck and no image changes.
+
+### The restored NAND's layout (as the 3.1.3 driver formats it)
+
+| what | where |
+|---|---|
+| NANDDRIVERSIGN, `411C`, length 0x108, spare meta `6BITMAXECC` | CE0 block 4091, all 128 pages |
+| DEVICEINFOBBT, length 0x200, bitmap `fe ff ...` (block 0 reserved) | two blocks per CE: 4094 and 4095 (CE1: 4092/4093 in one run, 4089/4090 in an inferred-erase run) |
+
+FirmwareKit's N72NAND keeps its own layout (signature on CE0 block 4095 page 0, a header-only BBT on page 1 of
+block 4095 of every CE). Nothing in the emulator formats a NAND any more, so there is no second layout to keep
+consistent, and prepared devices are untouched. The shared block only matters on a physical image that meets a
+NAND epoch update (the driver erases the whole signature block); generated images never erase.
+
+### Cold boot of the restored device: blocked on the UID key direction
+
+The restore wrote every NOR image (LLB included) with its SHSH wrapped under key 0x89a. The restore kernel derives
+that key with an AES engine operation of mode 0xf on the UID (encrypt in the model); the SecureROM, LLB and iBoot
+derive it with mode 0x8 (decrypt in the model). The two keys differ, so the SecureROM rejects the restored LLB and
+stops at 0x3186 with nothing on the serial port. FirmwareKit's NOR builder derives with decrypt, matching the boot
+chain, which is why prepared devices boot.
+
+With an uncommitted experiment in which every UID operation encrypts (Martijn de Vos's finding for the hardware),
+the same restored NOR and NAND boot: SecureROM unwraps and decrypts the LLB, LLB the iBoot, iBoot prints
+`read new style signature 0x43313134`, VFL_Open and FTL_Open [OK], mounts the restored HFS and loads the kernel.
+The kernel reaches userland: the message buffer shows the USB functions registered, Wi-Fi joined `qemu-ios`,
+repeated `AppleMBXDevice: Graphics Recovery Event` and then system sleep, where it spins with interrupts masked in
+the S5L8900X I2C controller's polled write (`[base+0x10] != 0`, VA 0xc0567e2c). The screen stays black.
+
+So a restored device reaching Home needs, in order:
+1. The UID direction decided in hw/arm/ipod_touch_aes.c (another agent's area). If the hardware always encrypts with
+   the UID, FirmwareKit's N72NOR key derivation (decrypt, N72NOR.swift:42) has to change with it, and existing
+   prepared NORs need their SHSH rewrapped or a migration; the 0x220100ac/0x0bf08468/0x0fb9bcdc "preserve" addresses
+   in the custom-key path are tied to the old NOR format too.
+2. MBX 2D for stock SpringBoard (prepared devices set LK_ENABLE_MBX2D=0; a restored system has the stock
+   environment), the MBX model work.
+3. The I2C controller's polled path used on the way into sleep (or a first boot that does not idle into sleep).
+
+### 2.1.1 and 4.2.1
+
+- 5F138: upstream idevicerestore refuses an IPSW without a BuildManifest. LukeZGD's fork (5ea1b08) sends iBSS and the
+  25 MB restore ramdisk, then fails to upload the DeviceTree ("Unable to upload data to device"); the bridge logs
+  USB timeouts. This is the 2.x iBSS recovery-USB stall recorded above, not NAND.
+- 8C148: with the same empty SHSH record the SecureROM does not leave DFU after the unpersonalized stock iBSS
+  (no serial output, PID stays 1227, "Device did not reconnect in recovery mode"). Not investigated further: whether
+  the 240.4 ROM requires a personalized 4.x iBSS or the emulated ROM path misses something is open.
+
+### Run log (Mac mini, ~/ltm-runner/n72r, 2026-10-13)
+
+| run | binary | NAND mode | result |
+|---|---|---|---|
+| b0 | main | physical + FMSS_ERASE (inferred erase), C30 = 1 | 7E18 Restore Finished, 142 s; cold boot stops in the SecureROM at 0x3186 |
+| r1 | erase + clean status left set | physical | "nand status = failed" |
+| r2 | erase, clean status off | physical | Restore Finished, 127 s; AES trace: kernel derives with mode 0xf, ROM with 0x8 |
+| r3, r4 | this branch | physical | Restore Finished, 165 s and 130 s |
+| r4 cold boot | this branch + UID-encrypt experiment | physical | SecureROM, LLB, iBoot, kernel, userland; black screen, MBX recovery events, sleep, I2C spin |
+| 5F138 | this branch, LukeZGD fork | physical | DeviceTree upload fails after the ramdisk (2.x iBSS USB) |
+| 8C148 | this branch | physical | SecureROM stays in DFU after iBSS |
+
+Regression: `sessions single` n72ap-7E18 19/19 and n18ap-9B206-dev 17/17 with this branch's dylib.
