@@ -42,9 +42,11 @@ static void ios_sequence_cancel_current(void);
 static bool ios_manual_touch;
 static bool ios_manual_touch2;
 static bool portable_has_gyro;
+static void portable_release_all(void);
 static void ios_sequence_reset(void *opaque)
 {
     ios_sequence_cancel_current();
+    portable_release_all();
 }
 #include "hw/arm/ipod_touch_pcf50633_pmu.h"
 #include "hw/arm/ipod_touch_lcd.h"
@@ -354,7 +356,7 @@ bool qemu_ios_ui_storage_failed(void)
 
 void qemu_ios_ui_vm_stopped(void)
 {
-    ios_sequence_cancel_current();
+    qemu_ios_ui_cancel_input();
     qatomic_set(&ios_vm_alive, 0);
     /* Also drop `attached`. It used to stay true for the life of the process,
      * so every entry point below that guarded on it kept accepting work after
@@ -701,7 +703,6 @@ void qemu_ios_ui_manual_touch2(bool down)
     ios_manual_touch2 = down;
 }
 
-static void portable_release_all(void);
 void qemu_ios_ui_cancel_input(void)
 {
     ios_sequence_cancel_current();

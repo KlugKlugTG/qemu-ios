@@ -82,7 +82,7 @@ python = import('python').find_installation()
 cc = meson.get_compiler('c')
 all_languages = ['c']
 # Darwin's guest GL executor uses Imagination's reference PVRTC decoder.
-enable_cpp = host_os in ['windows', 'darwin'] or get_option('plugins')
+enable_cpp = host_os in ['windows', 'darwin', 'linux'] or get_option('plugins')
 if enable_cpp and add_languages('cpp', required: host_os == 'darwin', native: false)
   all_languages += ['cpp']
   cxx = meson.get_compiler('cpp')
