@@ -8,6 +8,9 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
+#if defined(__ANDROID__) && defined(GLES_HOST_EGL_ES)
+#include "gles-host-driver.c.inc"
+#endif
 
 typedef struct GLESEGLTexture {
     unsigned name, native_name, width, height, target, refs;
@@ -85,6 +88,9 @@ static void CGLReleaseContext(CGLContextObj c)
 }
 static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *out)
 {
+#if defined(__ANDROID__) && defined(GLES_HOST_EGL_ES)
+    if (!gles_driver_prepare()) return false;
+#endif
 #ifdef GLES_HOST_EGL_ES
     EGLenum client = EGL_OPENGL_ES_API;
     EGLint renderable = EGL_OPENGL_ES_BIT | EGL_OPENGL_ES2_BIT;
@@ -98,7 +104,11 @@ static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *ou
         if (get) gles_egl_display = get(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
 #endif
         if (gles_egl_display == EGL_NO_DISPLAY)
+#if defined(__ANDROID__) && defined(GLES_HOST_EGL_ES)
+            gles_egl_display = gles_driver_display();
+#else
             gles_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+#endif
         EGLint config[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
             EGL_RENDERABLE_TYPE, renderable, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
             EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE};

@@ -1,6 +1,7 @@
 # Pinned Android ANGLE candidate
 
-This is a proposed, unbuilt fallback. The physical Poco native path remains the
+The pinned x86_64 GLES backend now builds and passes ELF closure inspection;
+runtime graphics remain unqualified. The physical Poco native path remains the
 default. Do not qualify ANGLE until its actual Bionic libraries execute the full
 adapter probes and required guest workloads in the packaged worker on both AVD
 page sizes.
@@ -64,8 +65,10 @@ NEW_PRIVATE_INVENTORY.json` to record retained license files, notices and
 Chromium dependency metadata with hashes. Preserve this checkout as the
 corresponding-source input and inspect the libraries' actual linked dependency
 closure before distribution. The inventory does not decide license
-compatibility. Source acquisition is underway; GN generation, dependency hooks
-and linking remain unverified. Public Android dependencies and build outputs
+compatibility. The actual fetch, dependency hooks, pinned GN generation and
+two-job library link completed on 2026-10-14. The depot_tools GN wrapper first
+failed its bootstrap-path lookup before compilation; the recipe now uses the
+pinned `buildtools/linux64/gn` executable directly. Public Android dependencies and build outputs
 require substantial disk space; keep them outside Git.
 
 The [official Android setup](https://chromium.googlesource.com/angle/angle/+/8cd050f07ebd65cce269fc92e36699fc03b20ac3/doc/DevSetupAndroid.md)
@@ -75,6 +78,13 @@ revision `e60c669a94848d832d714025154f2ba1c37450df`
 sets 16 KiB max-page-size for 64-bit CPUs. Inspect actual ELF LOAD alignment and
 the complete dependency closure anyway; the build receipt records revisions,
 GN arguments and library hashes.
+
+`inspect-angle-android.py` verified the actual three x86_64 objects' SONAMEs,
+16 KiB LOAD alignment and offset/address congruence. GLESv1_CM needs the suffixed
+GLESv2 object; EGL's wrapper loads that same suffixed GLESv2 implementation.
+The remaining DT_NEEDED objects are public Android libc, libdl, libm, liblog and
+libnativewindow. No extra C++ runtime is required by this build. This is ELF
+evidence; APK ZIP alignment, app-UID loading and actual rendering remain open.
 
 ## Bionic worker integration and validation
 
@@ -107,16 +117,23 @@ python3 tests/graphics/inventory-native-entrypoints.py \
   --check tests/graphics/native-entrypoints.json
 ```
 
-The loader must maintain separate API1/API2 function tables: shared names such
-as `glGetString`, `glDrawArrays` and `glBindTexture` must resolve through the
-selected API's library, while fixed-function calls use GLESv1_CM and shader
-calls use GLESv2. Resolve table addresses before redefining raw calls, then
-include dispatch beneath the existing portability wrappers so wrapper-internal
-calls also use the selected provider. Core framebuffer calls remain API2-only;
-API1 OES addresses come from that provider's `eglGetProcAddress` and retain the
-existing advertised-extension checks. A missing required address must fail
-renderer setup explicitly. Keep all three library handles alive until the last
-context is released, and require a fresh worker to change providers.
+The implemented Android loader uses public EGL exports from the suffixed EGL
+library and resolves all GL functions through that provider's public
+`eglGetProcAddress`. ANGLE's API1 and API2 functions use its shared GLESv2
+implementation, selected by the actual current EGL context. The actual ELF
+exports and pinned public resolver table support that boundary. The loader
+checks every resolved address owner with `dladdr`; it never resolves a private
+prefixed function name. Dispatch sits beneath portability wrappers so their
+internal calls also use the selected provider. Core framebuffer calls remain
+API2-only; API1 OES calls retain the advertised-extension guard. Missing required
+addresses or wrong owners fail setup. All three handles remain alive for the
+worker's lifetime. A provider change requires a fresh worker.
+
+Set `LIGHTTOUCH_GLES_PROVIDER=angle-gl` before context creation to select the
+candidate. `platform` is the default, retaining native Android/Poco behavior.
+`angle-vulkan` explicitly requests a separately built Vulkan candidate; this GL
+build cannot silently substitute another provider. Packaged-worker selection
+must happen before guest startup and still requires product integration.
 
 Public-table dispatch prevents a direct call from accidentally reaching system
 EGL/GLES, but transitive symbol binding inside the candidate libraries still
@@ -124,7 +141,8 @@ needs inspection. Record each object's `DT_NEEDED`, exported symbols and the
 actual library owner of resolved addresses; do not rely on a filename suffix or
 assume `RTLD_LOCAL` alone prevents interposition. Validate in the app worker after
 system graphics libraries have loaded, including cross-version texture sharing
-and teardown. This loader is a plan; no production ANGLE dispatch has been added.
+and teardown. The source loader is implemented and cross-builds on both Android
+ABIs, but its runtime address checks and rendering are not yet qualified.
 
 Choose the backing renderer explicitly through ANGLE's public
 `eglGetPlatformDisplayEXT(EGL_PLATFORM_ANGLE_ANGLE, ...)`, with
