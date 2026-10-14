@@ -37,7 +37,7 @@ with tempfile.TemporaryDirectory(prefix='portable-crypto-') as temp:
     subprocess.run([argv[0]] + flags + sanitize + ['-c', str(src / 'crypto/aes.c'),
                    '-o', str(obj)], cwd=build, check=True)
     pkg = shlex.split(subprocess.check_output(
-        ['pkg-config', '--cflags', '--libs', 'libgcrypt', 'openssl'], text=True))
+        ['pkg-config', '--static', '--cflags', '--libs', 'libgcrypt', 'openssl'], text=True))
     exe = pathlib.Path(temp) / 'check'
     subprocess.run([argv[0], '-std=gnu11', '-Wno-deprecated-declarations',
                     '-I' + str(src / 'include')] + sanitize +

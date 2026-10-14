@@ -48,6 +48,11 @@ with its Mach-O image identity replaced by a compiled Git revision; its pause
 handler also cancels live host input. ELF exports only `qemu_ios_*`. Inspect
 `readelf -d libqemu-arm.so` before packaging, including any NDK C++ runtime.
 `portable-link.json` records the exact final link arguments.
+`audit-selected-sources.py BUILD` inventories linked source notices and Ninja's
+actual included headers against the immutable manifest revision. It reports
+SPDX terms and text review candidates, including missing or ambiguous notices;
+it does not give a legal verdict. The shared manifest also resolves and hashes
+libraries named through `-l` flags.
 
 The portable recipe selects QEMU's existing public-domain AES implementation
 for the Apple AES model and pinned libgcrypt MPI for its signed Montgomery PKE

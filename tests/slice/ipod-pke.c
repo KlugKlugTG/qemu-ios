@@ -3,6 +3,7 @@
  * SLICE hw/arm/ipod_touch_pke.c range static const uint8_t sha1_digestinfo | static const MemoryRegionOps
  * PKG openssl
  * PKG libgcrypt
+ * PKG gpg-error
  * CFLAGS -I$ROOT/include
  * VARIANT
  * VARIANT -DQEMU_IOS_PORTABLE_CRYPTO
