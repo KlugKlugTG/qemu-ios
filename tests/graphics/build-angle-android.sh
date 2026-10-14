@@ -86,7 +86,7 @@ cat > "$ANGLE_OUT/args.gn" <<GN
 GN
 if [ "$ANGLE_CPU" = arm64 ]; then echo 'arm_control_flow_integrity = "none"' >> "$ANGLE_OUT/args.gn"; fi
 # This pin's Android build dependency sets 16384 max-page-size for 64-bit CPUs.
-gn gen "$ANGLE_OUT" --fail-on-unused-args
+"$ANGLE_DEST/angle/buildtools/linux64/gn" gen "$ANGLE_OUT" --fail-on-unused-args
 "$ANGLE_NINJA" -C "$ANGLE_OUT" -j"$ANGLE_JOBS" libEGL libGLESv1_CM libGLESv2
 python3 - "$ANGLE_OUT" <<'PY'
 import hashlib,json,pathlib,subprocess,sys
@@ -95,6 +95,9 @@ libraries=[out/f'lib{name}_lighttouch_angle.so' for name in ['EGL','GLESv1_CM','
 receipt={'angle':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
          'build':subprocess.check_output(['git','-C','build','rev-parse','HEAD'],text=True).strip(),
          'args_gn':(out/'args.gn').read_text(),
+         'source_receipt_sha256':hashlib.sha256(pathlib.Path('../source-receipt.txt').read_bytes()).hexdigest(),
+         'clang_version':subprocess.check_output(['third_party/llvm-build/Release+Asserts/bin/clang','--version'],text=True).strip(),
+         'gn_version':subprocess.check_output(['buildtools/linux64/gn','--version'],text=True).strip(),
          'libraries':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in libraries}}
 (out/'lighttouch-angle-receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
 print(json.dumps(receipt,indent=2))

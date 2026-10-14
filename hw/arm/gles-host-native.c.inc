@@ -318,12 +318,19 @@ static void gles_native_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h,
     free(copy);
 }
 static GLenum gles_native_driver_error(void) { return glGetError(); }
+#undef glGetError
 #define glGetError gles_native_get_error
+#undef glPixelStorei
 #define glPixelStorei gles_native_pixel_store
+#undef glTexImage2D
 #define glTexImage2D gles_native_tex_image
+#undef glTexSubImage2D
 #define glTexSubImage2D gles_native_tex_sub_image
+#undef glReadPixels
 #define glReadPixels gles_native_read_pixels
+#undef glCopyTexImage2D
 #define glCopyTexImage2D gles_native_copy_tex_image
+#undef glCopyTexSubImage2D
 #define glCopyTexSubImage2D gles_native_copy_tex_sub_image
 
 /* ES1 FBO extensions are loaded via EGL, ES2 uses core dispatch. */
@@ -574,38 +581,70 @@ static void gles_native_GetFramebufferAttachmentParameteriv(GLenum target, GLenu
 #define glGetRenderbufferParameterivOES gles_native_GetRenderbufferParameteriv
 #define glGetFramebufferAttachmentParameterivOES gles_native_GetFramebufferAttachmentParameteriv
 
+#undef glIsFramebuffer
 #define glIsFramebuffer gles_native_IsFramebuffer
+#undef glIsRenderbuffer
 #define glIsRenderbuffer gles_native_IsRenderbuffer
+#undef glGenerateMipmap
 #define glGenerateMipmap gles_native_GenerateMipmap
+#undef glGenFramebuffers
 #define glGenFramebuffers gles_native_GenFramebuffers
+#undef glBindFramebuffer
 #define glBindFramebuffer gles_native_BindFramebuffer
+#undef glFramebufferTexture2D
 #define glFramebufferTexture2D gles_native_FramebufferTexture2D
+#undef glGenRenderbuffers
 #define glGenRenderbuffers gles_native_GenRenderbuffers
+#undef glBindRenderbuffer
 #define glBindRenderbuffer gles_native_BindRenderbuffer
+#undef glRenderbufferStorage
 #define glRenderbufferStorage gles_native_RenderbufferStorage
+#undef glFramebufferRenderbuffer
 #define glFramebufferRenderbuffer gles_native_FramebufferRenderbuffer
+#undef glCheckFramebufferStatus
 #define glCheckFramebufferStatus gles_native_CheckFramebufferStatus
+#undef glDeleteFramebuffers
 #define glDeleteFramebuffers gles_native_DeleteFramebuffers
+#undef glDeleteRenderbuffers
 #define glDeleteRenderbuffers gles_native_DeleteRenderbuffers
+#undef glGetRenderbufferParameteriv
 #define glGetRenderbufferParameteriv gles_native_GetRenderbufferParameteriv
+#undef glGetFramebufferAttachmentParameteriv
 #define glGetFramebufferAttachmentParameteriv gles_native_GetFramebufferAttachmentParameteriv
 
+#undef glGenTextures
 #define glGenTextures gles_native_gen_textures
+#undef glIsTexture
 #define glIsTexture gles_native_is_texture
+#undef glBindTexture
 #define glBindTexture gles_native_bind_texture
+#undef glDeleteTextures
 #define glDeleteTextures gles_native_delete_textures
+#undef glGetIntegerv
 #define glGetIntegerv gles_native_get_integer
+#undef glGetFloatv
 #define glGetFloatv gles_native_get_float
+#undef glIsEnabled
 #define glIsEnabled gles_native_is_enabled
+#undef glEnable
 #define glEnable gles_native_enable
+#undef glDisable
 #define glDisable gles_native_disable
+#undef glTexParameteri
 #define glTexParameteri gles_native_glTexParameteri
+#undef glTexParameterf
 #define glTexParameterf gles_native_glTexParameterf
+#undef glTexParameteriv
 #define glTexParameteriv gles_native_glTexParameteriv
+#undef glTexParameterfv
 #define glTexParameterfv gles_native_glTexParameterfv
+#undef glGetTexParameteriv
 #define glGetTexParameteriv gles_native_glGetTexParameteriv
+#undef glGetTexParameterfv
 #define glGetTexParameterfv gles_native_glGetTexParameterfv
+#undef glDrawArrays
 #define glDrawArrays gles_native_draw_arrays
+#undef glDrawElements
 #define glDrawElements gles_native_draw_elements
 
 /* DrawTex uses window coordinates, current color and per-unit crop rectangles.
