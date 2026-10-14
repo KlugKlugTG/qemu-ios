@@ -682,6 +682,13 @@ static inline uint64_t gles_t(void)
 static bool gles_platform_context_create(void)
 {
     if (!gles_egl_create(gh.group ? gh.group->root : NULL, gh.api_version, &gh.cgl)) return false;
+#ifdef GLES_HOST_EGL_ES
+    if (!gles_native_require_fbo()) {
+        CGLReleaseContext(gh.cgl);
+        gh.cgl=NULL;
+        return false;
+    }
+#endif
     if (gh.group && !gh.group->root) gh.group->root = CGLRetainContext(gh.cgl);
     return true;
 }
@@ -1500,26 +1507,21 @@ static void gles_draw_tex(float x, float y, float z, float w, float h)
     glPopAttrib();
 #else
 #ifdef GLES_HOST_EGL_ES
-    typedef void (*DrawTex)(GLfloat,GLfloat,GLfloat,GLfloat,GLfloat);
-    static DrawTex draw;
-    if (!draw) draw=(DrawTex)eglGetProcAddress("glDrawTexfOES");
-    if (gh.api_version == 2 || !draw) {
-        gles_refuse("drawtex:host-unavailable");
-        gles_native_error(GL_INVALID_OPERATION);
-        return;
-    }
+    GLint crop[GLES_MAX_TEXUNITS][4]={0};
+    bool has_crop[GLES_MAX_TEXUNITS]={0};
     GLint active, units;
     glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
     glGetIntegerv(GL_MAX_TEXTURE_UNITS,&units);
-    for (unsigned u=0;u<GLES_MAX_TEXUNITS && u<units;u++) {
-        GLint texture;
-        glActiveTexture(GL_TEXTURE0+u);
-        glGetIntegerv(GL_TEXTURE_BINDING_2D,&texture);
-        GLint *crop=gh.crop ? g_hash_table_lookup(gh.crop,GUINT_TO_POINTER(texture)) : NULL;
-        if (crop) glTexParameteriv(GL_TEXTURE_2D,GL_TEXTURE_CROP_RECT_OES,crop);
+    for (unsigned unit=0;unit<GLES_MAX_TEXUNITS && unit<(unsigned)units;unit++) {
+        glActiveTexture(GL_TEXTURE0+unit);
+        GLint texture; glGetIntegerv(GL_TEXTURE_BINDING_2D,&texture);
+        const GLint *rect=gh.crop ? g_hash_table_lookup(gh.crop,GUINT_TO_POINTER(texture)) : NULL;
+        if (rect) { memcpy(crop[unit],rect,sizeof(crop[unit])); has_crop[unit]=true; }
     }
     glActiveTexture(active);
-    draw(x,y,z,w,h);
+    if (!gles_native_draw_tex(x,y,z,w,h,crop,has_crop,GLES_MAX_TEXUNITS))
+        gles_refuse("drawtex:host-error");
+
 #else
     (void)x; (void)y; (void)z; (void)w; (void)h;
 #endif

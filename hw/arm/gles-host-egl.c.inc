@@ -9,11 +9,23 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+typedef struct GLESEGLTexture {
+    unsigned name, width, height;
+    struct GLESEGLTexture *next;
+} GLESEGLTexture;
+typedef struct GLESEGLTextures {
+    unsigned refs;
+    GLESEGLTexture *head;
+} GLESEGLTextures;
+
 typedef struct GLESEGLContext {
     EGLContext context;
     EGLSurface surface;
     unsigned refs, api;
     unsigned unpack_alignment, unpack_row_length, errors;
+    bool fbo_checked, fbo_supported;
+    GLESEGLTextures *textures;
+    GLESEGLTexture default_texture;
 } *CGLContextObj;
 static EGLDisplay gles_egl_display = EGL_NO_DISPLAY;
 static EGLConfig gles_egl_config;
@@ -39,6 +51,11 @@ static void CGLReleaseContext(CGLContextObj c)
     if (gles_egl_current == c) CGLSetCurrentContext(NULL);
     eglDestroyContext(gles_egl_display, c->context);
     eglDestroySurface(gles_egl_display, c->surface);
+    if (!--c->textures->refs) {
+        GLESEGLTexture *texture=c->textures->head;
+        while (texture) { GLESEGLTexture *next=texture->next; free(texture); texture=next; }
+        free(c->textures);
+    }
     free(c);
 }
 static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *out)
@@ -80,6 +97,9 @@ static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *ou
     if (!c) return false;
     c->refs = 1;
     c->unpack_alignment = 4;
+    c->textures=share ? share->textures : calloc(1,sizeof(*c->textures));
+    if (!c->textures) { free(c); return false; }
+    c->textures->refs++;
     c->api = api == 2 ? 2 : 1;
     c->context = eglCreateContext(gles_egl_display, gles_egl_config,
                                  share ? share->context : EGL_NO_CONTEXT, context);
@@ -88,6 +108,7 @@ static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *ou
         fprintf(stderr, "[gles-egl] create api=%u failed: 0x%x\n", c->api, eglGetError());
         if (c->context != EGL_NO_CONTEXT) eglDestroyContext(gles_egl_display, c->context);
         if (c->surface != EGL_NO_SURFACE) eglDestroySurface(gles_egl_display, c->surface);
+        if (!--c->textures->refs) free(c->textures);
         free(c);
         return false;
     }
