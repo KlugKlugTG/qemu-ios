@@ -76,6 +76,25 @@ require a fresh destination. No private build paths or guest assets enter the
 bundle. These notice assets do not replace corresponding source, applicable
 static LGPL relinking material or complete application distribution review.
 
+Create a local corresponding-source and static relink bundle for a completed
+Bionic engine with matching notices:
+
+```sh
+python3 contrib/portable/package-source.py /private/builds/arm64-v8a \
+  /private/generated/source-arm64 \
+  --deps /private/builds/deps-arm64 --crypto-deps /private/builds/crypto-arm64 \
+  --notices /private/generated/engine-notices-arm64 --ndk "$ANDROID_NDK_ROOT" \
+  --source-reference "https://github.com/blake-lucas/qemu-ios/tree/COMMIT"
+python3 /private/generated/source-arm64/relink-bundle.py \
+  /private/generated/source-arm64
+```
+
+`SOURCE-BUNDLE.md` documents validation against the publisher's receipt,
+original/replacement-library relinking and rebuilding the filtered source.
+No guest input is read, and no upload occurs. Original object debug metadata
+retains compiler/build paths; textual bundle receipts use portable paths.
+Only an actual executed relink/rebuild validates those respective operations.
+
 The portable recipe selects QEMU's existing public-domain AES implementation
 for the Apple AES model and pinned libgcrypt MPI for its signed Montgomery PKE
 operations. The original macOS OpenSSL implementation remains selected without
