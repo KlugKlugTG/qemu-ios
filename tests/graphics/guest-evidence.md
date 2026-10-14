@@ -25,6 +25,24 @@ replacement/activity recreation, orderly stop and a fresh worker restart.
 The real guest's required multi-contact input and concurrent render/audio
 behavior remain part of integration validation; gyro is deferred/unqualified.
 
+For a black or transparent image, set `IT_GLES_FRAME_METRICS=1` before starting
+the engine in a bounded diagnostic run. The first successfully copied frame
+and every sixtieth frame report their actual drawable FBO, guest destination
+base, copy path, dimensions/stride, source format, exact nonzero RGB/alpha and
+opaque pixel counts, mean RGBA and canonical RGBA hash. RGB565 has implicit
+alpha, explicitly identified in the log. Metrics read only the buffer actually
+copied, exclude padding and use the accepted dimensions. They make no GL calls,
+consume no GL errors and modify no pixels. Existing verbose/profiling runs also
+include these bounded metrics.
+
+Match those lines to the real guest's copied frame and Surface frame, retaining
+LCD scanout/base, backlight/frontmost state and command errors. Nonzero RGB with
+zero alpha is different evidence from black RGB with opaque alpha. These metrics
+describe copied bytes; they do not assert successful GL readback, CA composition
+or visible presentation. Check the real command/error receipt as well. The old
+progress mean sampled the reusable readback as a full RGBA drawable even for
+RGB565, cropped or direct IOSurface copies; that sample has been removed.
+
 GLES2 needs an actual admitted guest/workload that compiles and executes shader
 commands, not the standalone host GLES2 triangle. The supplied n81 route may be
 used where appropriate with its prepared kernel/NAND/NOR and matching package;
@@ -68,8 +86,11 @@ llvm-readelf -l -d EXTRACTED_SHARED_LIBRARY.so
 
 Retain a package report with APK/library hashes and source/build revisions, then
 load and run the actual engine in the packaged app on the physical arm64 phone,
-4 KiB x86_64 AVD and 16 KiB x86_64 AVD. The currently promising host/Mesa AVD
-mode requires an isolated X display in a headless environment; supported mode
-selection alone does not qualify the full renderer or guest. The scoped probe
+4 KiB x86_64 AVD and 16 KiB x86_64 AVD. The native AVD GLES1 translator failed
+required FBO or texture-stage behavior. The pinned ANGLE frontend now passes
+full shell probes on both sizes using host/Mesa backing, which requires an
+isolated X display; inspected Android UI captures still failed usability.
+Actual packaged-worker validation needs an explicit supported GLES3 backing
+driver and real guest frames. The scoped probe
 runner verifies frozen hashes and final markers on an already allocated AVD;
 root still owns allocation, package install, phone access and integration runs.

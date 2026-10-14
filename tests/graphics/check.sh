@@ -4,6 +4,8 @@ set -eu
 cd "$(dirname "$0")/../.."
 output=${1:?Usage: tests/graphics/check.sh OUTPUT_DIRECTORY [NDK_DIRECTORY]}
 mkdir -p "$output"
+cc -Wall -Wextra -Werror tests/graphics/frame-pixels.c -o "$output/frame-pixels"
+"$output/frame-pixels"
 cc -Wall -Wextra tests/graphics/egl-render.c -o "$output/egl-desktop" $(pkg-config --cflags --libs egl gl)
 LIBGL_ALWAYS_SOFTWARE=1 "$output/egl-desktop"
 cc -Wall -Wextra -Wno-unused-function -DGLES_HOST_EGL_ES tests/graphics/egl-pixels.c -o "$output/egl-pixels" $(pkg-config --cflags --libs egl glesv2 glesv1_cm)
