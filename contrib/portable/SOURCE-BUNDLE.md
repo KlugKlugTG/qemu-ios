@@ -56,21 +56,23 @@ available names. The original engine objects stay available so replacement
 does not require rebuilding application code. Replacement results need actual
 target testing; a successful link alone does not establish compatibility.
 
-To rebuild the engine source, copy `source/qemu` into a writable checkout and
-unpack `dtc-source.tar` into its `subprojects/dtc/` directory. Its files match the
-pinned libfdt commit. The filtered source archive excludes nonbuild assets, so
+To rebuild the engine source, prepare a writable checkout with the validated
+helper below. It unpacks the pinned libfdt source and disables installation of
+unrelated firmware blobs omitted from this bundle. That installation option
+does not change the selected engine object code. Actual configure/rebuild
+validation remains required before claiming a reproduced build. The filtered
+source archive excludes nonbuild assets and research captures, so
 its new local Git tree/identity differs from the original full upstream commit;
 `bundle.json` records the original corresponding source revision and every
-included file hash. Initialize a clean local Git commit for the preserved
-build guard. Use the original pinned dependency archives (the builders verify
+included file hash. The helper initializes a clean local commit for the build
+guard and reports the installation-only recipe adjustment. Use the original
+pinned dependency archives (the builders verify
 their SHA256), Python 3, Meson 1.10.0 with packaging 24.0, Ninja and pkg-config.
 
 ```sh
-git init source/qemu
-git -C source/qemu add .
-git -C source/qemu -c user.name=Builder -c user.email=builder@example.invalid \
-  commit -m 'Import corresponding portable engine source'
-# Run from the writable source/qemu copy; ABI is the bundle.json value.
+python3 prepare-bundle-source.py . /private/writable-qemu \
+  --manifest-sha256 RECEIPT_SHA256
+# Run from /private/writable-qemu; ABI is the bundle.json value.
 python3 contrib/portable/build-deps.py /private/builds/deps \
   --abi arm64-v8a --ndk /path/to/android-ndk-28.2.13676358 --meson /path/to/meson
 python3 contrib/portable/build-crypto-deps.py /private/builds/crypto \
