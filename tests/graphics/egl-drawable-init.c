@@ -37,15 +37,16 @@ static bool checked(const char *stage)
 
 int main(int argc,char **argv)
 {
-    bool generated=false,clamp=false,separate=false;
+    bool generated=false,clamp=false,separate=false,separate24=false;
     unsigned width=320,height=480;
     for (int n=1;n<argc;n++) {
         if (!strcmp(argv[n],"--generated")) generated=true;
         else if (!strcmp(argv[n],"--clamp")) clamp=true;
         else if (!strcmp(argv[n],"--separate")) separate=true;
+        else if (!strcmp(argv[n],"--separate24")) separate=separate24=true;
         else if (!strcmp(argv[n],"--size=32x32")) width=height=32;
         else if (!strcmp(argv[n],"--size=320x480")) { width=320;height=480; }
-        else { fprintf(stderr,"usage: egl-drawable-init [--size=32x32|--size=320x480] [--generated] [--clamp] [--separate]\n"); return 64; }
+        else { fprintf(stderr,"usage: egl-drawable-init [--size=32x32|--size=320x480] [--generated] [--clamp] [--separate|--separate24]\n"); return 64; }
     }
     setbuf(stderr,NULL);signal(SIGALRM,expired);signal(SIGSEGV,expired);signal(SIGABRT,expired);alarm(20);
     CGLContextObj context=NULL;
@@ -64,7 +65,7 @@ int main(int argc,char **argv)
     const char *extensions=(const char *)glGetString(GL_EXTENSIONS);
     fprintf(stderr,"[drawable-init] size=%ux%u names=%s wrap=%s depth=%s renderer=%s version=%s\n",
             width,height,generated?"generated":"private",clamp?"clamp":"default-repeat",
-            separate?"depth16+stencil8":"packed24+8",glGetString(GL_RENDERER),glGetString(GL_VERSION));
+            separate?(separate24?"depth24+stencil8":"depth16+stencil8"):"packed24+8",glGetString(GL_RENDERER),glGetString(GL_VERSION));
     fprintf(stderr,"[drawable-init] extensions=%s\n",extensions?extensions:"(null)");
     fprintf(stderr,"[drawable-init] caps packed=%u full-npot=%u limited-npot=%u stencil8=%u\n",
         gles_native_extension(extensions,"GL_OES_packed_depth_stencil"),gles_native_extension(extensions,"GL_OES_texture_npot"),
@@ -95,7 +96,7 @@ int main(int argc,char **argv)
     if (generated) STEP(glGenRenderbuffers(1,&depth));
     else while (glIsRenderbuffer(depth)) depth++;
     STEP(glBindRenderbuffer(GL_RENDERBUFFER,depth));
-    STEP(glRenderbufferStorage(GL_RENDERBUFFER,separate?GL_DEPTH_COMPONENT16:GL_DEPTH24_STENCIL8,width,height));
+    STEP(glRenderbufferStorage(GL_RENDERBUFFER,separate?(separate24?GL_DEPTH_COMPONENT24:GL_DEPTH_COMPONENT16):GL_DEPTH24_STENCIL8,width,height));
     STEP(glFramebufferRenderbuffer(GL_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_RENDERBUFFER,depth));
     if (separate) {
         stencil=0x40000001u;
@@ -125,7 +126,7 @@ int main(int argc,char **argv)
     STEP(glDisableClientState(GL_VERTEX_ARRAY));STEP(glDeleteFramebuffers(1,&framebuffer));
     STEP(glDeleteRenderbuffers(1,&depth));if (stencil) STEP(glDeleteRenderbuffers(1,&stencil));STEP(glDeleteTextures(1,&texture));
     CGLReleaseContext(context);alarm(0);
-    fprintf(stderr,"PASS drawable-init full-render size=%ux%u names=%s wrap=%s depth=%s\n",width,height,generated?"generated":"private",clamp?"clamp":"default-repeat",separate?"depth16+stencil8":"packed24+8");
+    fprintf(stderr,"PASS drawable-init full-render size=%ux%u names=%s wrap=%s depth=%s\n",width,height,generated?"generated":"private",clamp?"clamp":"default-repeat",separate?(separate24?"depth24+stencil8":"depth16+stencil8"):"packed24+8");
     return 0;
 failed:
     fprintf(stderr,"FAIL drawable-init; no production fallback or guest acceptance selected\n");
