@@ -8,6 +8,7 @@
 #include "hw/core/cpu.h"
 #include "target/arm/cpu.h"
 #include "ipod-gpio-wake-trace.c.inc"
+#include "hw/core/resettable.h"
 #endif
 
 /*
@@ -126,8 +127,24 @@ static void s5l8900_gpio_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &gpio_ops, s, "gpio", 0x1000);
 }
 
-/* Pad state is all driven by the guest; clear it so the second boot does not
- * read back the first boot's pin levels while it is probing. */
+/* Guest pad configuration resets; externally held buttons survive AP wake. */
+#ifndef __APPLE__
+void ipod_touch_gpio_record_host_input(IPodTouchGPIOState *s, uint32_t gpio,
+                                      bool high)
+{
+    unsigned pad = GPIO2PAD(gpio), bit = 1u << GPIO2PIN(gpio);
+    assert(pad < NUM_GPIO_PADS);
+    s->host_input_mask[pad] |= bit;
+    s->host_input_level[pad] = (s->host_input_level[pad] & ~bit) |
+                               (high ? bit : 0);
+}
+
+static void s5l8900_gpio_reset_exit(Object *obj, ResetType type)
+{
+    IPOD_TOUCH_GPIO(obj)->ap_wake_reset_pending = false;
+}
+#endif
+
 static void s5l8900_gpio_reset(DeviceState *dev)
 {
     IPodTouchGPIOState *s = IPOD_TOUCH_GPIO(dev);
@@ -162,6 +179,18 @@ static void s5l8900_gpio_reset(DeviceState *dev)
     if (s->rest_high_pad < NUM_GPIO_PADS) {
         s->gpio_state[s->rest_high_pad] |= s->rest_high_mask;
     }
+#ifndef __APPLE__
+    if (s->ap_wake_reset_pending) {
+        for (unsigned pad = 0; pad < NUM_GPIO_PADS; pad++) {
+            s->gpio_state[pad] = (s->gpio_state[pad] & ~s->host_input_mask[pad]) |
+                                 (s->host_input_level[pad] & s->host_input_mask[pad]);
+        }
+    } else {
+        /* A cold/reset cancellation must not resurrect an old host press. */
+        memset(s->host_input_mask, 0, sizeof(s->host_input_mask));
+        memset(s->host_input_level, 0, sizeof(s->host_input_level));
+    }
+#endif
     for (unsigned pad = 0; pad < NUM_GPIO_PADS; pad++) {
         for (unsigned pin = 0; pin < 8; pin++) {
             qemu_set_irq(s->outputs[pad * 8 + pin],
@@ -195,6 +224,10 @@ static void s5l8900_gpio_class_init(ObjectClass *klass, const void *data)
 
     device_class_set_props(dc, s5l8900_gpio_properties);
     device_class_set_legacy_reset(dc, s5l8900_gpio_reset);
+#ifndef __APPLE__
+    /* All hold callbacks finish before this exit clears the wake reason. */
+    RESETTABLE_CLASS(klass)->phases.exit = s5l8900_gpio_reset_exit;
+#endif
     dc->vmsd = &vmstate_ipod_touch_gpio;
 }
 

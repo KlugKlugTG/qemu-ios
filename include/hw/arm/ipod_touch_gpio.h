@@ -42,11 +42,20 @@ typedef struct IPodTouchGPIOState
     qemu_irq outputs[NUM_GPIO_PADS * 8];
     uint32_t fsel_offset;            /* "fsel-offset": the pad function select register */
     uint32_t rest_high_pad, rest_high_mask;   /* "rest-high-pad"/"-mask": active-low inputs at rest */
+#ifndef __APPLE__
+    /* n72 external button levels outlive an AP hibernate reset. */
+    uint32_t host_input_mask[NUM_GPIO_PADS], host_input_level[NUM_GPIO_PADS];
+    bool ap_wake_reset_pending;
+#endif
 } IPodTouchGPIOState;
 
 bool gpio_is_on(uint32_t *state, uint32_t gpio);
 bool gpio_is_off(uint32_t *state, uint32_t gpio);
 void gpio_set_on(uint32_t *state, uint32_t gpio);
 void gpio_set_off(uint32_t *state, uint32_t gpio);
+#ifndef __APPLE__
+void ipod_touch_gpio_record_host_input(IPodTouchGPIOState *s, uint32_t gpio,
+                                      bool high);
+#endif
 
 #endif

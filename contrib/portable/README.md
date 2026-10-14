@@ -200,3 +200,23 @@ revision/hash and each changed object's current engine revision/hash. Earlier
 manifests are retained under `BUILD/manifests` by content hash. Changes to configuration or pins
 still require a separate output directory. An interrupted update's requested
 revision is distinct from the last completed library manifest.
+
+
+### n72 AP wake and physical button holds
+
+A modeled n72 hibernate wake resets the AP while external buttons remain physical
+inputs. The non-Apple route records those input levels separately, restores only
+those levels during AP wake, and clears the wake reason after every reset hold
+callback has run. Manual button holds retain their original virtual release
+deadline. Automation and touch cleanup still run; cold reset and explicit input
+cancellation release buttons and clear stale host intent. Guest GPIO configuration
+and unrelated outputs still reset. Apple input/reset behavior is unchanged.
+
+Run `tests/slice/run.sh tests/slice/ipod-ap-wake-buttons.c` for the coupled
+production reset/timer regression. It checks both reset callback orders, all four
+button polarities, original100ms deadlines, cold-reset stale-intent prevention,
+explicit cancellation and automation-boundary cleanup under ASAN/UBSAN. Clock,
+timer, IRQ and board delivery boundaries are stubbed; it does not execute a full
+PMU/board reset, qualify guest wake or prove the complete black-screen cause.
+Actual target GPIO/PMU traces, visible guest response and lifecycle acceptance
+remain required.
