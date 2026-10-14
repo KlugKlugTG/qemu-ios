@@ -71,6 +71,14 @@ the 1G uses its physical-pad setter. The observed press/release polarity flips
 still align, so this diagnostic does not claim that discrepancy caused the
 actual wake failure and does not modify it.
 
+The root-owned Poco old-engine attempt independently observed three `0x184=3`
+reads while Home was held and three `0x184=1` reads after release, plus two
+`0x124=4` reads. That establishes live Home pad consumption for that attempt.
+Its trace event was previously disabled and restored, with 704 bytes logged
+over 1.884 host seconds. The receipt explicitly lacks guest virtual timing and
+does not verify wake. The new timestamped engine has not yet run on that target;
+the existing observation must not be relabeled as its validation.
+
 GLES2 needs an actual admitted guest/workload that compiles and executes shader
 commands, not the standalone host GLES2 triangle. The supplied n81 route may be
 used where appropriate with its prepared kernel/NAND/NOR and matching package;
