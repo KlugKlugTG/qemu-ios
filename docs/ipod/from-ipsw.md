@@ -1175,6 +1175,48 @@ So a restored device reaching Home needs, in order:
    environment), the MBX model work.
 3. The I2C controller's polled path used on the way into sleep (or a first boot that does not idle into sleep).
 
+All three are resolved or turned out not to be bugs; see the next section.
+
+### Cold boot under aes-uid=hardware: to the Connect to iTunes screen (2026-10-14)
+
+With main at 8e9b64d422 (aes-uid=hardware, the MBX model) the restored device boots, and so does a fresh restore made
+with that build. run-restore.sh and run-boot.sh now default to aes-uid=hardware (AES_UID overrides).
+
+- Boot chain: the restore kernel and the SecureROM, LLB and iBoot now derive the 0x89a key in the same direction.
+  The r4 NAND and NOR from 2026-10-13 boot unchanged, and so does r6, a fresh 7E18 restore (Restore Finished in
+  117 s). Both go through SecureROM, LLB, iBoot (`read new style signature`), the kernel and launchd.
+- MBX: no `Graphics Recovery Event` any more. Stock SpringBoard starts and draws its unactivated "Connect to
+  iTunes" view on the emulated MBX. The frame is lit at 12 and 16 s; the Apple logo shows at 4 s.
+- Lockdown: with USBMUXD set, run-boot.sh gives the device its own usbmuxd. `ideviceinfo` answers with
+  `ActivationState: Unactivated`, `ProductVersion: 3.1.3`, `BuildVersion: 7E18`, and idevicesyslog works.
+  SpringBoard logs `lockdown says the device is: [Unactivated], state is 1`, and lockdownd enables the brick state.
+- The "polled I2C spin" was not a hang. Its last I2C transaction (traced) is the PMU write 0x0a = 0x0a, which is
+  "pmu go hib". The model then powers the AP off (`arm_set_cpu_off`) as the hardware does, so the CPU stays parked
+  after the store in AppleS5L8900XI2CController's register write (VA 0xc0567e24: wait for [regs+0x10] == 0, then
+  store). Without USB, the restored device idles into hibernate about 60 s after boot. A Home press wakes it
+  (`pmu wake events: menu`, `System Wake`, resume through LLB) and it sleeps again. With USB attached it stays
+  awake. The emulator needs no I2C change.
+- The display goes dark about 12 s after SpringBoard starts (`uilock state: 0 -> 1`, `_lcdEnable: enable: 0`), the
+  lock idle timeout. Home and power presses after that do not light it again: SpringBoard logs nothing, and the
+  Connect to iTunes lockout view stays as it is. Whether real hardware relights here is open.
+- run-restore.sh used to stop QEMU as soon as idevicerestore printed Restore Finished. That can come before restored
+  writes `auto-boot=true` to the NOR, and one run (r5) cold-booted into iBoot's recovery prompt. The script now
+  waits for `auto-boot=true` in nor-rw.bin.
+
+Home is out of reach for a stock restore, and the emulator is not what blocks it: the device is unactivated. Apple
+activation needs a record for the unit's identity (see P1). Light Touch's prepared devices pass because FirmwareKit
+patches lockdownd (FirmwareKit `Activation`). A restored NAND has no offline write path for that edit, and AFC does
+not reach /usr/libexec. So the slide-to-unlock check does not apply yet: there is no lock screen, only the lockout view.
+
+How close this is to Light Touch preparing devices by an in-emulator restore: the emulator side works for 7E18. It
+runs the stock restore from DFU, boots the result with its own keys and NAND layout, and stock SpringBoard draws.
+Three gaps remain. (1) Activation: something has to change lockdownd or seed its state after the restore. The
+restored filesystem is only reachable through the guest (an HFS write path into the physical-NAND FTL, or a
+ramdisk boot that mounts and edits it), so the offline FirmwareKit edit has to move into the guest. (2) The other
+offline edits (guest agent, GL switches, preferences, keyboards) need the same route. (3) The restore needs a
+prepared NOR for SysCfg and nvram, and 2.x and 4.x do not restore yet (below). Until (1) and (2) exist, the
+in-emulator restore is a fidelity check on the boot chain and storage, not a replacement for FirmwareKit's build.
+
 ### 2.1.1 and 4.2.1
 
 - 5F138: upstream idevicerestore refuses an IPSW without a BuildManifest. LukeZGD's fork (5ea1b08) sends iBSS and the
@@ -1193,6 +1235,8 @@ So a restored device reaching Home needs, in order:
 | r2 | erase, clean status off | physical | Restore Finished, 127 s; AES trace: kernel derives with mode 0xf, ROM with 0x8 |
 | r3, r4 | this branch | physical | Restore Finished, 165 s and 130 s |
 | r4 cold boot | this branch + UID-encrypt experiment | physical | SecureROM, LLB, iBoot, kernel, userland; black screen, MBX recovery events, sleep, I2C spin |
+| h1-h6 (10-14) | main 8e9b64d422, aes-uid=hardware | physical | r4 image boots to SpringBoard's Connect to iTunes view; no recovery events; hibernates at about 60 s without USB, Home wakes it |
+| r5, r6 (10-14) | main 8e9b64d422 | physical | Restore Finished, 165 s and 117 s; r5 stopped before auto-boot=true (recovery prompt), r6 with the wait boots like r4, lockdown answers Unactivated |
 | 5F138 | this branch, LukeZGD fork | physical | DeviceTree upload fails after the ramdisk (2.x iBSS USB) |
 | 8C148 | this branch | physical | SecureROM stays in DFU after iBSS |
 

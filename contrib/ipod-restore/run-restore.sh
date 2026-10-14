@@ -22,7 +22,7 @@
 # The NAND is physical (FMSS_PHYSICAL=1): page files at the addresses the guest programs, erased blocks marked.
 # Audio is off; nothing is shown.
 set -u
-OUT="$1"; IPSW="$2"; BASE="$3"
+OUT="$1"; IPSW=$(cd "$(dirname "$2")" && pwd)/$(basename "$2"); BASE=$(cd "$3" && pwd)
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 TOOLS=${TOOLS:-$HERE/host}
@@ -55,7 +55,7 @@ pids+=($!)
 for i in $(seq 100); do [ -S "$OUT/usb.sock" ] && break; sleep 0.1; done
 
 M="iPod-Touch,bootrom=$BOOTROM,nor=$OUT/nor.bin,nor-rw=$OUT/nor-rw.bin,nand=$OUT/nand,nandrw=$OUT/nandrw"
-M="$M,ecid=$ECID,gid-blobs=$BASE/gid-blobs.bin,aes-uid=engine,usb-tcp-addr=127.0.0.1:$USB,usb-attached=on"
+M="$M,ecid=$ECID,gid-blobs=$BASE/gid-blobs.bin,aes-uid=${AES_UID:-hardware},usb-tcp-addr=127.0.0.1:$USB,usb-attached=on"
 echo "$M" > machine.txt
 FMSS_PHYSICAL=1 "$QEMU" -M "$M" -m 2G -display none -audio driver=none -monitor none -serial "file:$OUT/serial.log" \
     > qemu.log 2>&1 &
@@ -76,4 +76,7 @@ IRECV_QEMU_SOCKET="$OUT/usb.sock" USBMUXD_SOCKET_ADDRESS=127.0.0.1:$MUX \
     perl -e 'alarm shift; exec @ARGV' "${TIMEOUT:-1200}" "$IDR" -e -y -i "$ECID" -C "$OUT/cache" "$OUT/fw.ipsw" > restore.log 2>&1
 rc=$?
 echo "idevicerestore rc=$rc after $(( $(date +%s) - start ))s" | tee -a restore.log
+# restored sets auto-boot=true in the NOR's nvram as it finishes; stopping QEMU before that lands leaves
+# auto-boot=false and the cold boot stops in iBoot's recovery prompt.
+for i in $(seq 120); do LC_ALL=C grep -aq 'auto-boot=true' nor-rw.bin && break; sleep 0.5; done
 grep -q "Status: Restore Finished" restore.log

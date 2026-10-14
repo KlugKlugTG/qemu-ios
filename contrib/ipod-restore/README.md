@@ -57,4 +57,8 @@ BOOTROM=.../bootrom_240_4 STEP=20 PROBE="info registers" \
     contrib/ipod-restore/run-boot.sh /tmp/restore-7E18 /tmp/boot-7E18 /path/to/n72ap-7E18 240
 ```
 
+With `USBMUXD=.../usbmuxd` as well, run-boot.sh starts a usbmuxd for the device and writes its address to
+`OUT/usbmuxd.addr`. Use it as `USBMUXD_SOCKET_ADDRESS` for ideviceinfo, idevicesyslog and the other tools.
+Both scripts use `aes-uid=hardware`; set `AES_UID=engine` only for an image made before that existed.
+
 Kill only the processes a run started; the scripts track their own PIDs.
