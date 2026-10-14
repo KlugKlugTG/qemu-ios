@@ -120,3 +120,9 @@ the 1G uses its physical-pad setter. The observed press/release polarity flips
 still align, so this diagnostic does not claim that discrepancy caused the
 actual wake failure and does not modify it.
 
+
+The root-owned Poco old-engine attempt observed three 0x184=3 reads while
+Home was held and three 0x184=1 reads after release, plus two 0x124=4 reads.
+This verifies live Home pad consumption, with 704bytes logged over1.884 host
+seconds and the prior disabled trace restored. It lacks guest virtual timing
+and does not verify wake; the new diagnostic has not yet run on that target.
