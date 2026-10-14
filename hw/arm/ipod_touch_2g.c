@@ -28,6 +28,9 @@
 #include "ui/clipboard.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
+#ifndef __APPLE__
+#include "ipod-gpio-wake-trace.c.inc"
+#endif
 
 // The D1759 PMU raises this GPIO IRQ when a wake button (hold/menu) is pressed.
 // It lands in the same GPIO interrupt group the button code already drives.
@@ -2239,6 +2242,31 @@ static void ipod_touch_key_event(void *opaque, int keycode)
     // would fire a fresh interrupt each time even though the button state did
     // not change, spamming the interrupt controller with phantom presses.
     if(do_irq) {
+#ifndef __APPLE__
+        /* This timestamp is taken after the actual pad transition. It is
+         * guest virtual time, independent of the frontend's wall-time pulse.
+         * PC may be zero when the host bottom half has no current vCPU. */
+        static IpodGPIOWakeTraceBudget wake_trace;
+        bool is_wake_button = button_gpio == GPIO_BUTTON_HOME ||
+                              button_gpio == GPIO_BUTTON_POWER;
+        if (ipod_gpio_wake_trace_take(&wake_trace,
+                trace_event_get_state_backends(TRACE_IPOD_TOUCH_GPIO_READ_LOG),
+                is_wake_button, 16)) {
+            uint32_t pc = 0;
+            if (current_cpu && object_dynamic_cast(OBJECT(current_cpu), TYPE_ARM_CPU)) {
+                pc = ARM_CPU(current_cpu)->env.regs[15];
+            }
+            TRACE_PRINTF(trace_ipod_touch_gpio_read_log,
+                         "[gpio-wake] edge button=%s down=%u offset=0x184 "
+                         "value=0x%08x irq=0x%02x pc=0x%08x virtual_ns=%" PRId64
+                         " sample=%u/16\n",
+                         button_gpio == GPIO_BUTTON_HOME ? "home" : "power",
+                         (unsigned)gpio_is_on(s->gpio_state->gpio_state, button_gpio),
+                         s->gpio_state->gpio_state[GPIO2PAD(button_gpio)],
+                         gpio_group * NUM_GPIO_PINS + gpio_selector, pc,
+                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), wake_trace.used);
+        }
+#endif
         // Mirror the physical pin level into the sysic. GPIO_INTLEVEL was read
         // by the guest (sysic read handler) but never written anywhere, so it
         // always returned 0 regardless of the real pin state. Reflect the
