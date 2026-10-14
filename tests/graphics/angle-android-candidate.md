@@ -79,6 +79,39 @@ prefixed entry-point ABI. The existing shared guest executor, pixel/rectangle
 adaptation and fences remain in use. The native Android worker loads packaged
 libraries through JNI; do not execute a downloaded tool in writable app storage.
 
+The preprocessed native executor currently calls 12 public EGL functions and
+169 public GL functions; 15 GLES1 OES functions are resolved dynamically.
+`native-entrypoints.json` records this source inventory, and
+`inventory-native-entrypoints.py` regenerates it using an existing full-executor
+compile command. It excludes header declarations and desktop-only branches.
+It proves the call boundary, not that a runtime implements the calls:
+
+```sh
+python3 tests/graphics/inventory-native-entrypoints.py \
+  --compile-commands EXISTING_BUILD/compile_commands.json \
+  --renderer hw/arm/gles-host.c \
+  --check tests/graphics/native-entrypoints.json
+```
+
+The loader must maintain separate API1/API2 function tables: shared names such
+as `glGetString`, `glDrawArrays` and `glBindTexture` must resolve through the
+selected API's library, while fixed-function calls use GLESv1_CM and shader
+calls use GLESv2. Resolve table addresses before redefining raw calls, then
+include dispatch beneath the existing portability wrappers so wrapper-internal
+calls also use the selected provider. Core framebuffer calls remain API2-only;
+API1 OES addresses come from that provider's `eglGetProcAddress` and retain the
+existing advertised-extension checks. A missing required address must fail
+renderer setup explicitly. Keep all three library handles alive until the last
+context is released, and require a fresh worker to change providers.
+
+Public-table dispatch prevents a direct call from accidentally reaching system
+EGL/GLES, but transitive symbol binding inside the candidate libraries still
+needs inspection. Record each object's `DT_NEEDED`, exported symbols and the
+actual library owner of resolved addresses; do not rely on a filename suffix or
+assume `RTLD_LOCAL` alone prevents interposition. Validate in the app worker after
+system graphics libraries have loaded, including cross-version texture sharing
+and teardown. This loader is a plan; no production ANGLE dispatch has been added.
+
 First run raw combine and complete production probes using the candidate's own
 EGL/GLES dispatch, including API1/API2 context sharing, object lifetime, DrawTex,
 fog, rectangle matrix order, packed formats, shader limits and readback. Then
