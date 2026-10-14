@@ -20,6 +20,12 @@ changing the macOS pin ledger. Android builds use NDK 28.2.13676358, API 28 or
 newer, static PIC third-party dependencies, and 16 KiB ELF maximum page size.
 The platform provides zlib; its metadata version is read from the NDK header.
 
+The engine defaults to API 28. `build-engine.py --android-api 29` selects a
+separate, unqualified native ELF TLS experiment for apps whose minimum API is
+already 29. Use a fresh build directory: changing this compiler target is not
+permitted by `--source-update`. See [PERFORMANCE.md](PERFORMANCE.md) for the
+controlled build, thread-lifetime regressions and target comparison gates.
+
 ```sh
 # MESON is Meson 1.10.0; its Python needs packaging 24.0.
 # Install host tools in a private venv when unavailable, never change system Python.
