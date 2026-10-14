@@ -83,7 +83,7 @@ for variant in "${variants[@]}"; do
     read -r -a extra <<<"$variant"
     n=$((n + 1))
     "${compiler[@]}" -std=gnu11 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer \
-        -Wno-unused-function -Wno-comment -I"$TMP" -I"$ROOT/tests/slice" ${flags[@]+"${flags[@]}"} ${extra[@]+"${extra[@]}"} \
-        "$TEST" -o "$TMP/check$n"
+        -Wno-unused-function -Wno-comment -I"$TMP" -I"$ROOT/tests/slice" ${extra[@]+"${extra[@]}"} \
+        "$TEST" ${flags[@]+"${flags[@]}"} -o "$TMP/check$n"
     (cd "$TMP" && "$TMP/check$n")
 done
