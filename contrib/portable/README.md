@@ -104,6 +104,7 @@ tests/slice/run.sh tests/slice/ipod-accel-sampling.c
 tests/slice/run.sh tests/slice/ipod-attitude.c
 tests/slice/run.sh tests/slice/ipod-multitouch-frames.c
 tests/slice/run.sh tests/slice/ipod-pke.c
+tests/slice/run.sh tests/slice/ipod-portable-pke.c
 python3 tests/portable-crypto.py /private/builds/linux
 ```
 
