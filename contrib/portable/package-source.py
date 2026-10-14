@@ -134,6 +134,8 @@ def main():
             path = Path(original)
             if sha(path) != expected:
                 p.error('Actual link input differs from engine: ' + path.name)
+            if path == build / 'libqemu-arm.so':
+                continue  # Earlier manifests also record the final -o path.
             if path.suffix in ['.a', '.o']:
                 relative = ('relink/inputs/archives/' + path.name if path.suffix == '.a' else
                             'relink/inputs/objects/' + path.relative_to(build).as_posix())
