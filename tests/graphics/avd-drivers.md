@@ -96,5 +96,40 @@ limit fixed-function units to four, while the backing capability detector
 substitutes eight for core profiles. The adapter now verifies usable units once,
 restores active state, preserves preexisting errors and returns a consistent
 integer/float limit. `egl-limits.c` reproduces the eight-reported/four-accepted
-capability mismatch without EGL; complete host-AVD rendering remains the
-required validation of the change.
+capability mismatch without EGL. Frozen host `units05` then verified that limit,
+prior-error preservation and the first red triangle. Its complete production
+render still failed two-unit ADD with black RGBA 0,0,0,255 and no error;
+the native GLES2 pixel suite passed. This is partial improvement, not complete
+host-AVD graphics qualification.
+
+The next frozen `raw-combine07` used only EGL lifetime and raw GLES1 calls,
+with generated OES framebuffer/texture names. On the actual 4 KiB host AVD,
+the color framebuffer was complete (`0x8cd5`) and both texture units configured
+without error. With both textures enabled, active unit 0 produced blue
+RGBA 0,0,255,255; active unit 1 produced black RGBA 0,0,0,255. Both draws should
+produce magenta RGBA 255,0,255,255 independent of the active unit. Both reported
+GL_NO_ERROR. The real probe and ADB shell exited 2 with the explicit failure
+sentinel; the remote binary hash matched the frozen manifest. This reproduces
+the standards gap independently of the portability adapter.
+
+Upstream [core-profile texture emulation](https://github.com/google/gfxstream/blob/07ee40efb0e7037a9a9b7fe59071e7c4997e7cbe/host/gl/glestranslator/gles_cm/core_profile_engine.cpp)
+selects one sampler using the current active unit, and its
+[fragment shader](https://github.com/google/gfxstream/blob/07ee40efb0e7037a9a9b7fe59071e7c4997e7cbe/host/gl/glestranslator/gles_cm/core_profile_engine_shaders.h)
+handles replace/modulate rather than full texture-stage ADD/COMBINE. These
+sources explain the observed behavior without asserting the installed binary's
+exact upstream revision. See [the pinned Android ANGLE candidate](angle-android-candidate.md)
+for the next full GLES1 frontend strategy. That candidate remains unbuilt and
+unqualified; another backing-driver replay cannot establish missing frontend
+semantics.
+
+Run this focused leaf on an already allocated host AVD using:
+
+```sh
+python3 tests/graphics/run-avd-probes.py --adb PATH_TO_ADB \
+  --frozen FROZEN_RAW_COMBINE_DIRECTORY --output NEW_RECEIPT_DIRECTORY \
+  --combine-only
+```
+
+This verifies local/remote hashes, records actual page size and fingerprint,
+and requires the complete leaf PASS sentinel and explicit exit. Leaf success
+would still leave full adapter and actual guest acceptance outstanding.
