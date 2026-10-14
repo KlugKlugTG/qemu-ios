@@ -278,7 +278,7 @@ static void prepare_short_control_response(IPodTouchMultitouchState *s, uint8_t 
  * packet's pad byte absorbs that second byte (mt_n1_select).
  */
 bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
-                                   unsigned begins, unsigned ends, bool motion)
+                                   unsigned begins, unsigned ends, unsigned moves)
 {
 #if defined(__linux__) && !defined(__APPLE__)
     unsigned used = s->queued_count + !!s->next_frame;
@@ -286,10 +286,12 @@ bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
     if (begins) {
         needed += MT_MAX_FINGERS + 1; /* END for every contact, plus FULL_END */
     }
-    if (motion) {
+    if (moves) {
         bool tail_motion = s->queued_count ? s->queued_motion[s->queued_count - 1]
                                           : s->next_frame && s->next_frame_motion;
-        needed += !tail_motion;
+        /* Mixed batches can be preempted between events; reserve every
+         * UPDATE rather than relying on their wall-time execution speed. */
+        needed += begins || ends ? moves : !tail_motion;
     }
     return needed <= MT_REPORT_QUEUE_SIZE - used;
 #else
