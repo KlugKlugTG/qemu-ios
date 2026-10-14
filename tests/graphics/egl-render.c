@@ -159,6 +159,95 @@ int main(void)
     assert(px[0]>=120 && px[0]<=135 && px[1]>=120 && px[1]<=135 && px[2]>=120 && px[2]<=135);
     glDisable(GL_FOG);
 
+    glActiveTexture(GL_TEXTURE1); glDisable(GL_TEXTURE_2D);
+    glActiveTexture(GL_TEXTURE0); glClientActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB,43);
+    const unsigned char rectangle[]={255,0,0,255, 0,255,0,255,
+                                      0,0,255,255, 255,255,0,255};
+    glTexImage2D(GL_TEXTURE_RECTANGLE_ARB,0,GL_RGBA,2,2,0,GL_RGBA,GL_UNSIGNED_BYTE,rectangle);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_RECTANGLE_ARB,GL_TEXTURE_MAG_FILTER,GL_NEAREST);
+    GLint binding_2d,binding_rect,wrap;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D,&binding_2d);
+    glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE_ARB,&binding_rect);
+    glGetTexParameteriv(GL_TEXTURE_RECTANGLE_ARB,GL_TEXTURE_WRAP_S,&wrap);
+    assert(binding_2d==0x40000001u && binding_rect==43 && wrap==GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D,43);
+    assert(glGetError()==GL_INVALID_OPERATION);
+    glEnable(GL_TEXTURE_RECTANGLE_ARB);
+    const GLfloat quad[]={-1,-1, 1,-1, -1,1, 1,1};
+    const GLfloat pixels[]={0,0, 2,0, 0,2, 2,2};
+    glVertexPointer(2,GL_FLOAT,0,quad); glTexCoordPointer(2,GL_FLOAT,0,pixels);
+    glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+    const unsigned locations[][2]={{8,8},{24,8},{8,24},{24,24}};
+    const unsigned char expected_colors[][3]={{255,0,0},{0,255,0},{0,0,255},{255,255,0}};
+    for (unsigned i=0;i<4;i++) {
+        glReadPixels(locations[i][0],locations[i][1],1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+        fprintf(stderr,"[probe] rectangle corner%u rgba=%u,%u,%u,%u\n",i,px[0],px[1],px[2],px[3]);
+        assert(!memcmp(px,expected_colors[i],3));
+    }
+    glMatrixMode(GL_TEXTURE); glLoadIdentity(); glTranslatef(.25f,0,0);
+    glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+    glReadPixels(8,8,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    GLfloat matrix[16]; glGetFloatv(GL_TEXTURE_MATRIX,matrix);
+    assert(px[0]==255 && px[1]==0 && px[2]==0 && matrix[12]==.25f);
+    glLoadIdentity(); glMatrixMode(GL_MODELVIEW);
+    glDisable(GL_TEXTURE_RECTANGLE_ARB);
+    glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+    glReadPixels(8,8,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    assert(px[0]==0 && px[1]==0 && px[2]==255);
+    glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE_ARB,&binding_rect);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D,&binding_2d);
+    assert(binding_rect==43 && binding_2d==0x40000001u && glGetError()==GL_NO_ERROR);
+    fprintf(stderr,"[probe] rectangle pixel coordinates, matrix order, immutable targets and separate bindings/enables PASS\n");
+    /* Name reuse must preserve the old object in sibling bindings and unbound
+     * framebuffer attachments; native aliases remain invisible to the guest. */
+    GLuint retained_fbo;
+    glGenFramebuffers(1,&retained_fbo); glBindFramebuffer(GL_FRAMEBUFFER,retained_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_RECTANGLE_ARB,43,0);
+    assert(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE);
+    glBindFramebuffer(GL_FRAMEBUFFER,0x40000000u);
+    CGLContextObj sibling;
+    assert(gles_egl_create(c1,1,&sibling));
+    glBindTexture(GL_TEXTURE_RECTANGLE_ARB,43);
+    assert(CGLSetCurrentContext(c1)==0);
+    GLuint reused=43; glDeleteTextures(1,&reused); assert(!glIsTexture(43));
+    glBindTexture(GL_TEXTURE_2D,43);
+    const unsigned char fresh[]={0,0,255,255};
+    glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,fresh);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_NEAREST);
+    glBindFramebuffer(GL_FRAMEBUFFER,retained_fbo);
+    GLint retained_name;
+    glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME,&retained_name);
+    assert(retained_name==43);
+    glReadPixels(0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    assert(px[0]==255 && px[1]==0 && px[2]==0);
+    glBindFramebuffer(GL_FRAMEBUFFER,0x40000000u);
+    glDeleteFramebuffers(1,&retained_fbo);
+    assert(CGLSetCurrentContext(sibling)==0);
+    GLuint sibling_fbo;
+    glGenFramebuffers(1,&sibling_fbo); glBindFramebuffer(GL_FRAMEBUFFER,sibling_fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,texture,0);
+    assert(glCheckFramebufferStatus(GL_FRAMEBUFFER)==GL_FRAMEBUFFER_COMPLETE);
+    glViewport(0,0,32,32); glColor4f(1,1,1,1);
+    glEnable(GL_TEXTURE_RECTANGLE_ARB); glEnableClientState(GL_VERTEX_ARRAY); glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+    glVertexPointer(2,GL_FLOAT,0,quad); glTexCoordPointer(2,GL_FLOAT,0,pixels);
+    glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+    glReadPixels(8,8,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    assert(px[0]==255 && px[1]==0 && px[2]==0 && glGetError()==GL_NO_ERROR);
+    CGLReleaseContext(sibling); assert(CGLSetCurrentContext(c1)==0);
+    glBindTexture(GL_TEXTURE_2D,43); glDisable(GL_TEXTURE_RECTANGLE_ARB);
+    glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+    glReadPixels(8,8,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+    assert(px[0]==0 && px[1]==0 && px[2]==255);
+    glDeleteTextures(1,&reused); assert(!glIsTexture(43));
+    GLuint generated; glGenTextures(1,&generated);
+    assert(generated && generated!=texture && generated!=0x40000001u);
+    glDeleteTextures(1,&generated);
+    assert(glGetError()==GL_NO_ERROR);
+    fprintf(stderr,"[probe] shared deleted texture, reused name, retained FBO, guest name query and context teardown PASS\n");
+
+
 #endif
     printf("GLES1 texture/multitexture rgba=%u,%u,%u,%u\n",px[0],px[1],px[2],px[3]);
     assert(gles_egl_create(c1, 2, &c2));

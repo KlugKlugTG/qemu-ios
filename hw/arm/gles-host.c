@@ -1916,7 +1916,7 @@ static unsigned gles_query_count(uint32_t pname)
     case GL_MAX_MODELVIEW_STACK_DEPTH:
     case GL_MAX_PROJECTION_STACK_DEPTH:
     case GL_MAX_TEXTURE_SIZE:
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
     case GL_MAX_RECTANGLE_TEXTURE_SIZE_ARB:
     case GL_TEXTURE_BINDING_RECTANGLE_ARB:
 #endif
@@ -2731,7 +2731,11 @@ static GLenum gles_texture_object(uint32_t target)
 
 static unsigned gles_texparam_nparams(uint32_t target, uint32_t pname)
 {
-    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) return 0;
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP
+#ifdef GLES_HOST_EGL_ES
+        && target != GL_TEXTURE_RECTANGLE_ARB
+#endif
+       ) return 0;
     switch (pname) {
     case GL_TEXTURE_MIN_FILTER: case GL_TEXTURE_MAG_FILTER:
     case GL_TEXTURE_WRAP_S: case GL_TEXTURE_WRAP_T:
@@ -4462,7 +4466,7 @@ static void gles_surface_forget(GLenum target)
     GLESSurface *s;
 
     if (!gh.surfaces) return;
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
     if (target == GL_TEXTURE_RECTANGLE_ARB) {
         glGetIntegerv(GL_TEXTURE_BINDING_RECTANGLE_ARB, &name);
     } else
@@ -4525,7 +4529,7 @@ static int64_t gles_bind_surface(CPUState *cpu, const uint32_t *a, uint32_t id)
     GLenum binding = GL_TEXTURE_BINDING_2D;
     g_autofree uint8_t *pixels = NULL;
     if (target != GL_TEXTURE_2D) {
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
         if (target != GL_TEXTURE_RECTANGLE_ARB) {
             gles_refuse("surface:target:0x%x", target);
             return -1;
@@ -4802,12 +4806,12 @@ static bool gles_refresh_surfaces_1(CPUState *cpu)
     if (!gh.surfaces || !g_hash_table_size(gh.surfaces)) return true;
     GLint active, units = 0, kind = 0, attachment = 0;
     GLenum targets[] = { GL_TEXTURE_2D,
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
         GL_TEXTURE_RECTANGLE_ARB,
 #endif
     };
     GLenum bindings[] = { GL_TEXTURE_BINDING_2D,
-#ifndef GLES_HOST_EAGL
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_EGL_ES)
         GL_TEXTURE_BINDING_RECTANGLE_ARB,
 #endif
     };
@@ -4829,6 +4833,10 @@ static bool gles_refresh_surfaces_1(CPUState *cpu)
             if (!gh.program && !glIsEnabled(targets[t])) continue;
             glGetIntegerv(bindings[t], &name);
             if (!name || name == attachment) continue;
+#ifdef GLES_HOST_EGL_ES
+            GLESEGLTexture *bound=gles_native_bound_texture(targets[t]);
+            if (bound && bound->deleted) continue;
+#endif
             GLESSurface *surface = g_hash_table_lookup(gh.surfaces, GUINT_TO_POINTER(name));
             if (!surface || surface->dirty || surface->detached) continue;
             if (surface->npages) {      /* re-read only memory written since its upload */

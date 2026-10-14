@@ -136,35 +136,127 @@ static void *gles_native_texels(GLsizei w, GLsizei h, GLenum *format, GLenum *ty
     if (reverse16 || packed) { *format=GL_RGBA; *type=GL_UNSIGNED_BYTE; }
     return out;
 }
+typedef struct GLESNativeAttachment {
+    GLuint framebuffer;
+    GLenum attachment;
+    GLESEGLTexture *texture;
+    struct GLESNativeAttachment *next;
+} GLESNativeAttachment;
+static void gles_native_collect_textures(bool current)
+{
+    if (!current) return;
+    GLESEGLTexture **slot=&gles_egl_current->textures->head;
+    while (*slot) {
+        GLESEGLTexture *texture=*slot;
+        if (!texture->deleted || texture->refs) { slot=&texture->next; continue; }
+        glDeleteTextures(1,&texture->native_name);
+        *slot=texture->next;
+        free(texture);
+    }
+}
+static void gles_native_texture_cleanup(CGLContextObj context, bool current)
+{
+    for (unsigned unit=0;unit<32;unit++) {
+        GLESEGLTextureUnit *state=&context->texture_units[unit];
+        GLESEGLTexture *objects[]={state->object_2d,state->object_rectangle,state->object_cube};
+        for (unsigned i=0;i<3;i++) if (objects[i] && objects[i]->refs) objects[i]->refs--;
+    }
+    GLESNativeAttachment *attachment=context->texture_attachments;
+    while (attachment) {
+        GLESNativeAttachment *next=attachment->next;
+        if (attachment->texture) attachment->texture->refs--;
+        free(attachment); attachment=next;
+    }
+    context->texture_attachments=NULL;
+    if (context->default_rectangle) context->default_rectangle->refs--;
+    if (current) gles_native_collect_textures(true);
+}
 static GLESEGLTexture *gles_native_texture(unsigned name, bool create)
 {
     if (!name) return &gles_egl_current->default_texture;
     for (GLESEGLTexture *texture=gles_egl_current->textures->head;texture;texture=texture->next)
-        if (texture->name==name) return texture;
+        if (texture->name==name && !texture->deleted && !texture->hidden) return texture;
     if (!create) return NULL;
     GLESEGLTexture *texture=calloc(1,sizeof(*texture));
     if (!texture) { gles_native_error(GL_OUT_OF_MEMORY); return NULL; }
-    texture->name=name;texture->next=gles_egl_current->textures->head;
+    texture->name=name; texture->native_name=name;
+    for (GLESEGLTexture *other=gles_egl_current->textures->head;other;other=other->next)
+        if (other->native_name==name) {
+            texture->native_name=0;
+            glGenTextures(1,&texture->native_name);
+            if (!texture->native_name) { free(texture); gles_native_error(GL_OUT_OF_MEMORY); return NULL; }
+            break;
+        }
+    texture->next=gles_egl_current->textures->head;
     gles_egl_current->textures->head=texture;
+    gles_egl_current->texture_cleanup=gles_native_texture_cleanup;
     return texture;
 }
+static GLESEGLTexture *gles_native_texture_from_native(GLuint native)
+{
+    if (!native) return &gles_egl_current->default_texture;
+    for (GLESEGLTexture *texture=gles_egl_current->textures->head;texture;texture=texture->next)
+        if (texture->native_name==native) return texture;
+    return NULL;
+}
+static void gles_native_texture_reference(GLESEGLTexture **binding, GLESEGLTexture *texture)
+{
+    if (texture) texture->refs++;
+    if (*binding && (*binding)->refs) (*binding)->refs--;
+    *binding=texture;
+    gles_egl_current->texture_cleanup=gles_native_texture_cleanup;
+}
+static void gles_native_attach_texture(GLenum attachment, GLESEGLTexture *texture)
+{
+    GLint framebuffer;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING,&framebuffer);
+    GLESNativeAttachment **slot=(GLESNativeAttachment **)&gles_egl_current->texture_attachments;
+    while (*slot && ((*slot)->framebuffer!=(GLuint)framebuffer || (*slot)->attachment!=attachment)) slot=&(*slot)->next;
+    if (!*slot && texture) {
+        *slot=calloc(1,sizeof(**slot));
+        if (!*slot) { gles_native_error(GL_OUT_OF_MEMORY); return; }
+        (*slot)->framebuffer=framebuffer; (*slot)->attachment=attachment;
+    }
+    if (*slot) {
+        gles_native_texture_reference(&(*slot)->texture,texture);
+        if (!texture) { GLESNativeAttachment *old=*slot; *slot=old->next; free(old); }
+    }
+    gles_native_collect_textures(true);
+}
+static void gles_native_delete_texture_attachments(GLsizei n, const GLuint *names)
+{
+    GLESNativeAttachment **slot=(GLESNativeAttachment **)&gles_egl_current->texture_attachments;
+    while (*slot) {
+        bool remove=false;
+        for (GLsizei i=0;i<n;i++) if (names[i]==(*slot)->framebuffer) remove=true;
+        if (!remove) { slot=&(*slot)->next; continue; }
+        GLESNativeAttachment *old=*slot; *slot=old->next;
+        if (old->texture) old->texture->refs--;
+        free(old);
+    }
+    gles_native_collect_textures(true);
+}
+#include "gles-host-rectangle.c.inc"
 static void gles_native_tex_image(GLenum target, GLint level, GLint internal, GLsizei w, GLsizei h,
                                   GLint border, GLenum format, GLenum type, const void *pixels)
 {
     void *copy = gles_native_texels(w,h,&format,&type,pixels);
     if (pixels && !copy) { gles_native_error(w <= 0 || h <= 0 ? GL_INVALID_VALUE : GL_OUT_OF_MEMORY); return; }
+    GLuint old=gles_native_texture_start(target);
+    GLenum native_target=gles_native_target(target);
     glPixelStorei(GL_UNPACK_ALIGNMENT,1);
     if (format == GL_RGBA && (internal == GL_BGRA || internal == GL_RGBA)) internal=GL_RGBA;
     gles_native_save_errors();
-    glTexImage2D(target,level,internal,w,h,border,format,type,copy);
+    glTexImage2D(native_target,level,internal,w,h,border,format,type,copy);
     GLenum error=glGetError();
     gles_native_error(error);
-    if (error==GL_NO_ERROR && target==GL_TEXTURE_2D && !level) {
+    if (error==GL_NO_ERROR && native_target==GL_TEXTURE_2D && !level) {
         GLint name; glGetIntegerv(GL_TEXTURE_BINDING_2D,&name);
-        GLESEGLTexture *texture=gles_native_texture(name,true);
+        GLESEGLTexture *texture=gles_native_texture_from_native(name);
         if (texture) { texture->width=w; texture->height=h; }
     }
     glPixelStorei(GL_UNPACK_ALIGNMENT,gles_egl_current->unpack_alignment);
+    gles_native_texture_finish(target,old);
     free(copy);
 }
 static void gles_native_tex_sub_image(GLenum target, GLint level, GLint x, GLint y,
@@ -172,9 +264,11 @@ static void gles_native_tex_sub_image(GLenum target, GLint level, GLint x, GLint
 {
     void *copy=gles_native_texels(w,h,&format,&type,pixels);
     if (pixels && !copy) { gles_native_error(w <= 0 || h <= 0 ? GL_INVALID_VALUE : GL_OUT_OF_MEMORY); return; }
+    GLuint old=gles_native_texture_start(target);
     glPixelStorei(GL_UNPACK_ALIGNMENT,1);
-    glTexSubImage2D(target,level,x,y,w,h,format,type,copy);
+    glTexSubImage2D(gles_native_target(target),level,x,y,w,h,format,type,copy);
     glPixelStorei(GL_UNPACK_ALIGNMENT,gles_egl_current->unpack_alignment);
+    gles_native_texture_finish(target,old);
     free(copy);
 }
 static void gles_native_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h,
@@ -223,6 +317,7 @@ static void gles_native_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h,
     }
     free(copy);
 }
+static GLenum gles_native_driver_error(void) { return glGetError(); }
 #define glGetError gles_native_get_error
 #define glPixelStorei gles_native_pixel_store
 #define glTexImage2D gles_native_tex_image
@@ -291,18 +386,46 @@ static void gles_native_BindFramebuffer(GLenum target, GLuint name)
     if (!es1) { fprintf(stderr,"[gles-egl] missing required glBindFramebufferOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
     es1(target,name);
 }
-static void gles_native_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level)
+static void gles_native_FramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint name, GLint level)
 {
-    typedef void (*Proc)(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+    typedef void (*Proc)(GLenum,GLenum,GLenum,GLuint,GLint);
     static Proc es1;
-    if (gles_egl_current->api == 2) { glFramebufferTexture2D(target,attachment,textarget,texture,level); return; }
-    if (!gles_native_require_fbo()) {
-        gles_native_error(GL_INVALID_OPERATION); return;
+    GLESEGLTexture *texture=name ? gles_native_texture(name,false) : NULL;
+    if (name && !texture) { gles_native_error(GL_INVALID_OPERATION); return; }
+    GLenum object_target=textarget>=GL_TEXTURE_CUBE_MAP_POSITIVE_X && textarget<=GL_TEXTURE_CUBE_MAP_NEGATIVE_Z ? GL_TEXTURE_CUBE_MAP : textarget;
+    if (texture && texture->target!=object_target) { gles_native_error(GL_INVALID_OPERATION); return; }
+    GLuint native=texture ? texture->native_name : 0;
+    gles_native_save_errors();
+    if (gles_egl_current->api==2) glFramebufferTexture2D(target,attachment,gles_native_target(textarget),native,level);
+    else {
+        if (!gles_native_require_fbo()) { gles_native_error(GL_INVALID_OPERATION); return; }
+        if (!es1) es1=(Proc)eglGetProcAddress("glFramebufferTexture2DOES");
+        if (!es1) { gles_native_error(GL_INVALID_OPERATION); return; }
+        es1(target,attachment,gles_native_target(textarget),native,level);
     }
-    if (!es1) es1=(Proc)eglGetProcAddress("glFramebufferTexture2DOES");
-    if (!es1) { fprintf(stderr,"[gles-egl] missing required glFramebufferTexture2DOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
-    es1(target,attachment,textarget,texture,level);
+    GLenum error=gles_native_driver_error(); gles_native_error(error);
+    if (!error) gles_native_attach_texture(attachment,texture);
 }
+
+/* Deletion detaches only the currently bound FBO. Other contexts and unbound
+ * FBOs retain the old object even after its guest name is reused. */
+static void gles_native_delete_bound_attachments(GLESEGLTexture *texture)
+{
+    GLint framebuffer; glGetIntegerv(GL_FRAMEBUFFER_BINDING,&framebuffer);
+    GLESNativeAttachment **slot=(GLESNativeAttachment **)&gles_egl_current->texture_attachments;
+    while (*slot) {
+        GLESNativeAttachment *record=*slot;
+        if (record->texture!=texture || record->framebuffer!=(GLuint)framebuffer) { slot=&record->next; continue; }
+        if (gles_egl_current->api==2) glFramebufferTexture2D(GL_FRAMEBUFFER,record->attachment,GL_TEXTURE_2D,0,0);
+        else {
+            typedef void (*Proc)(GLenum,GLenum,GLenum,GLuint,GLint);
+            Proc detach=(Proc)eglGetProcAddress("glFramebufferTexture2DOES");
+            if (detach) detach(GL_FRAMEBUFFER,record->attachment,GL_TEXTURE_2D,0,0);
+        }
+        *slot=record->next; texture->refs--; free(record);
+    }
+}
+
 static void gles_native_GenRenderbuffers(GLsizei n, GLuint *names)
 {
     typedef void (*Proc)(GLsizei n, GLuint *names);
@@ -342,16 +465,20 @@ static void gles_native_RenderbufferStorage(GLenum target, GLenum format, GLsize
 }
 static void gles_native_FramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum rbtarget, GLuint name)
 {
-    typedef void (*Proc)(GLenum target, GLenum attachment, GLenum rbtarget, GLuint name);
+    typedef void (*Proc)(GLenum,GLenum,GLenum,GLuint);
     static Proc es1;
-    if (gles_egl_current->api == 2) { glFramebufferRenderbuffer(target,attachment,rbtarget,name); return; }
-    if (!gles_native_require_fbo()) {
-        gles_native_error(GL_INVALID_OPERATION); return;
+    gles_native_save_errors();
+    if (gles_egl_current->api==2) glFramebufferRenderbuffer(target,attachment,rbtarget,name);
+    else {
+        if (!gles_native_require_fbo()) { gles_native_error(GL_INVALID_OPERATION); return; }
+        if (!es1) es1=(Proc)eglGetProcAddress("glFramebufferRenderbufferOES");
+        if (!es1) { gles_native_error(GL_INVALID_OPERATION); return; }
+        es1(target,attachment,rbtarget,name);
     }
-    if (!es1) es1=(Proc)eglGetProcAddress("glFramebufferRenderbufferOES");
-    if (!es1) { fprintf(stderr,"[gles-egl] missing required glFramebufferRenderbufferOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
-    es1(target,attachment,rbtarget,name);
+    GLenum error=gles_native_driver_error(); gles_native_error(error);
+    if (!error) gles_native_attach_texture(attachment,NULL);
 }
+
 static GLenum gles_native_CheckFramebufferStatus(GLenum target)
 {
     typedef GLenum (*Proc)(GLenum target);
@@ -366,16 +493,20 @@ static GLenum gles_native_CheckFramebufferStatus(GLenum target)
 }
 static void gles_native_DeleteFramebuffers(GLsizei n, const GLuint *names)
 {
-    typedef void (*Proc)(GLsizei n, const GLuint *names);
+    typedef void (*Proc)(GLsizei,const GLuint *);
     static Proc es1;
-    if (gles_egl_current->api == 2) { glDeleteFramebuffers(n,names); return; }
-    if (!gles_native_require_fbo()) {
-        gles_native_error(GL_INVALID_OPERATION); return;
+    gles_native_save_errors();
+    if (gles_egl_current->api==2) glDeleteFramebuffers(n,names);
+    else {
+        if (!gles_native_require_fbo()) { gles_native_error(GL_INVALID_OPERATION); return; }
+        if (!es1) es1=(Proc)eglGetProcAddress("glDeleteFramebuffersOES");
+        if (!es1) { gles_native_error(GL_INVALID_OPERATION); return; }
+        es1(n,names);
     }
-    if (!es1) es1=(Proc)eglGetProcAddress("glDeleteFramebuffersOES");
-    if (!es1) { fprintf(stderr,"[gles-egl] missing required glDeleteFramebuffersOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
-    es1(n,names);
+    GLenum error=gles_native_driver_error(); gles_native_error(error);
+    if (!error) gles_native_delete_texture_attachments(n,names);
 }
+
 static void gles_native_DeleteRenderbuffers(GLsizei n, const GLuint *names)
 {
     typedef void (*Proc)(GLsizei n, const GLuint *names);
@@ -403,17 +534,26 @@ static void gles_native_GetRenderbufferParameteriv(GLenum target, GLenum pname, 
 }
 static void gles_native_GetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint *value)
 {
-    typedef void (*Proc)(GLenum target, GLenum attachment, GLenum pname, GLint *value);
+    typedef void (*Proc)(GLenum,GLenum,GLenum,GLint *);
     static Proc es1;
-    if (gles_egl_current->api == 2) { glGetFramebufferAttachmentParameteriv(target,attachment,pname,value); return; }
-    if (!gles_native_require_fbo()) {
-        if (value) *value=0;
-        gles_native_error(GL_INVALID_OPERATION); return;
+    if (gles_egl_current->api==2) glGetFramebufferAttachmentParameteriv(target,attachment,pname,value);
+    else {
+        if (!gles_native_require_fbo()) { if(value)*value=0;gles_native_error(GL_INVALID_OPERATION);return; }
+        if (!es1) es1=(Proc)eglGetProcAddress("glGetFramebufferAttachmentParameterivOES");
+        if (!es1) { gles_native_error(GL_INVALID_OPERATION);return; }
+        es1(target,attachment,pname,value);
     }
-    if (!es1) es1=(Proc)eglGetProcAddress("glGetFramebufferAttachmentParameterivOES");
-    if (!es1) { fprintf(stderr,"[gles-egl] missing required glGetFramebufferAttachmentParameterivOES\n"); gles_native_error(GL_INVALID_OPERATION); return; }
-    es1(target,attachment,pname,value);
+    if (pname==GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME) {
+        GLint type=0;
+        if (gles_egl_current->api==2) glGetFramebufferAttachmentParameteriv(target,attachment,GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,&type);
+        else es1(target,attachment,GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE,&type);
+        if (type==GL_TEXTURE) {
+            GLESEGLTexture *texture=gles_native_texture_from_native(*value);
+            if (texture) *value=texture->name;
+        }
+    }
 }
+
 #define glIsFramebufferOES gles_native_IsFramebuffer
 #define glIsRenderbufferOES gles_native_IsRenderbuffer
 #define glGenerateMipmapOES gles_native_GenerateMipmap
@@ -429,6 +569,23 @@ static void gles_native_GetFramebufferAttachmentParameteriv(GLenum target, GLenu
 #define glDeleteRenderbuffersOES gles_native_DeleteRenderbuffers
 #define glGetRenderbufferParameterivOES gles_native_GetRenderbufferParameteriv
 #define glGetFramebufferAttachmentParameterivOES gles_native_GetFramebufferAttachmentParameteriv
+
+#define glGenTextures gles_native_gen_textures
+#define glIsTexture gles_native_is_texture
+#define glBindTexture gles_native_bind_texture
+#define glDeleteTextures gles_native_delete_textures
+#define glGetIntegerv gles_native_get_integer
+#define glIsEnabled gles_native_is_enabled
+#define glEnable gles_native_enable
+#define glDisable gles_native_disable
+#define glTexParameteri gles_native_glTexParameteri
+#define glTexParameterf gles_native_glTexParameterf
+#define glTexParameteriv gles_native_glTexParameteriv
+#define glTexParameterfv gles_native_glTexParameterfv
+#define glGetTexParameteriv gles_native_glGetTexParameteriv
+#define glGetTexParameterfv gles_native_glGetTexParameterfv
+#define glDrawArrays gles_native_draw_arrays
+#define glDrawElements gles_native_draw_elements
 
 /* DrawTex uses window coordinates, current color and per-unit crop rectangles.
  * Execute it with the real ES1 array pipeline rather than vendor DrawTex entry
@@ -479,8 +636,7 @@ static bool gles_native_draw_tex(GLfloat x, GLfloat y, GLfloat z, GLfloat w, GLf
         glGetIntegerv(GL_TEXTURE_COORD_ARRAY_SIZE,&array->size); glGetIntegerv(GL_TEXTURE_COORD_ARRAY_TYPE,&array->type);
         glGetIntegerv(GL_TEXTURE_COORD_ARRAY_STRIDE,&array->stride); glGetIntegerv(GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING,&array->buffer);
         glGetPointerv(GL_TEXTURE_COORD_ARRAY_POINTER,&array->pointer);
-        GLint name; glGetIntegerv(GL_TEXTURE_BINDING_2D,&name);
-        GLESEGLTexture *texture=gles_native_texture(name,false);
+        GLESEGLTexture *texture=gles_native_bound_texture(GL_TEXTURE_2D);
         GLfloat s0=0,s1=0,t0=0,t1=0;
         if (texture && texture->width && texture->height && unit<crop_count && has_crop[unit]) {
             s0=(GLfloat)crop[unit][0]/texture->width; s1=s0+(GLfloat)crop[unit][2]/texture->width;
@@ -499,7 +655,9 @@ static bool gles_native_draw_tex(GLfloat x, GLfloat y, GLfloat z, GLfloat w, GLf
     glMatrixMode(GL_PROJECTION); glLoadMatrixf(window_projection);
     const GLfloat vertices[]={left,bottom,0, right,bottom,0, left,top,0, right,top,0};
     glBindBuffer(GL_ARRAY_BUFFER,0); glVertexPointer(3,GL_FLOAT,0,vertices); glEnableClientState(GL_VERTEX_ARRAY);
+    gles_egl_current->drawing_window_quad=true;
     glDrawArrays(GL_TRIANGLE_STRIP,0,4);
+    gles_egl_current->drawing_window_quad=false;
     for (unsigned unit=0;unit<(unsigned)units;unit++) {
         glActiveTexture(GL_TEXTURE0+unit); glClientActiveTexture(GL_TEXTURE0+unit);
         glMatrixMode(GL_TEXTURE); glLoadMatrixf(matrices[unit]);
