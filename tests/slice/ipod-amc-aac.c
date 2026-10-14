@@ -4,6 +4,7 @@
  * buffer contract independently of any guest app or copyrighted media asset.
  *
  * SLICE include/hw/arm/ipod_touch_amc.h define AMC_
+ * SLICE:amc hw/arm/ipod_touch_amc.c fn amc_local
  * SLICE:amc hw/arm/ipod_touch_amc.c range typedef enum AMCProgram | \n#else
  * SLICE:amc hw/arm/ipod_touch_amc.c fn amc_update_irq amc_ctrl_of
  * SLICE:amc hw/arm/ipod_touch_amc.c range static const uint32_t amc_banks[] | \nstatic int amc_bank_cmd

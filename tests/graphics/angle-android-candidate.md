@@ -167,3 +167,16 @@ Repeat on 4 KiB and 16 KiB AVDs with source/fixture/package receipts. Keep snaps
 unavailable and require fresh-worker cold restart. Any required feature gap
 must be fixed or recorded as a failed gate; do not weaken the workload or replace
 its pixels.
+
+## Reconciled provenance tooling
+
+`build-angle-android.sh` retains the tested optional
+`ANGLE_PROFILE=no-abseil-perfetto` output profile and `--prepare-only` phase.
+The default profile is unchanged; GN preparation does not qualify a runtime.
+`angle-selected-inputs.py` inventories actual direct link objects, forced
+thin-archive members and selected compiler headers from the reviewed Ninja
+rules. `make-angle-notices.py` builds the offline schema1 notice bundle from
+those inventories, retaining component grants and compiler-rt provenance
+qualifications. Final section GC, complete corresponding-source coverage and
+license compatibility remain separate checks. Keep generated inventories and
+private build paths outside Git.

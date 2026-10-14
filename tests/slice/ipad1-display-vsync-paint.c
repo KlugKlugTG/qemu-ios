@@ -1,7 +1,7 @@
 /* Production A4 VBL and display_update: latch/IRQs precede visible painting.
  * The existing ipad1-display-relatch slice separately tests actual compositing.
- * SLICE:constants hw/arm/s5l8930_display.c define (DP_IRQ_STATUS|DP_IRQ_VBL|VBL_PERIOD_NS|QUIET_RELATCH_VBLS)[[:space:]]
- * SLICE hw/arm/s5l8930_display.c fn vbl_tick display_update
+ * SLICE:constants hw/arm/s5l8930_display.c define (DP_IRQ_STATUS|DP_IRQ_VBL|VBL_PERIOD_NS|QUIET_RELATCH_VBLS|CLCD_IRQ_FRAME|CLCD_IRQ_ENABLE|CLCD_IRQ_MASK)[[:space:]]
+ * SLICE hw/arm/s5l8930_display.c fn clcd_update_irq gamma_row vbl_tick display_update
  * PKG glib-2.0
  * VARIANT
  * VARIANT -DTEST_STALL
@@ -26,10 +26,13 @@ struct S5L8930DisplayState {
     int ftl; void *vbl; QemuConsole *con;
     uint8_t *front; uint32_t front_key[4]; bool front_valid; uint64_t front_gen;
     unsigned shown; uint64_t shown_gen; DisplaySurface *shown_surface;
-    bool dirty, lit;
+    bool dirty, lit, gamma_identity;
+    uint32_t clcd[2][0x2000 / 4], clcd_status; int clcd_irq;
+    uint8_t gamma8[3][256];
 };
 static unsigned latches, ends, irqs, hw_updates, publications, rearms, abs_inputs, buttons, syncs, stops;
-static bool recorded_new;
+static bool recorded_new, clcd_level;
+static void qemu_set_irq(int irq, bool level) { clcd_level = level; }
 static int64_t now = 1234;
 static void qemu_input_queue_abs(void *con, int axis, int value, int min, int max) { abs_inputs++; }
 static void qemu_input_queue_btn(void *con, int button, bool down) { buttons++; }
@@ -73,7 +76,9 @@ static void dpy_gfx_update(QemuConsole *con, int x, int y, int w, int h) { publi
 #include "slice.h"
 int main(void) {
     uint32_t front[4] = {7, 8, 9, 10};
-    S5L8930DisplayState s = {.front = (uint8_t *)front, .dirty = true, .lit = true};
+    S5L8930DisplayState s = {.front = (uint8_t *)front, .dirty = true, .lit = true, .gamma_identity = true};
+    s.clcd[0][CLCD_IRQ_ENABLE / 4] = 1;
+    s.clcd[0][CLCD_IRQ_MASK / 4] = CLCD_IRQ_FRAME;
     QemuConsole console = {.visible = true, .surface = {.w = 2, .h = 2}, .state = &s};
     s.con = &console; s.pipe[0].swap_pending = true; s.pipe[1].swap_pending = true;
 #ifdef TEST_STALL
@@ -87,6 +92,7 @@ int main(void) {
     strcpy(s.vsync_input, "abs 10 20"); s.stop_after = 1;
     vbl_tick(&s);
     assert(abs_inputs == 2 && syncs == 1 && stops == 2 && !s.vsync_input[0]);
+    assert(clcd_level && (s.clcd_status & CLCD_IRQ_FRAME));
     assert(recorded_new && latches == 1 && ends == 2 && rearms == 1 && s.swaps == 1);
 #ifdef __APPLE__
     assert(hw_updates == 0 && publications == 0);
