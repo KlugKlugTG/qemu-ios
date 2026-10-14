@@ -167,13 +167,17 @@ static void restore_size(void) {
 }
 /* A key or IV write replaces the word (or the bytes it covers). */
 static void registers(void) {
+ /* the 1G iBoot's pattern: the IV first, a byte per 32-bit write, then the reset pulse, then the key the same way */
+ static const uint32_t iv[4]={0x41705d11,0x6f984b82,0x9c6c99bb,0xa5f17869}, key[4]={0x0e0000ea,0x18f09fe5,0x18f09fe5,0x18f09fe5};
  IPodTouchAESState s={0};
- W(AES_KEY_REG+0x10,0xffffffff);W(AES_KEY_REG+0x10,0x12345678);
- assert(s.custkey[4]==0x12345678);
- W(AES_IV_REG+4,0xffffffff);ipod_touch_aes_write(&s,AES_IV_REG+5,0x00,1);
- assert(s.ivec[1]==0xffff00ff);
- ipod_touch_aes_write(&s,AES_IV_REG+6,0x1234,2);
- assert(s.ivec[1]==0x123400ff);
+ for(int w=0;w<4;w++)for(int b=3;b>=0;b--)W(AES_IV_REG+4*w,iv[w]&(0xffu<<(8*b)));
+ W(AES_UNKREG0,1);W(AES_UNKREG0,0);
+ for(int w=0;w<4;w++)for(int b=3;b>=0;b--)W(AES_KEY_REG+0x10+4*w,key[w]&(0xffu<<(8*b)));
+ for(int w=0;w<4;w++)assert(s.ivec[w]==iv[w]&&s.custkey[4+w]==key[w]);
+ /* byte and halfword writes land in their lanes */
+ IPodTouchAESState t={0};
+ ipod_touch_aes_write(&t,AES_IV_REG+5,0xab,1);ipod_touch_aes_write(&t,AES_IV_REG+6,0x1234,2);
+ assert(t.ivec[1]==0x1234ab00);
 }
 int main(void) {
  registers();
