@@ -47,6 +47,33 @@ def leading_notices(data):
     return ''
 
 
+def notice_archive_inputs(inputs):
+    """Verify archive pins; record truly empty inputs without inventing code."""
+    linked, empty = {}, {}
+    for name, expected in inputs.items():
+        path = Path(name)
+        if path.suffix != '.a':
+            continue
+        data = path.read_bytes()
+        if sha(data) != expected:
+            raise ValueError('linked archive changed: ' + path.name)
+        if path.name in linked and linked[path.name] != expected:
+            raise ValueError('ambiguous linked archive: ' + path.name)
+        linked[path.name] = expected
+        # A regular ar magic with no following bytes cannot contain an object,
+        # index or external member. Do not exempt thin or nonempty archives.
+        if data == b'!<arch>\n':
+            entry = empty.setdefault(path.name, {'sha256': expected, 'member_count': 0,
+                                                'input_paths': []})
+            entry['input_paths'].append(str(path))
+    covered = {'libqemuutil.a', 'libltm-pvrtc.a', 'libfdt.a', 'libatomic.a'}
+    covered.update(lib for names in ARCHIVES.values() for lib in names)
+    unmapped = linked.keys() - covered - empty.keys()
+    if unmapped:
+        raise ValueError('unmapped selected archives require notice review: ' + ', '.join(sorted(unmapped)))
+    return linked, empty
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('build', type=Path)
@@ -69,19 +96,10 @@ def main():
     inventory = json.loads((build / 'selected-license-inventory.json').read_text())
     if (inventory['source_revision'], inventory['library_sha256']) != (revision, engine['library_sha256']):
         parser.error('selected-source inventory differs from engine; regenerate its audit')
-    linked = {}
-    for name, expected in engine['link_inputs'].items():
-        path = Path(name)
-        if path.suffix == '.a':
-            if sha(path.read_bytes()) != expected:
-                parser.error('linked archive changed: ' + path.name)
-            if path.name in linked and linked[path.name] != expected:
-                parser.error('ambiguous linked archive: ' + path.name)
-            linked[path.name] = expected
-    covered = {'libqemuutil.a', 'libltm-pvrtc.a', 'libfdt.a', 'libatomic.a'}
-    covered.update(lib for names in ARCHIVES.values() for lib in names)
-    if linked.keys() - covered:
-        parser.error('unmapped selected archives require notice review: ' + ', '.join(sorted(linked.keys() - covered)))
+    try:
+        linked, empty_archives = notice_archive_inputs(engine['link_inputs'])
+    except ValueError as error:
+        parser.error(str(error))
     files = {}
     components = []
 
@@ -212,6 +230,8 @@ def main():
                 'source_reference': args.source_reference, 'source_revision': revision,
                 'source_reference_availability': 'publisher must verify before distribution',
                 'library_sha256': engine['library_sha256'], 'components': components,
+                'empty_archive_inputs': empty_archives,
+                'empty_archive_scope': 'verified regular ar magic only; zero members, no object payload',
                 'files': [{'path': name, 'sha256': sha(data)} for name, data in sorted(files.items())]}
     files['manifest.json'] = (json.dumps(manifest, indent=2, ensure_ascii=True) + '\n').encode()
     destination = args.destination.absolute()
