@@ -199,6 +199,7 @@ typedef struct {
 	QEMUTimer *boot_args_timer;
 	unsigned boot_args_writes;
     uint64_t boot_args_scan_deadline;
+    uint64_t boot_args_scan_started_ms, boot_args_scan_attempts;
     uint32_t boot_args_delay_ms, boot_args_repeat, boot_args_interval_ms;
     bool boot_args_delay_ms_explicit, boot_args_repeat_explicit;
     bool boot_args_interval_ms_explicit;
