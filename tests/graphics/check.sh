@@ -4,6 +4,8 @@ set -eu
 cd "$(dirname "$0")/../.."
 output=${1:?Usage: tests/graphics/check.sh OUTPUT_DIRECTORY [NDK_DIRECTORY]}
 mkdir -p "$output"
+cc -Wall -Wextra -Werror tests/graphics/frame-pixels.c -o "$output/frame-pixels"
+"$output/frame-pixels"
 cc -Wall -Wextra -Werror tests/graphics/gpio-wake-budget.c -o "$output/gpio-wake-budget"
 "$output/gpio-wake-budget"
 cc -Wall -Wextra tests/graphics/egl-render.c -o "$output/egl-desktop" $(pkg-config --cflags --libs egl gl)
