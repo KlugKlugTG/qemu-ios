@@ -4730,6 +4730,79 @@ static int64_t gles_sync_surface_1(CPUState *cpu)
     return 0;
 }
 
+static bool gles_surface_metrics_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *flag = getenv("IT_GLES_FRAME_METRICS");
+        enabled = flag && atoi(flag);
+    }
+    return enabled;
+}
+
+static void gles_report_surface_pixels(GLuint texture, const GLESSurface *s,
+                                      GLint binding, const uint8_t *pixels,
+                                      unsigned bpp, bool rgb555)
+{
+    static unsigned copied;
+    GlesFramePixels content;
+
+    if (!gles_surface_metrics_enabled() || copied >= 16 ||
+        !gles_frame_pixels_packed(pixels, (size_t)s->width * bpp,
+            s->width, s->height, bpp, s->format != GLES_SURFACE_RGBA32,
+            rgb555, &content)) {
+        return;
+    }
+    copied++;
+    /* Called only after every row reaches guest memory. These identifiers are
+     * in the executor's namespace; no new query of host GL state is needed. */
+    fprintf(stderr, "[gles] CA copied sample=%u/16 ctx=%08x api=%u "
+            "texture-key=%u bound-fbo=%u binding=%d readback-fbo=%u "
+            "base=%08x format=%08x target=%x %ux%u guest-stride=%u "
+            "readback-stride=%zu pages=%u window-flip=%u gen=%" PRIu64
+            " alpha=%s pixels=%" PRIu64 " nonzero-rgb=%" PRIu64
+            " nonzero-alpha=%" PRIu64 " opaque=%" PRIu64
+            " mean-rgba=%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64
+            " rgba-fnv64=%016" PRIx64 "\n",
+            copied, gles_cur_ctx, gh.api_version, texture, gh.bound_framebuffer,
+            binding, gh.sync_fbo, s->base, s->format, s->target,
+            s->width, s->height, s->stride, (size_t)s->width * bpp, s->npages,
+            (unsigned)s->window, s->gen, bpp == 2 ? "implicit" : "stored",
+            content.pixels, content.nonzero_rgb, content.nonzero_alpha,
+            content.opaque, content.mean[0], content.mean[1], content.mean[2],
+            content.mean[3], content.hash);
+}
+
+static void gles_report_surface_flush(uint32_t base, unsigned surfaces,
+                                     unsigned attempted, unsigned copied,
+                                     int result)
+{
+    static unsigned flushes, empty;
+    unsigned sample, limit;
+    if (!gles_surface_metrics_enabled()) {
+        return;
+    }
+    if (!attempted && !result) {
+        /* Imports may flush many clean aliases before the first draw. Their
+         * empty flushes must not exhaust the budget for real writebacks. */
+        if (empty >= 4) {
+            return;
+        }
+        sample = ++empty;
+        limit = 4;
+    } else {
+        if (flushes >= 16) {
+            return;
+        }
+        sample = ++flushes;
+        limit = 16;
+    }
+    fprintf(stderr, "[gles] CA flush sample=%u/%u ctx=%08x api=%u "
+            "requested-base=%08x surfaces=%u attempted=%u copied=%u result=%d\n",
+            sample, limit, gles_cur_ctx, gh.api_version, base, surfaces,
+            attempted, copied, result);
+}
+
 /* Texture `texture`'s pixels into its surface's guest memory. */
 static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
 {
@@ -4801,6 +4874,7 @@ static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
     /* Our own write: its aliases see a new generation, this texture already holds it. */
     gles_surface_changed(s);
     s->gen = gles_gen;
+    gles_report_surface_pixels(texture, s, framebuffer, pixels, bpp, rgb555);
     return 0;
 }
 
@@ -4811,14 +4885,27 @@ static int gles_surface_flush(CPUState *cpu, uint32_t base)
 {
     GHashTableIter it;
     gpointer key, value;
+    unsigned attempted = 0, copied = 0;
 
-    if (!gh.surfaces) return 0;
+    if (!gh.surfaces) {
+        gles_report_surface_flush(base, 0, 0, 0, 0);
+        return 0;
+    }
     g_hash_table_iter_init(&it, gh.surfaces);
     while (g_hash_table_iter_next(&it, &key, &value)) {
         GLESSurface *s = value;
-        if (s->dirty && (!base || s->base == base) &&
-            gles_surface_writeback(cpu, GPOINTER_TO_UINT(key), s)) return -1;
+        if (s->dirty && (!base || s->base == base)) {
+            attempted++;
+            if (gles_surface_writeback(cpu, GPOINTER_TO_UINT(key), s)) {
+                gles_report_surface_flush(base, g_hash_table_size(gh.surfaces),
+                                          attempted, copied, -1);
+                return -1;
+            }
+            copied++;
+        }
     }
+    gles_report_surface_flush(base, g_hash_table_size(gh.surfaces),
+                              attempted, copied, 0);
     return 0;
 }
 
