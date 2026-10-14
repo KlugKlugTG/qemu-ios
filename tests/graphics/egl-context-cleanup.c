@@ -77,6 +77,10 @@ int main(void)
     reset(&unrelated);
     gles_context_delete_objects(&state);
     assert(deletes == 4 && deleted[3] == 16);
+    state.stencil = state.depth;
+    reset(&unrelated);
+    gles_context_delete_objects(&state);
+    assert(deletes == 3); /* Defensive alias is never deleted twice. */
     refused = &victim;
     reset(&unrelated);
     gles_context_delete_objects(&state);
