@@ -36,6 +36,7 @@ Run the default first, then these one-factor comparisons using the SAME binary:
 | `--generated` | glGen names instead of first-bind private names |
 | `--clamp` | CLAMP_TO_EDGE for both private texture wrap axes |
 | `--separate` | Separate depth16 and stencil8 renderbuffers |
+| `--separate24` | Separate depth24 and stencil8, preserving depth precision |
 
 The probe reports UID/eUID, SELinux context, actual vendor GL/EGL mappings,
 renderer/version/extensions and each operation's real GL error. A run-as UID
@@ -60,3 +61,44 @@ select the next change.
 The default and comparisons are source/build diagnostics until actually run.
 Guest rendering, visible changing scenes, lifecycle and normal Stop remain
 independent acceptance gates.
+
+
+The physical PowerVR ES-CM1.1 probe isolated an unsupported packed storage enum:
+color-only COMPLETE; packed allocation INVALID_ENUM; separate24 + stencil8
+COMPLETE and real green/blue depth/stencil readback PASS. Separate16 also passed;
+size32/generated/clamp did not cure packed storage. Those are shell-UID feature
+results with matching vendor DSOs, not packaged application acceptance.
+
+The production native-only selection now preserves packed24+8 where advertised
+(or ES3 core). Otherwise it uses separate depth24 when OES_depth24 is present,
+depth16 when it is absent, plus stencil8 (GLES1 requires OES_stencil8; ES2 core
+supports it). Missing required stencil capability fails explicitly. There is no
+vendor-specific retry and no extension/guest renderbuffer emulation. Mac/EAGL
+keeps packed storage, including drawable resizing after old desktop snapshots.
+Native snapshots remain explicitly unsupported.
+
+Both initial allocation and drawable resize use the same production allocation
+and attachment helpers. Allocation leaves depth bound as before. Resize commits
+only after complete/error-free storage, replaces private bindings, preserves
+unrelated guest bindings, and deletes both old separate names exactly once.
+Failure deletes temporary storage and preserves the old drawable/bindings.
+Checked-context teardown deletes a separate stencil only after acquiring the
+correct context. A failed initialized context remains latched until its existing
+context-destruction/new-context path, without a new retry policy.
+
+Target-free checks (not driver acceptance): compile `drawable-depth.c` both with
+and without GLES_HOST_EGL_ES using -O2/-Werror/ASAN/UBSAN; compile
+`egl-context-cleanup.c` with GLES_HOST_EGL+GLES_HOST_EGL_ES, GLES_HOST_EGL only,
+and neither. They exercise the actual production resize/allocation/deletion
+functions: packed/separate24/separate16, ES1/ES2/ES3 capabilities, exact extension
+matching, initial binding, private stencil rebinding, unrelated guest binding
+preservation, failed stencil rollback/retry, new-context lifetime, and rejected
+cleanup binding. Full engine and normal-app-UID PowerVR guest retest remain
+required for the changed producer.
+
+Guest support is separate: source `contrib/it-gles/mbxshim.c` advertises no packed
+extension. `gles1x.c` forwards core extension strings and adds only the existing
+rectangle/CoreSurface extensions. GLES_SLOT_RENDERBUFFER_STORAGE continues to
+forward the guest format through gles_rb_format (packed is not translated), so
+an unsupported guest-created packed buffer retains the real native error. This
+source audit does not establish the exact strings of every frozen guest binary.

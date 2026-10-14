@@ -349,6 +349,8 @@ typedef struct {
 #if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     CGLContextObj cgl;
 #endif
+    GLuint stencil;                    /* separate private stencil; 0 when packed */
+    GLenum drawable_depth_format;      /* native capability-selected private storage */
     GLuint fbo, tex, depth, sync_fbo;   /* sync_fbo: gles_surface_writeback's scratch */
     GLuint copy_fbo;                    /* gles_surface_copy's draw side */
     uint32_t drawable_width, drawable_height;
@@ -933,6 +935,8 @@ static void gles_drawable_init_record(GLESDrawableInitDiagnostic *d,
 #define GLES_DRAWABLE_INIT_RECORD(stage) ((void)0)
 #endif
 
+#include "gles-host-drawable-depth.c.inc"
+
 static bool gles_host_init(void)
 {
     if (gh.inited) {
@@ -995,19 +999,25 @@ static bool gles_host_init(void)
     GLES_DRAWABLE_INIT_RECORD("color-status");
 #endif
 
-    /* Depth AND stencil, packed. Android-native failure diagnostics below
-     * report whether this context actually advertises packed storage; the
-     * framebuffer-object extension alone does not guarantee that format. */
-    gh.depth = gles_private_name(glIsRenderbufferEXT);
-    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, gh.depth);
-    GLES_DRAWABLE_INIT_RECORD("bind-depth-stencil");
-    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_DEPTH24_STENCIL8_EXT,
-                             GLES_FB_WIDTH, GLES_FB_HEIGHT);
+    /* Optional packed storage is not implied by framebuffer-object support.
+     * Keep the desktop/EAGL recipe; native ES selects only actual capabilities. */
+    gh.drawable_depth_format = GL_DEPTH24_STENCIL8_EXT;
+#ifdef GLES_HOST_EGL_ES
+    gh.drawable_depth_format = gles_drawable_depth_select(
+        (const char *)glGetString(GL_VERSION),
+        (const char *)glGetString(GL_EXTENSIONS), gles_egl_current->api);
+    if (!gh.drawable_depth_format) {
+        fprintf(stderr, "[gles] unsupported required private drawable stencil8 storage\n");
+        if (legacy) gles_end_context();
+        gh.failed = true;
+        return false;
+    }
+#endif
+    gles_drawable_depth_allocate(gh.drawable_depth_format,
+                                GLES_FB_WIDTH, GLES_FB_HEIGHT,
+                                &gh.depth, &gh.stencil);
     GLES_DRAWABLE_INIT_RECORD("depth-stencil-storage");
-    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT,
-                                 GL_RENDERBUFFER_EXT, gh.depth);
-    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_STENCIL_ATTACHMENT_EXT,
-                                 GL_RENDERBUFFER_EXT, gh.depth);
+    gles_drawable_depth_attach(gh.depth, gh.stencil);
     GLES_DRAWABLE_INIT_RECORD("depth-stencil-attachment");
 
     /*
@@ -1036,12 +1046,12 @@ static bool gles_host_init(void)
         GLES_DRAWABLE_INIT_RECORD("final-status");
         const char *extensions = (const char *)glGetString(GL_EXTENSIONS);
         fprintf(stderr, "[gles] FBO incomplete: status=0x%x color-status=0x%x "
-                "api=%u size=%ux%u fbo=%u texture=%u depth-stencil=%u "
+                "api=%u size=%ux%u fbo=%u texture=%u depth=%u stencil=%u depth-format=0x%x "
                 "first-stage=%s first-error=0x%x packed-depth-stencil=%u "
                 "full-npot=%u limited-npot=%u renderer=%s version=%s\n",
                 init_status, diagnostic.color_status, gh.api_version,
                 (unsigned)GLES_FB_WIDTH, (unsigned)GLES_FB_HEIGHT,
-                gh.fbo, gh.tex, gh.depth,
+                gh.fbo, gh.tex, gh.depth, gh.stencil, gh.drawable_depth_format,
                 diagnostic.first_stage ? diagnostic.first_stage : "none",
                 diagnostic.first_error,
                 gles_native_extension(extensions,"GL_OES_packed_depth_stencil"),
@@ -1109,6 +1119,11 @@ static bool gles_host_init(void)
     fprintf(stderr, "[gles] host GL up: %s / %s, present by %s (guest-api=%u)\n",
             glGetString(GL_VERSION), glGetString(GL_RENDERER),
             gh.iosurface ? "IOSurface" : "readback", gh.api_version == 2 ? 2u : 1u);
+#ifdef GLES_HOST_EGL_ES
+    fprintf(stderr, "[gles] private drawable depth-format=0x%x stencil=%s size=%ux%u\n",
+            gh.drawable_depth_format, gh.stencil ? "separate8" : "packed8",
+            gh.drawable_width, gh.drawable_height);
+#endif
     return true;
 }
 
@@ -4050,78 +4065,7 @@ static int64_t gles_pvrtc_upload(CPUState *cpu, uint32_t target, uint32_t level,
  * Allocate all drawable attachments together and publish them only after the
  * replacement is complete. A failed resize leaves the old storage usable.
  * Guest texture/renderbuffer/framebuffer bindings and viewport stay intact. */
-static int64_t gles_drawable_storage(uint32_t width, uint32_t height)
-{
-    GLint texture, renderbuffer, framebuffer;
-    GLuint color = 0, depth = 0, fbo = 0;
-    GLenum error, status;
-    uint8_t *readback;
-
-    if (!width || !height || width > 2048 || height > 2048) {
-        gles_refuse("drawable:size:%ux%u", width, height);
-        return gles_reject(GL_INVALID_VALUE);
-    }
-    gh.drawable_announced = true;
-    if (width == gh.drawable_width && height == gh.drawable_height) return 0;
-    readback = g_try_malloc0_n((size_t)width * height, 4);
-    if (!readback) {
-        gles_refuse("drawable:memory");
-        return gles_reject(GL_OUT_OF_MEMORY);
-    }
-
-    gles_texture_begin();
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
-    glGetIntegerv(GL_RENDERBUFFER_BINDING_EXT, &renderbuffer);
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING_EXT, &framebuffer);
-    color = gles_private_name(glIsTexture);
-    glBindTexture(GL_TEXTURE_2D, color);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height,
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    depth = gles_private_name(glIsRenderbufferEXT);
-    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, depth);
-    glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_DEPTH24_STENCIL8_EXT, width, height);
-    fbo = gles_private_name(glIsFramebufferEXT);
-    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, fbo);
-    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
-                              GL_TEXTURE_2D, color, 0);
-    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT,
-                                 GL_RENDERBUFFER_EXT, depth);
-    glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_STENCIL_ATTACHMENT_EXT,
-                                 GL_RENDERBUFFER_EXT, depth);
-    status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
-    error = glGetError();
-    if (error == GL_NO_ERROR && status != GL_FRAMEBUFFER_COMPLETE_EXT)
-        error = GL_OUT_OF_MEMORY;
-    if (error != GL_NO_ERROR) gles_refuse("drawable:storage:0x%x", error);
-    if (error == GL_NO_ERROR) {
-        if ((GLuint)texture == gh.tex) texture = color;
-        if ((GLuint)renderbuffer == gh.depth) renderbuffer = depth;
-        if ((GLuint)framebuffer == gh.fbo) framebuffer = fbo;
-        glDeleteTextures(1, &gh.tex);
-        glDeleteRenderbuffersEXT(1, &gh.depth);
-        glDeleteFramebuffersEXT(1, &gh.fbo);
-        g_free(gh.readback);
-        gh.tex = color; gh.depth = depth; gh.fbo = fbo;
-        gh.readback = readback;
-        gh.drawable_width = width; gh.drawable_height = height;
-        /* The portable readback path handles resized layers on both hosts.
-         * The platform's original IOSurface remains owned by its context. */
-        gh.iosurface = false;
-        gh.fb_dirty = true;
-        gh.depth_cleared_this_frame = false;
-    } else {
-        glDeleteTextures(1, &color);
-        glDeleteRenderbuffersEXT(1, &depth);
-        glDeleteFramebuffersEXT(1, &fbo);
-        g_free(readback);
-    }
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, renderbuffer);
-    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, framebuffer);
-    return error == GL_NO_ERROR ? 0 : gles_reject(error);
-}
+#include "gles-host-drawable-storage.c.inc"
 
 static bool gles_surface_range(uint32_t base, uint32_t stride, unsigned rows,
                                unsigned rowbytes)
