@@ -358,6 +358,15 @@ static void vbl_tick(void *opaque)
     s->pipe[1].swap_pending = false;
     pipe_frame_end(&s->pipe[0]);
     pipe_frame_end(&s->pipe[1]);
+#ifndef __APPLE__
+    /* Adapted from upstream 97860b36b0e9fcdd008e95e58efff9609ca44aee.
+     * Paint the completed latch at vsync for visible portable consoles, so
+     * deferred host publication does not wait for the 30 ms GUI refresh.
+     * display_update already skips an unchanged latched frame. */
+    if (s->con && qemu_console_is_visible(s->con)) {
+        graphic_hw_update(s->con);
+    }
+#endif
     timer_mod(s->vbl, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBL_PERIOD_NS);
 }
 

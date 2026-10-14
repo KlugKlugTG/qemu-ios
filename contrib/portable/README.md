@@ -160,6 +160,7 @@ Focused host checks (ASan/UBSan, actual production functions):
 ```sh
 tests/slice/run.sh tests/slice/ipod-portable-frame.c
 tests/slice/run.sh tests/slice/ipod-ui-deferred-paint.c
+tests/slice/run.sh tests/slice/ipad1-display-vsync-paint.c
 tests/slice/run.sh tests/slice/ipod-portable-touch.c
 tests/slice/run.sh tests/slice/ipod-accel-sampling.c
 tests/slice/run.sh tests/slice/ipod-attitude.c
@@ -181,6 +182,16 @@ retain their lock/ownership contract. Reset cancels pending publication; engine
 exit cancels and deletes the bottom half before QEMU cleanup. The Apple path
 keeps its original display-refresh publication. This is a frame delivery change,
 not a verified Android presentation rate or CPU speedup.
+
+The A4 `s5l8930.display` portable path also paints its completed latch at visible
+vsync, adapting the separate display hunk from the same upstream commit. Its
+existing unchanged-front check suppresses duplicate publication; hidden/absent
+consoles and the held-swap test path do not add paints. Timer rearm, interrupt
+logic and the Apple path remain unchanged. This does not enable experimental
+120 Hz or import later upstream IRQ model changes. The A4 slice exercises the
+actual VBL and display-update functions with visible/hidden/null consoles,
+unchanged latches, input/stop callbacks and timer rearm. Removing the new paint
+block must fail the visible-paint assertion; no A4 guest result follows from it.
 
 The deferred-paint slice uses the actual capture/publication/reset/stop functions
 and AIO enqueue/dequeue/cancel/delete operations. It covers partial-rectangle
