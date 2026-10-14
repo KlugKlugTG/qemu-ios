@@ -147,3 +147,67 @@ Home was held and three 0x184=1 reads after release, plus two 0x124=4 reads.
 This verifies live Home pad consumption, with 704bytes logged over1.884 host
 seconds and the prior disabled trace restored. It lacks guest virtual timing
 and does not verify wake; the new diagnostic has not yet run on that target.
+
+### CA offscreen writeback diagnostics
+
+CoreAnimation can render imported CoreSurface textures offscreen and publish
+them through guest scanout memory without calling the explicit drawable-present
+operation. `gles_sync_surface_1` marks the attached imported surface dirty;
+`gles_surface_flush` writes dirty surfaces on `glFlush`, `glFinish`, return to
+the default framebuffer, or a surface alias reread. Consequently, absence of
+`[gles] present target` does not prove absence of guest-memory copies.
+
+With the fixed `IT_GLES_FRAME_METRICS=1` flag set before engine startup, the CA
+path separately reports at most 16 successful copied surfaces, 16 flushes that
+attempt writeback (including failures), and 4 empty flushes per process. Verbose
+or profiling alone does not enable these CA summaries. Successful-copy lines
+are emitted only after every row reaches guest memory and its generation is
+updated. They identify the initialized surface's texture key, executor FBO
+identifiers, guest base, accepted format, target, size, guest/readback stride,
+page count, row reversal and generation. CPU-only summaries cover BGRA32,
+RGBA32, RGB565 and RGB555; the latter has blue in the low five bits and red in
+the high five bits, matching the existing BGRA writeback packing. Both packed
+formats have implicit opaque alpha. The unused RGB555 bit 15 and row padding
+do not enter the canonical RGBA summary.
+
+Flush lines report the requested base, surface count, attempted/completed
+writebacks and the existing return result. A failed flush therefore remains
+visible even if it has no successful-copy line. The metrics do not add GL
+queries, read or clear GL errors, change pixels, alter dirty handling, or change
+the existing writeback return value. FBO and texture identifiers are in the
+executor namespace; they must not be treated as a guarantee of native driver
+object names. A successful copy does not establish LCD scanout selection,
+backlight, Android presentation or a guest acceptance pass.
+
+The synthetic `frame-pixels.c` regression checks RGBA/BGRA, RGB565/RGB555,
+alpha distinctions, asymmetric channel order, the unused RGB555 bit, padded
+rows, cropping and invalid sizes without GL or guest assets.
+
+### Frozen Android/Linux log comparison
+
+The actual packaged 4 KiB AVD attempt used the normal app UID and verified all
+197 public ANGLE dispatch owners. Its early `engine-full.log` (214 lines,
+SHA-256 `ef0863e3ac95240bc42233d1bb862de80fff6198e4b2129887baa1db7c671c17`)
+ended before CA attachment. Its later `engine-cleanup.log` (229 lines,
+`cbd4b5bfd323cd7aa76bde1441397a049c6e09832037a047a95c1c7d650769f3`)
+contains CA attachment and four offscreen `glDrawElements` records. Actual
+copied images show an Apple boot logo while lit, then black pixels when the
+modeled panel sleeps. Visible Lock/Home/CA rendering remains unverified.
+
+Existing Linux GUI runs 11 and 12 use engine
+`1ffcb57dab386ad2e144337e7670ea4b058ad18608500b6c7d72db2624ba03ff` from
+producer `b88aaabee7b57427bbb68f345eae3878716266db`. Each log records 16
+offscreen draws, the logger's cap; their log hashes are respectively
+`319da8e4594f83c067ee7ed77baf9081820c265642770b60b13bacb995ba07ab` and
+`76fc5ea49302a99f9a16da9e96a30371886571d38fcc00ebdbd8c53b43dd5848`.
+Their real copied Photos-entry images were independently viewed and contain
+the guest's Photo Albums UI. The Linux runs reused a writable state; Android
+used a fresh independent baseline import, so elapsed-time/state differences
+are not controlled evidence of a driver cause.
+
+All three late logs lack explicit drawable-present, refusal and raised-GL-error
+records. Their shared offscreen texture-unit and blend fields are therefore
+not isolated failure markers. These frozen logs do not identify the CA
+writeback base, format, completed rows or resulting pixel content. The new
+CA metrics close that observation gap in a future engine only; no existing
+artifact or target result is retroactively qualified by this source change.
