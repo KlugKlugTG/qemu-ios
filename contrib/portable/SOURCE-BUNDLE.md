@@ -57,15 +57,15 @@ does not require rebuilding application code. Replacement results need actual
 target testing; a successful link alone does not establish compatibility.
 
 To rebuild the engine source, prepare a writable checkout with the validated
-helper below. It unpacks the pinned libfdt source and disables installation of
-unrelated firmware blobs omitted from this bundle. That installation option
+helper below. It unpacks the pinned libfdt source and disables installation and
+unpacking of unrelated firmware blobs omitted from this bundle. Those build options
 does not change the selected engine object code. Actual configure/rebuild
 validation remains required before claiming a reproduced build. The filtered
 source archive excludes nonbuild assets and research captures, so
 its new local Git tree/identity differs from the original full upstream commit;
 `bundle.json` records the original corresponding source revision and every
 included file hash. The helper initializes a clean local commit for the build
-guard and reports the installation-only recipe adjustment. Use the original
+guard and reports the installation/unpacking-only adjustments. Use the original
 pinned dependency archives (the builders verify
 their SHA256), Python 3, Meson 1.10.0 with packaging 24.0, Ninja and pkg-config.
 

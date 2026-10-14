@@ -32,6 +32,13 @@ if original.count(needle) != 1:
     raise RuntimeError('Reviewed build recipe no longer matches asset-free preparation')
 # This changes installation of unrelated firmware blobs, not selected objects.
 recipe.write_text(original.replace(needle, "'--audio-drv-list=','--disable-install-blobs']"))
+meson = destination / 'meson.build'
+original_meson = meson.read_text()
+needle = 'unpack_edk2_blobs = bzip2.found()'
+if original_meson.count(needle) != 1:
+    raise RuntimeError('Reviewed firmware unpack rule no longer matches source preparation')
+# Upstream still creates blob unpack targets when install_blobs is false.
+meson.write_text(original_meson.replace(needle, needle + " and get_option('install_blobs')"))
 subprocess.run(['git', 'init', str(destination)], check=True)
 subprocess.run(['git', 'add', '.'], cwd=destination, check=True)
 subprocess.run(['git', '-c', 'user.name=Builder', '-c', 'user.email=builder@example.invalid',
@@ -39,4 +46,4 @@ subprocess.run(['git', '-c', 'user.name=Builder', '-c', 'user.email=builder@exam
                stdout=subprocess.DEVNULL)
 print('Prepared source revision from bundle:', metadata['source_revision'])
 print('Local identity:', subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=destination, text=True).strip())
-print('Only recipe change: disable installation of unrelated firmware blobs')
+print('Build-only adjustments: disable installation/unpacking of unrelated firmware blobs')
