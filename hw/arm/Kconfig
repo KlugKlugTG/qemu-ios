@@ -711,6 +711,7 @@ config IPAD1
 
 config IPOD_TOUCH_2G
      bool
+     select UNIMP
      select EXYNOS4
      select I2C
      select PL080
