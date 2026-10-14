@@ -24,6 +24,8 @@
 #include "hw/arm/ipod-attitude.h"
 #include "migration/vmstate.h"
 #include "system/runstate.h"
+#include "system/rtc.h"
+#include "qemu/cutils.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
 
@@ -303,7 +305,7 @@ struct S5L8930D1815State {
     uint8_t regs[256];
     uint8_t reg;            /* current register, auto-incrementing */
     bool addressing;        /* next byte received is the register number */
-    int64_t rtc_base;       /* counter = host epoch + rtc_base */
+    int64_t rtc_base;       /* counter = QEMU's RTC + rtc_base */
     uint64_t rtc_epoch;     /* "rtc-epoch": the counter at power-on, seconds; 0 = the host clock */
     uint32_t rtc_latch;
     uint16_t vbat_mv;       /* what ADC mux 4 measures; 0 = the 3900 default */
@@ -491,9 +493,18 @@ void s5l8930_d1815_usb_cable_event(DeviceState *dev)
     d1815_update_irq(s);
 }
 
+/* QEMU's RTC (-rtc base=, clock=), in Unix seconds: the host's UTC by default. */
+static int64_t d1815_rtc_clock(void)
+{
+    struct tm tm;
+
+    qemu_get_timedate(&tm, 0);
+    return mktimegm(&tm);
+}
+
 static uint32_t d1815_rtc_count(S5L8930D1815State *s)
 {
-    return (uint32_t)(time(NULL) + s->rtc_base);
+    return (uint32_t)(d1815_rtc_clock() + s->rtc_base);
 }
 
 static int d1815_event(I2CSlave *i2c, enum i2c_event event)
@@ -607,7 +618,7 @@ static void d1815_reset(DeviceState *dev)
         memcpy(scratch, &s->regs[PMU_SCRATCH], sizeof(scratch));
         rtc_base = s->rtc_base;
     } else if (s->rtc_epoch) {  /* a pinned date (a beta's expiry), running from power-on */
-        rtc_base = (int64_t)s->rtc_epoch - time(NULL);
+        rtc_base = (int64_t)s->rtc_epoch - d1815_rtc_clock();
     }
     s->restarting = false;
     timer_del(s->adc_timer);

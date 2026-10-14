@@ -1187,7 +1187,7 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
         if (!strcmp(d->type, TYPE_S5L8930_D1815)) {
             /* the PMU's clock and the agent's time sync agree on a pinned date */
             qdev_prop_set_uint64(dev, "rtc-epoch", s->rtc_epoch);
-            ipod_agent_set_clock_offset(s->agent, s->rtc_epoch ? (int64_t)s->rtc_epoch - time(NULL) : 0);
+            ipod_agent_set_clock_offset(s->agent, s->rtc_epoch ? (int64_t)s->rtc_epoch - ipod_agent_rtc_now() : 0);
         }
         i2c_slave_realize_and_unref(slave, bus, &error_fatal);
         if (d->irq2_pin) {

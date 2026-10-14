@@ -20,9 +20,12 @@
  *     if (0) {
  * so a stay-off restart is never confirmed as the halt.
  *
+ *   - The RTC counter (0x4C) reads QEMU's RTC (qemu_get_timedate, so -rtc base= moves it), and rtc-epoch
+ *     pins it at power-on and runs on from there.
+ *
  * SLICE hw/arm/s5l8930_i2c.c define PMU_[A-Za-z0-9_]+|D1815_ADDR
  * SLICE hw/arm/s5l8930_i2c.c range struct S5L8930D1815State { | \n/*\n * The guest's own power-off
- * SLICE hw/arm/s5l8930_i2c.c fn d1815_halt_reason d1815_set_ap_power d1815_update_irq d1815_adc_done s5l8930_d1815_button s5l8930_d1815_take_suspend s5l8930_d1815_set_usb_host s5l8930_d1815_set_vbat s5l8930_d1815_usb_cable_event d1815_rtc_count d1815_recv d1815_send d1815_reset s5l8930_d1815_guest_shutdown_confirmed d1815_post_load
+ * SLICE hw/arm/s5l8930_i2c.c fn d1815_halt_reason d1815_set_ap_power d1815_update_irq d1815_adc_done s5l8930_d1815_button s5l8930_d1815_take_suspend s5l8930_d1815_set_usb_host s5l8930_d1815_set_vbat s5l8930_d1815_usb_cable_event d1815_rtc_clock d1815_rtc_count d1815_recv d1815_send d1815_reset s5l8930_d1815_guest_shutdown_confirmed d1815_post_load
  */
 #include <assert.h>
 #define trace_event_get_state_backends(id) 0
@@ -48,6 +51,10 @@ typedef S5L8930D1815State DeviceState;
 #define qatomic_read(p) (*(p))
 #define qatomic_set(p,v) (*(p)=(v))
 static int64_t now;
+static time_t host_now = 1700000000;  /* the host clock */
+static time_t rtc_base_shift;         /* -rtc base=: QEMU's RTC this far from the host */
+static void qemu_get_timedate(struct tm *tm, int offset) { time_t t = host_now + rtc_base_shift + offset; gmtime_r(&t, tm); }
+#define mktimegm timegm
 static int shutdowns, resets;
 static int d1815_shutdown_confirmed;
 static int64_t qemu_clock_get_ns(int c) { return now; }
@@ -70,6 +77,11 @@ static void wr(S5L8930D1815State *s, uint8_t reg, uint8_t val) {
 static unsigned rd(S5L8930D1815State *s, uint8_t reg) {
     s->reg = reg;
     return d1815_recv((I2CSlave *)s);
+}
+static uint32_t rd32(S5L8930D1815State *s, uint8_t reg) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) v |= (uint32_t)rd(s, reg + i) << (8 * i);
+    return v;
 }
 static void advance(S5L8930D1815State *s) {
     assert(s->adc_timer->pending);
@@ -146,6 +158,17 @@ int main(void) {
     wr(&u, PMU_OOC, 0x02);
     assert(!u.ap_off && (u.regs[PMU_OOC] & 2));
 
+    /* --- the RTC counter: QEMU's RTC, then rtc-epoch on top --- */
+    S5L8930D1815State r = { .irq = &irq, .adc_timer = &timer };
+    d1815_reset((DeviceState *)&r);
+    assert(rd32(&r, PMU_RTC_COUNT) == 1700000000);           /* no -rtc: the host's UTC */
+    rtc_base_shift = 1265068800 - host_now;                  /* -rtc base=2010-02-02 */
+    assert(rd32(&r, PMU_RTC_COUNT) == 1265068800);
+    r.rtc_epoch = 1300000000;                                /* a pinned date: power-on reads it */
+    d1815_reset((DeviceState *)&r);
+    host_now += 5;
+    assert(rd32(&r, PMU_RTC_COUNT) == 1300000005);
+
     puts("PASS: D1815 restart confirms a stay-off halt, ADC start-bit clear, mux-6 cable classification, "
-         "hibernate rail");
+         "hibernate rail, RTC from QEMU's RTC and rtc-epoch");
 }
