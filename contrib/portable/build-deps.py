@@ -23,12 +23,13 @@ if a.abi!='linux':
  cc=str(bin/(triple+'28-clang'));cxx=cc+'++';ar=str(bin/'llvm-ar');ranlib=str(bin/'llvm-ranlib');target='android'
  env['PATH']=str(bin)+':/usr/bin:/bin:'+env['PATH'];env['ANDROID_NDK_ROOT']=str(a.ndk.resolve())
  crossfile=out/'android.cross'
- crossfile.write_text(f"[binaries]\nc = '{cc}'\ncpp = '{cxx}'\nar = '{ar}'\nstrip = '{bin/'llvm-strip'}'\npkg-config = 'pkg-config'\n[host_machine]\nsystem = 'android'\ncpu_family = '{arch}'\ncpu = '{arch}'\nendian = 'little'\n[properties]\nneeds_exe_wrapper = true\n[built-in options]\nc_args = ['-fPIC']\ncpp_args = ['-fPIC']\n")
+ crossfile_text=f"[binaries]\nc = '{cc}'\ncpp = '{cxx}'\nar = '{ar}'\nstrip = '{bin/'llvm-strip'}'\npkg-config = 'pkg-config'\n[host_machine]\nsystem = 'android'\ncpu_family = '{arch}'\ncpu = '{arch}'\nendian = 'little'\n[properties]\nneeds_exe_wrapper = true\n[built-in options]\nc_args = ['-fPIC']\ncpp_args = ['-fPIC']\n"
  cross=['--cross-file='+str(crossfile)]
 env['CC']=cc;env['CXX']=cxx;env['AR']=ar;env['RANLIB']=ranlib;env['CFLAGS']='-fPIC';env['PKG_CONFIG_LIBDIR']=str(prefix/'lib/pkgconfig');env['PKG_CONFIG_PATH']=str(prefix/'lib/pkgconfig')
 recipe={'schema':1,'abi':a.abi,'compiler':tool_version([cc]),'compiler_path':cc,'prefix':str(prefix),'ndk_properties_sha256':digest(a.ndk/'source.properties') if a.ndk else None,'archives':{p['name']:p['sha256'] for p in packages},'recipe_sha256':digest(__file__),'cache_guard_sha256':digest(src/'contrib/portable/cache.py'),'patches':{p.name:digest(p) for p in (src/'contrib/ffmpeg').glob('*.patch')},'meson':tool_version([a.meson]),'ninja':tool_version(['ninja']),'cflags':env['CFLAGS'],'library':'static/PIC'}
 markers=[prefix/'lib/libavcodec.a',prefix/'lib/libcrypto.a',prefix/'lib/libglib-2.0.a',out/'glib-build/build.ninja',out/'ffmpeg-build/ffbuild/config.mak',trees['libffi']/'Makefile',trees['pcre2']/'Makefile',trees['openssl']/'Makefile']
 check_cache(out,recipe,markers,'dependencies')
+if a.abi!='linux': crossfile.write_text(crossfile_text)
 def meson(name,opts):
  b=out/(name+'-build')
  if not (b/'build.ninja').exists():run([a.meson,'setup',b,trees[name],'--prefix='+str(prefix),'--libdir=lib','--default-library=static','-Dbuildtype=release','-Db_staticpic=true']+cross+opts,out)
