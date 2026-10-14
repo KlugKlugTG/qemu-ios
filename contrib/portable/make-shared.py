@@ -24,7 +24,8 @@ extras=(src/'contrib/macos-app/qemu-macos-extras.c').read_text().replace('#inclu
 extras=extras.replace('fn == qmp_system_reset || fn == qmp_quit || fn == qmp_system_powerdown', 'fn == qmp_stop || fn == qmp_system_reset || fn == qmp_quit || fn == qmp_system_powerdown')
 start=extras.index('const char *qemu_ios_build_id(void)');end=extras.index('/* Guest output capture',start)
 revision=subprocess.check_output(['git','rev-parse','HEAD'],cwd=src,text=True).strip()
-dirty=subprocess.run(['git','diff','--quiet'],cwd=src).returncode != 0
+source_status=subprocess.check_output(['git','status','--porcelain=v1','--untracked-files=all'],cwd=src,text=True)
+dirty=bool(source_status)
 identity=revision+('-dirty' if dirty else '')
 extras=extras[:start]+f'const char *qemu_ios_build_id(void) {{ return "{identity}"; }}\n\n'+extras[end:]
 (build/'qemu-portable-extras.c').write_text(extras)
@@ -50,6 +51,14 @@ for arg in expanded:
 args+=['-shared','-Wl,-z,defs','-Wl,-z,max-page-size=16384','-Wl,--version-script='+str(build/'portable.exports'),'-Wl,-soname,libqemu-arm.so','-o',str(output)]
 (build/'portable-link.json').write_text(json.dumps(args,indent=2)+'\n')
 subprocess.run(args,cwd=build,check=True)
-manifest={'schema':1,'source_revision':revision,'source_dirty':dirty,'api_major':2,'portable_version':1,'library_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'link_argv':args,'inputs':{str(path.relative_to(src)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [src/'contrib/ios-app/qemu-ios-ui.h',src/'contrib/ios-app/qemu-ios-ui.c',src/'contrib/macos-app/qemu-macos-extras.c',src/'contrib/portable/dependencies.json']}}
+tracked=subprocess.check_output(['git','ls-files','-z'],cwd=src).decode().split('\0')
+source_inputs={name:hashlib.sha256((src/name).read_bytes()).hexdigest() for name in tracked if name and (src/name).is_file()}
+link_inputs={}
+for arg in args:
+ candidate=pathlib.Path(arg)
+ if candidate.suffix in ['.o','.a']:
+  if not candidate.is_absolute():candidate=build/candidate
+  if candidate.is_file():link_inputs[str(candidate)]=hashlib.sha256(candidate.read_bytes()).hexdigest()
+manifest={'schema':1,'source_status':source_status,'source_inputs':source_inputs,'link_inputs':link_inputs,'tools':{'compiler':subprocess.check_output(compiler+['--version'],cwd=build,text=True).splitlines()[0],'ninja':subprocess.check_output(['ninja','--version'],text=True).strip()},'source_revision':revision,'source_dirty':dirty,'api_major':2,'portable_version':1,'library_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'link_argv':args,'inputs':{str(path.relative_to(src)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [src/'contrib/ios-app/qemu-ios-ui.h',src/'contrib/ios-app/qemu-ios-ui.c',src/'contrib/macos-app/qemu-macos-extras.c',src/'contrib/portable/dependencies.json']}}
 (build/'portable-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(output)

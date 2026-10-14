@@ -20,7 +20,7 @@ if a.abi!='linux':
  if not a.ndk:raise RuntimeError('--ndk required')
  bin=a.ndk.resolve()/'toolchains/llvm/prebuilt/linux-x86_64/bin';arch='aarch64' if a.abi=='arm64-v8a' else 'x86_64';triple='aarch64-linux-android' if arch=='aarch64' else 'x86_64-linux-android'
  cc=str(bin/(triple+'28-clang'));cxx=cc+'++';ar=str(bin/'llvm-ar');ranlib=str(bin/'llvm-ranlib');target='android'
- env['PATH']=str(bin)+':'+env['PATH'];env['ANDROID_NDK_ROOT']=str(a.ndk.resolve())
+ env['PATH']=str(bin)+':/usr/bin:/bin:'+env['PATH'];env['ANDROID_NDK_ROOT']=str(a.ndk.resolve())
  crossfile=out/'android.cross'
  crossfile.write_text(f"[binaries]\nc = '{cc}'\ncpp = '{cxx}'\nar = '{ar}'\nstrip = '{bin/'llvm-strip'}'\npkg-config = 'pkg-config'\n[host_machine]\nsystem = 'android'\ncpu_family = '{arch}'\ncpu = '{arch}'\nendian = 'little'\n[properties]\nneeds_exe_wrapper = true\n[built-in options]\nc_args = ['-fPIC']\ncpp_args = ['-fPIC']\n")
  cross=['--cross-file='+str(crossfile)]
