@@ -3,17 +3,18 @@
  * redirected.
  *
  * SLICE hw/arm/ipod_touch_2g.c define BOOT_ARGS_CMDLINE_LEN
- * SLICE hw/arm/ipod_touch_2g.c fn ipod_touch_requested_boot_args ipod_touch_set_boot_args ipod_touch_stage_boot_args
+ * SLICE hw/arm/ipod_touch_2g.c fn ipod_touch_boot_args_discovery_interval_ms ipod_touch_boot_args_search_budget_ms ipod_touch_requested_boot_args ipod_touch_set_boot_args ipod_touch_stage_boot_args
  * PKG glib-2.0
  */
 #include <glib.h>
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-typedef struct {void*cpu;void*boot_args_timer;unsigned boot_args_writes;uint32_t boot_args_delay_ms,boot_args_repeat,boot_args_interval_ms;uint64_t boot_args_scan_deadline;bool boot_args_scan_failed,boot_args_explicit;char boot_args[512];} IPodTouchMachineState;
+typedef struct {void*cpu;void*boot_args_timer;unsigned boot_args_writes;uint32_t boot_args_delay_ms,boot_args_repeat,boot_args_interval_ms;uint64_t boot_args_scan_deadline,boot_args_scan_started_ms,boot_args_scan_attempts;bool boot_args_scan_failed,boot_args_explicit;char boot_args[512];} IPodTouchMachineState;
 typedef IPodTouchMachineState Object;
 typedef int Error;
 #define IPOD_TOUCH_MACHINE(o) (o)
