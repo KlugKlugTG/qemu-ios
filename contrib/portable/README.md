@@ -124,8 +124,11 @@ coordinates before commits, and close with one sync. Eight is the ABI batch
 bound, not the emulated controller contact limit. Poll the newest ID to confirm
 dispatch to the input model; `QUEUED` is only queue admission. A completed
 dispatch does not acknowledge that the guest collected its SPI report or acted
-on the gesture. The existing controller retains one pending report, so later
-reports may replace one the guest has not collected. The legacy button
+on the gesture. Linux and Android retain up to 32 controller reports, preserving
+START and END before contact reuse while coalescing only trailing motion.
+Admission reserves cancellation capacity; a full transition queue reports BUSY
+before the batch is dispatched. The original macOS controller retains its
+single pending report behavior. The legacy button
 operation returns no delivery acknowledgment: runtime success means its request
 was admitted, and the engine applies GPIO/PMU edges later under the BQL. Button
 release has a minimum 100 ms hold in guest virtual time. Pause and resume also
@@ -154,6 +157,7 @@ tests/slice/run.sh tests/slice/ipod-portable-touch.c
 tests/slice/run.sh tests/slice/ipod-accel-sampling.c
 tests/slice/run.sh tests/slice/ipod-attitude.c
 tests/slice/run.sh tests/slice/ipod-multitouch-frames.c
+tests/slice/run.sh tests/slice/ipod-multitouch-order.c
 tests/slice/run.sh tests/slice/ipod-pke.c
 tests/slice/run.sh tests/slice/ipod-portable-pke.c
 python3 tests/portable-crypto.py /private/builds/linux
