@@ -39,6 +39,10 @@ if original_meson.count(needle) != 1:
     raise RuntimeError('Reviewed firmware unpack rule no longer matches source preparation')
 # Upstream still creates blob unpack targets when install_blobs is false.
 meson.write_text(original_meson.replace(needle, needle + " and get_option('install_blobs')"))
+icons = destination / 'ui/icons/meson.build'
+icons.write_text('# Asset-free embedded engine: omit installation of unrelated host UI icons.\n')
+dtb_rule = destination / 'pc-bios/dtb/meson.build'
+dtb_rule.write_text("if not get_option('install_blobs')\n  subdir_done()\nendif\n" + dtb_rule.read_text())
 subprocess.run(['git', 'init', str(destination)], check=True)
 # Upstream ignores generated-looking names that are nevertheless tracked
 # source/configuration files. Preserve every supplied source in the local index.
@@ -48,4 +52,4 @@ subprocess.run(['git', '-c', 'user.name=Builder', '-c', 'user.email=builder@exam
                stdout=subprocess.DEVNULL)
 print('Prepared source revision from bundle:', metadata['source_revision'])
 print('Local identity:', subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=destination, text=True).strip())
-print('Build-only adjustments: disable installation/unpacking of unrelated firmware blobs')
+print('Build-only adjustments: disable firmware/DTB blob installation/unpacking and host UI icon installation')
