@@ -13,16 +13,29 @@
 
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
+#include "qemu/rcu.h"
 #include "system/replay.h"
 #include "system/system.h"
 
 #include "qemu-ios-ui.h"
 
-int qemu_ios_main(int argc, char **argv);
+#if defined(__linux__)
+bool qemu_rcu_embedded_main(void) __attribute__((visibility("hidden")));
+bool qemu_rcu_embedded_main(void)
+{
+    return true;
+}
+#endif
 
 int qemu_ios_main(int argc, char **argv)
 {
     int status;
+#if defined(__linux__)
+    const bool owns_rcu_reader = !rcu_thread_is_registered();
+    if (owns_rcu_reader) {
+        rcu_register_thread();
+    }
+#endif
 
     qemu_init(argc, argv);
 
@@ -60,5 +73,10 @@ int qemu_ios_main(int argc, char **argv)
     bql_unlock();
     replay_mutex_unlock();
 
+#if defined(__linux__)
+    if (owns_rcu_reader) {
+        rcu_unregister_thread();
+    }
+#endif
     return status;
 }
