@@ -51,6 +51,10 @@ targets, and texture deletion/name reuse across sibling contexts and retained
 framebuffer attachments. Deleted textures stay alive while referenced; a new
 object with the same guest name receives separate native storage.
 
+See [production-size drawable diagnosis](powervr-drawable-init.md) for the
+bounded320x480 native probe, isolated format/name/wrap comparisons and error
+conservation checks. A32x32 FBO pass does not cover production NPOT storage.
+
 See [AVD driver investigation](avd-drivers.md) for supported GPU modes, primary
 source explanation of the extension gate, and the pinned ANGLE fallback plan.
 

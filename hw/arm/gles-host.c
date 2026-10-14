@@ -914,6 +914,25 @@ static GLenum gles_rb_format(uint32_t fmt)
     }
 }
 
+#ifdef GLES_HOST_EGL_ES
+typedef struct GLESDrawableInitDiagnostic {
+    const char *first_stage;
+    GLenum first_error;
+    GLenum color_status;
+} GLESDrawableInitDiagnostic;
+static void gles_drawable_init_record(GLESDrawableInitDiagnostic *d,
+                                      const char *stage)
+{
+    if (!d->first_error) {
+        d->first_error = gles_native_peek_error();
+        if (d->first_error) d->first_stage = stage;
+    }
+}
+#define GLES_DRAWABLE_INIT_RECORD(stage) gles_drawable_init_record(&diagnostic, stage)
+#else
+#define GLES_DRAWABLE_INIT_RECORD(stage) ((void)0)
+#endif
+
 static bool gles_host_init(void)
 {
     if (gh.inited) {
@@ -937,15 +956,21 @@ static bool gles_host_init(void)
         gh.failed = true;
         return false;
     }
+#ifdef GLES_HOST_EGL_ES
+    GLESDrawableInitDiagnostic diagnostic = {0};
+    GLES_DRAWABLE_INIT_RECORD("context-ready");
+#endif
 
     if (!gh.rb_sized) gh.rb_sized = g_hash_table_new(g_direct_hash, g_direct_equal);
     gh.fbo_drawable = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     gh.fbo = gles_private_name(glIsFramebufferEXT);
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, gh.fbo);
+    GLES_DRAWABLE_INIT_RECORD("bind-framebuffer");
 
     gh.tex = gles_private_name(glIsTexture);
     glBindTexture(GL_TEXTURE_2D, gh.tex);
+    GLES_DRAWABLE_INIT_RECORD("bind-color");
     /*
      * Storage for the color attachment, from one of two places. An IOSurface
      * gives the CPU a mapped view of the very memory the GPU renders into, so
@@ -958,22 +983,32 @@ static bool gles_host_init(void)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, GLES_FB_WIDTH, GLES_FB_HEIGHT,
                      0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     }
+    GLES_DRAWABLE_INIT_RECORD("color-storage");
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    GLES_DRAWABLE_INIT_RECORD("color-parameters");
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
                               GL_TEXTURE_2D, gh.tex, 0);
+    GLES_DRAWABLE_INIT_RECORD("color-attachment");
+#ifdef GLES_HOST_EGL_ES
+    diagnostic.color_status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    GLES_DRAWABLE_INIT_RECORD("color-status");
+#endif
 
-    /* Depth AND stencil, packed: OES_packed_depth_stencil and OES_stencil8 are on
-     * every one of these devices, and an app that attaches a stencil renderbuffer
-     * to its drawable framebuffer (which resolves to this one) gets it here. */
+    /* Depth AND stencil, packed. Android-native failure diagnostics below
+     * report whether this context actually advertises packed storage; the
+     * framebuffer-object extension alone does not guarantee that format. */
     gh.depth = gles_private_name(glIsRenderbufferEXT);
     glBindRenderbufferEXT(GL_RENDERBUFFER_EXT, gh.depth);
+    GLES_DRAWABLE_INIT_RECORD("bind-depth-stencil");
     glRenderbufferStorageEXT(GL_RENDERBUFFER_EXT, GL_DEPTH24_STENCIL8_EXT,
                              GLES_FB_WIDTH, GLES_FB_HEIGHT);
+    GLES_DRAWABLE_INIT_RECORD("depth-stencil-storage");
     glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_DEPTH_ATTACHMENT_EXT,
                                  GL_RENDERBUFFER_EXT, gh.depth);
     glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, GL_STENCIL_ATTACHMENT_EXT,
                                  GL_RENDERBUFFER_EXT, gh.depth);
+    GLES_DRAWABLE_INIT_RECORD("depth-stencil-attachment");
 
     /*
      * An IOSurface attachment that the driver accepts and then cannot render to
@@ -995,9 +1030,27 @@ static bool gles_host_init(void)
                                   GL_TEXTURE_2D, gh.tex, 0);
     }
 
-    if (glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT)
-        != GL_FRAMEBUFFER_COMPLETE_EXT) {
+    GLenum init_status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    if (init_status != GL_FRAMEBUFFER_COMPLETE_EXT) {
+#ifdef GLES_HOST_EGL_ES
+        GLES_DRAWABLE_INIT_RECORD("final-status");
+        const char *extensions = (const char *)glGetString(GL_EXTENSIONS);
+        fprintf(stderr, "[gles] FBO incomplete: status=0x%x color-status=0x%x "
+                "api=%u size=%ux%u fbo=%u texture=%u depth-stencil=%u "
+                "first-stage=%s first-error=0x%x packed-depth-stencil=%u "
+                "full-npot=%u limited-npot=%u renderer=%s version=%s\n",
+                init_status, diagnostic.color_status, gh.api_version,
+                (unsigned)GLES_FB_WIDTH, (unsigned)GLES_FB_HEIGHT,
+                gh.fbo, gh.tex, gh.depth,
+                diagnostic.first_stage ? diagnostic.first_stage : "none",
+                diagnostic.first_error,
+                gles_native_extension(extensions,"GL_OES_packed_depth_stencil"),
+                gles_native_extension(extensions,"GL_OES_texture_npot"),
+                gles_native_extension(extensions,"GL_APPLE_texture_2D_limited_npot"),
+                glGetString(GL_RENDERER), glGetString(GL_VERSION));
+#else
         fprintf(stderr, "[gles] FBO incomplete\n");
+#endif
         if (legacy) gles_end_context();
         gh.failed = true;
         return false;

@@ -28,6 +28,8 @@ int main(void)
     GLint original_binding,after_binding;
     driver_get_integer(GL_TEXTURE_BINDING_2D,&original_binding);
     glTexImage2D(GL_TEXTURE_RECTANGLE_ARB,0,GL_RGBA,1,1,0,GL_RGBA,GL_UNSIGNED_BYTE,NULL);
+    assert(gles_native_peek_error()==GL_INVALID_ENUM);
+    assert(gles_native_peek_error()==GL_INVALID_ENUM);
     assert(glGetError()==GL_INVALID_ENUM);
     driver_get_integer(GL_TEXTURE_BINDING_2D,&after_binding);
     assert(after_binding==original_binding);
