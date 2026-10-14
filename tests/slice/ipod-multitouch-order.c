@@ -3,7 +3,7 @@
  * SLICE:state include/hw/arm/ipod_touch_multitouch.h typedef IPodTouchMultitouchState
  * SLICE:profile hw/arm/ipod_touch_multitouch.c range const MTSensorProfile mt_profile_ipod = { | const MTSensorProfile mt_profile_k48
  * SLICE hw/arm/ipod_touch_multitouch.c fn ipod_touch_multitouch_can_queue mt_clear_pending mt_take_pending mt_clamp_vel mt_frame_slots mt_const_fingerid mt_build_frame mt_any_down mt_any_active mt_emit_frame mt_cancel_pending_end mt_frame_period_ns ipod_touch_multitouch_set_finger
- * SLICE:transfer hw/arm/ipod_touch_multitouch.c fn ipod_touch_multitouch_transfer
+ * SLICE:transfer hw/arm/ipod_touch_multitouch.c fn mt_stamp_frame_cmd ipod_touch_multitouch_transfer
  * SLICE:lifecycle hw/arm/ipod_touch_multitouch.c fn touch_timer_tick touch_end_timer_tick ipod_touch_multitouch_reset
  * SLICE:finalize hw/arm/ipod_touch_multitouch.c fn ipod_touch_multitouch_finalize
  * VARIANT

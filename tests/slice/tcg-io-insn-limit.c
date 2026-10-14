@@ -1,6 +1,7 @@
 /* Regression: alternate TB modes at one physical PC must not lengthen a known
  * MMIO boundary, including concurrent updates and physical address zero.
- * SLICE accel/tcg/translate-all.c fn tb_remember_io_insn_limit
+ * SLICE include/exec/translation-block.h define CF_COUNT_MASK
+ * SLICE accel/tcg/translate-all.c fn tb_remember_io_insn_limit tb_apply_io_insn_limit
  * PKG glib-2.0
  * CFLAGS -Wall -Wextra -Werror
  */
@@ -47,8 +48,14 @@ int main(void)
     }
     assert(lookup(0x404) == 1);
     assert(lookup(0) == 3);
+    assert(tb_apply_io_insn_limit(0x404, 0, 64) == 1);
+    assert(tb_apply_io_insn_limit(0x404, 2, 2) == 2);
+    assert(tb_apply_io_insn_limit(0x404, 1, 1) == 1);
+    assert(tb_apply_io_insn_limit((tb_page_addr_t)-1, 0, 64) == 64);
+    assert(tb_apply_io_insn_limit(0x408, 0, 64) == 64);
+    assert(tb_apply_io_insn_limit(0, 0, 2) == 2);
     g_hash_table_destroy(tb_ctx.io_insn_limits);
     g_mutex_clear(&tb_ctx.io_insn_lock);
-    puts("PASS: MMIO limits only shorten across modes and concurrent updates");
+    puts("PASS: MMIO limits only shorten; explicit-count replay stays intact");
     return 0;
 }
