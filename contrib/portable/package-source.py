@@ -69,7 +69,10 @@ def main():
                     if name.is_absolute() or '..' in name.parts:
                         raise RuntimeError('Unsafe immutable source archive path')
                     if (name.suffix.lower() in ASSET_SUFFIXES or name.parts[0] in ['manifests', 'pyvenv']
-                            or 'screens' in name.parts or 'screenshots' in name.parts):
+                            or 'screens' in name.parts or 'screenshots' in name.parts
+                            or (name.parts[0] == 'docs' and name.as_posix() not in
+                                ['docs/meson.build', 'docs/conf.py', 'docs/interop/firmware.json',
+                                 'docs/interop/vhost-user.json'])):
                         omitted += 1
                         continue
                     data = archive.extractfile(member).read()
@@ -190,8 +193,8 @@ def main():
             target = stage / 'notices' / item['path']
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, target)
-        tool = Path(__file__).with_name('relink-bundle.py')
-        shutil.copyfile(tool, stage / 'relink-bundle.py')
+        for name in ['relink-bundle.py', 'prepare-bundle-source.py']:
+            shutil.copyfile(Path(__file__).with_name(name), stage / name)
         shutil.copyfile(Path(__file__).with_name('SOURCE-BUNDLE.md'), stage / 'README.md')
         metadata = {'schema': 1, 'abi': cache['abi'], 'source_revision': revision,
                     'source_reference': a.source_reference, 'engine_sha256': engine['library_sha256'],

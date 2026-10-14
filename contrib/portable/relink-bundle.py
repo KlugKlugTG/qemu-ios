@@ -37,6 +37,9 @@ def validate(bundle, expected=None):
             raise RuntimeError('Unsafe bundle member path')
         if digest(bundle / path) != expected_sha:
             raise RuntimeError('Bundle file checksum mismatch: ' + name)
+    for name, mode in metadata['source_modes'].items():
+        if (bundle / name).stat().st_mode & 0o777 != mode:
+            raise RuntimeError('Source executable mode differs: ' + name)
     return metadata
 
 
