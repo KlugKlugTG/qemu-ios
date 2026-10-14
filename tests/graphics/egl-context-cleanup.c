@@ -13,11 +13,11 @@ typedef unsigned GLuint;
 typedef struct Context { unsigned id; } *CGLContextObj;
 typedef struct GLESHost {
     CGLContextObj cgl;
-    GLuint fbo, sync_fbo, copy_fbo, tex, depth;
+    GLuint fbo, sync_fbo, copy_fbo, tex, depth, stencil;
 } GLESHost;
 static CGLContextObj current, refused, target;
 static unsigned bind_calls, deletes;
-static GLuint deleted[5];
+static GLuint deleted[6];
 static int CGLSetCurrentContext(CGLContextObj context)
 {
     bind_calls++;
@@ -29,7 +29,7 @@ static void delete_names(int count, const GLuint *names)
 {
     assert(count == 1);
     assert(current == target);
-    assert(deletes < 5);
+    assert(deletes < 6);
     deleted[deletes++] = *names;
 }
 #define glDeleteFramebuffersEXT delete_names
@@ -46,7 +46,7 @@ static void reset(CGLContextObj previous)
 int main(void)
 {
     struct Context victim = { 1 }, unrelated = { 2 };
-    GLESHost state = { &victim, 11, 12, 13, 14, 15 };
+    GLESHost state = { &victim, 11, 12, 13, 14, 15, 0 };
     target = &victim;
 #ifdef GLES_HOST_EGL
     /* A refused context must not delete colliding object names in another
@@ -63,7 +63,7 @@ int main(void)
     reset(&unrelated);
     gles_context_delete_objects(&state);
     assert(current == NULL && bind_calls == 2 && deletes == 5);
-    const GLuint expected[] = { 11, 12, 13, 14, 15 };
+    const GLuint expected[] = { 11, 12, 13, 14, 15, 0 };
     assert(memcmp(deleted, expected, sizeof expected) == 0);
 
     /* Uncreated optional FBOs must not create extra deletion calls. */
@@ -72,6 +72,16 @@ int main(void)
     gles_context_delete_objects(&state);
     assert(current == NULL && bind_calls == 2 && deletes == 3);
     assert(deleted[0] == 11 && deleted[1] == 14 && deleted[2] == 15);
+#ifdef GLES_HOST_EGL_ES
+    state.stencil = 16;
+    reset(&unrelated);
+    gles_context_delete_objects(&state);
+    assert(deletes == 4 && deleted[3] == 16);
+    refused = &victim;
+    reset(&unrelated);
+    gles_context_delete_objects(&state);
+    assert(deletes == 0 && current == &unrelated);
+#endif
     puts("PASS production context object cleanup binding admission");
     return 0;
 }

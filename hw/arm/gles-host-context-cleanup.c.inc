@@ -20,5 +20,8 @@ static void gles_context_delete_objects(GLESHost *state)
     if (state->copy_fbo) glDeleteFramebuffersEXT(1, &state->copy_fbo);
     glDeleteTextures(1, &state->tex);
     glDeleteRenderbuffersEXT(1, &state->depth);
+#ifdef GLES_HOST_EGL_ES
+    if (state->stencil) glDeleteRenderbuffersEXT(1, &state->stencil);
+#endif
     CGLSetCurrentContext(NULL);
 }
