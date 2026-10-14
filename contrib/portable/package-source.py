@@ -98,7 +98,8 @@ def main():
         if (inventory['library_sha256'], inventory['source_revision']) != (engine['library_sha256'], revision):
             p.error('selected source audit is stale')
         for name in (set(inventory['selected_sources']) | set(inventory['selected_includes']) |
-                     set(inventory.get('archive_source_candidates', {}))):
+                     set(inventory.get('archive_source_candidates', {})) |
+                     set(inventory.get('archive_include_candidates', {}))):
             if not (stage / 'source/qemu' / name).is_file():
                 p.error('source exclusion omitted an actual selected source/header: ' + name)
         components = []

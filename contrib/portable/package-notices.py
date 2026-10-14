@@ -96,6 +96,7 @@ def main():
         files['qemu/' + name] = tracked(name)
     snippets = []
     selected = {**inventory.get('archive_source_candidates', {}),
+                **inventory.get('archive_include_candidates', {}),
                 **inventory['selected_sources'], **inventory['selected_includes']}
     for name in sorted(selected):
         data = tracked(name)
