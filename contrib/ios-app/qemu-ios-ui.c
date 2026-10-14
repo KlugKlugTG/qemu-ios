@@ -1052,7 +1052,7 @@ int qemu_ios_portable_frame_copy(void *pixels, size_t capacity,
 
 /* Stable host IDs map to controller slots, never to transient pointer indices. */
 static struct { bool active; uint32_t id; double x, y; } portable_contacts[5];
-static uint64_t portable_touch_timestamp, portable_motion_timestamp;
+static uint64_t portable_touch_timestamp, portable_motion_timestamp[2];
 static uint64_t portable_status_id;
 static int portable_status, portable_pending;
 static LIS302DLState *portable_accel(void)
@@ -1099,7 +1099,8 @@ static void portable_release_all(void)
     }
     LIS302DLState *a = portable_accel();
     if (a) lis302dl_clear_host_motion(a);
-    portable_touch_timestamp = portable_motion_timestamp = 0;
+    portable_touch_timestamp = 0;
+    portable_motion_timestamp[0] = portable_motion_timestamp[1] = 0;
 }
 static void portable_cancel_bh(void *unused) { qemu_ios_ui_cancel_input(); }
 int qemu_ios_portable_cancel_input(void)
@@ -1185,9 +1186,15 @@ static void portable_motion_bh(void *opaque)
 {
     QemuIosPortableMotion *m = opaque;
     LIS302DLState *a = portable_accel();
-    if (a && runstate_is_running() && m->timestamp_ns > portable_motion_timestamp) {
-        lis302dl_set_host_motion(a, m->fields, m->acceleration, m->angular_velocity);
-        portable_motion_timestamp = m->timestamp_ns;
+    if (a && runstate_is_running()) {
+        uint32_t accepted = 0;
+        for (int field = 0; field < 2; field++) {
+            if ((m->fields & (1u << field)) && m->timestamp_ns > portable_motion_timestamp[field]) {
+                accepted |= 1u << field;
+                portable_motion_timestamp[field] = m->timestamp_ns;
+            }
+        }
+        if (accepted) lis302dl_set_host_motion(a, accepted, m->acceleration, m->angular_velocity);
     }
     qemu_mutex_lock(&ios.frame_lock); portable_pending--; qemu_mutex_unlock(&ios.frame_lock);
     g_free(m);

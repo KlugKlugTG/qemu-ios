@@ -208,7 +208,7 @@ typedef struct {
 
 typedef struct {
     uint32_t size, version;
-    uint64_t timestamp_ns; /* monotonic host clock, strictly increasing */
+    uint64_t timestamp_ns; /* monotonic host clock, strictly increasing per field */
     uint32_t fields, reserved;
     /* Guest portrait axes: x right, y up, z toward viewer.
      * Acceleration includes gravity in m/s^2; angular velocity in rad/s.
