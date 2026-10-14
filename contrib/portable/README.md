@@ -106,12 +106,18 @@ tests/slice/run.sh tests/slice/ipod-multitouch-frames.c
 tests/slice/run.sh tests/slice/ipod-pke.c
 tests/slice/run.sh tests/slice/ipod-portable-pke.c
 python3 tests/portable-crypto.py /private/builds/linux
+python3 tests/portable-models.py /private/builds/linux/engine-run \
+  /private/builds/linux/libqemu-arm.so
 ```
 
 These checks establish frame ownership, stable contact identity/crossing,
 atomic rejection, paused release, sensor units/mounts/expiry/restore behavior,
 and controller wire checksums. They do not establish actual guest reception,
 physical gyroscope acceptance, ARM64 JIT qualification, or guest graphics.
+The whole n72 model check uses only a legal ARM loop, erased NOR and an empty
+NAND directory. It verifies actual board initialization and required registered
+peripherals before packaging, including the UNIMP dependency missed by a
+virt-only CPU smoke. It is separate from actual guest boot acceptance.
 
 QEMU and reused glue retain upstream GPL terms. GLib is LGPL-2.1-or-later,
 proxy-libintl retains its GNU Library GPL v2 notice, PCRE2 BSD, libffi MIT,
