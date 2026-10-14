@@ -18,8 +18,10 @@ typedef void (*qemu_ios_frame_cb)(void *);
 #define IOS_FRAME_BUFFERS 3
 static struct {
  QemuMutex frame_lock; void *buf[3]; size_t buf_size; GSList *retired;
- int published, width, height; uint64_t serial; qemu_ios_frame_cb cb; void *cb_opaque;
+ int published, width, height; uint64_t serial, timestamp_ns; qemu_ios_frame_cb cb; void *cb_opaque;
 } ios = { .published = -1 };
+#define QEMU_CLOCK_REALTIME 0
+static uint64_t qemu_clock_get_ns(int clock) { return 1; }
 typedef struct { int w, h, stride; uint8_t *data; } DisplaySurface;
 static int surface_width(DisplaySurface *s) { return s->w; }
 static int surface_height(DisplaySurface *s) { return s->h; }
