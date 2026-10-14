@@ -133,6 +133,7 @@ def main():
                            'source_archive_sha256': sha(dtc_tar)})
         mappings = {}
         ndk_inputs = {}
+        thin_members = {}
         for original, expected in engine['link_inputs'].items():
             path = Path(original)
             if sha(path) != expected:
@@ -148,6 +149,21 @@ def main():
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(path, target)
                 mappings[original] = '@BUNDLE@/' + relative
+                if path.suffix == '.a' and path.read_bytes()[:8] == b'!<thin>\n':
+                    members = subprocess.check_output([
+                        str(ndk / 'toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-ar'),
+                        't', str(path)], text=True).splitlines()
+                    for member in members:
+                        child = Path(member)
+                        if not child.is_absolute():
+                            child = path.parent / child
+                        child = child.resolve()
+                        if not child.is_relative_to(path.parent.resolve()) or not child.is_relative_to(build):
+                            p.error('Thin archive member escapes owned build directory')
+                        member_target = target.parent / child.relative_to(path.parent.resolve())
+                        member_target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(child, member_target)
+                        thin_members[member_target.relative_to(stage).as_posix()] = sha(child)
             elif path.is_relative_to(ndk):
                 relative = path.relative_to(ndk).as_posix()
                 mappings[original] = '@NDK@/' + relative
@@ -203,6 +219,8 @@ def main():
                     'scope': 'engine corresponding source and relink material; application review and publication completeness are separate',
                     'object_metadata': 'Original linked objects retain compiler debug/build-path metadata; no guest inputs are read.',
                     'source_modes': modes,
+                    'thin_archive_members': thin_members,
+                    'thin_member_provenance': 'Actual member bytes hashed at packaging; original relink receipt establishes correspondence for older engine manifests that record only archive headers.',
                     'relink': {'compiler': Path(engine['link_argv'][0]).relative_to(ndk).as_posix(),
                                'compiler_sha256': sha(Path(engine['link_argv'][0])),
                                'ndk_properties_sha256': cache['ndk_properties_sha256'],

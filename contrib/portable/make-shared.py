@@ -95,8 +95,21 @@ for name,sha in link_inputs.items():
  if previous.get('link_inputs',{}).get(name)==sha:
   object_provenance[name]=previous.get('object_provenance',{}).get(name,{'recorded_engine_revision':previous['source_revision'],'object_sha256':sha,'origin':'unchanged object from earlier recorded engine'})
  else:object_provenance[name]={'recorded_engine_revision':revision,'object_sha256':sha,'origin':'new or changed object in current engine'}
+archive_member_inputs={}
+archiver=str(pathlib.Path(compiler[0]).parent/'llvm-ar') if (pathlib.Path(compiler[0]).parent/'llvm-ar').is_file() else 'ar'
+for name in link_inputs:
+ path=pathlib.Path(name)
+ if path.suffix!='.a' or path.read_bytes()[:8]!=b'!<thin>\n':continue
+ members={}
+ for member in subprocess.check_output([archiver,'t',name],text=True).splitlines():
+  child=pathlib.Path(member)
+  if not child.is_absolute():child=path.parent/child
+  child=child.resolve()
+  members[str(child)]=hashlib.sha256(child.read_bytes()).hexdigest()
+ archive_member_inputs[name]=members
 meson_version=json.loads((build/'meson-info/meson-info.json').read_text())['meson_version']['full']
 manifest={'schema':2,'previous_manifest_sha256':previous_manifest_sha256,'object_provenance':object_provenance,'source_status':source_status,'source_inputs':source_inputs,'link_inputs':link_inputs,'resolved_libraries':resolved_libraries,'tools':{'compiler':subprocess.check_output(compiler+['--version'],cwd=build,text=True).splitlines()[0],'ninja':subprocess.check_output(['ninja','--version'],text=True).strip(),'meson':meson_version},'source_revision':revision,'source_dirty':dirty,'api_major':2,'portable_version':1,'library_sha256':hashlib.sha256(output.read_bytes()).hexdigest(),'link_argv':args,'inputs':{str(path.relative_to(src)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [src/'contrib/ios-app/qemu-ios-ui.h',src/'contrib/ios-app/qemu-ios-ui.c',src/'contrib/macos-app/qemu-macos-extras.c',src/'contrib/portable/dependencies.json']}}
 manifest['runtime_files']={p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in [build/'libc++_shared.so'] if p.exists()}
+manifest['archive_member_inputs']=archive_member_inputs
 (build/'portable-manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
 print(output)

@@ -90,7 +90,9 @@ def main():
         argv.append(arg)
     output.parent.mkdir(parents=True, exist_ok=True)
     # Explicit argv only; no shell, Ninja, configure or guest execution.
-    subprocess.run(argv, cwd=bundle, check=True)
+    result = subprocess.run(argv, cwd=bundle)
+    if result.returncode:
+        raise RuntimeError('Relink driver failed with exit code ' + str(result.returncode))
     runtimes = {}
     for name, item in recipe['runtime_files'].items():
         source = ndk / item['ndk_path']
@@ -105,6 +107,7 @@ def main():
     record = {'schema': 1, 'bundle_manifest_sha256': digest(bundle / 'bundle.json'),
               'source_revision': metadata['source_revision'], 'library_sha256': digest(output),
               'original_library_sha256': metadata['engine_sha256'],
+              'byte_identical_to_original': digest(output) == metadata['engine_sha256'],
               'replacements': {name: digest(path) for name, path in replacements.items()},
               'runtime_files': runtimes,
               'scope': 'actual relink result; guest execution/qualification is separate'}
