@@ -68,6 +68,18 @@ not driver/thread or guest acceptance. Compilation is pending an allocation.
 No new thread instrumentation is included: a future bounded failure receipt may
 record caller/last successful bind thread and context identity if needed.
 
+The EGL release followup retains one safety reference if restoration/unbind
+fails while the wrapper remains current. Texture cleanup runs once. A successful
+replacement/unbind retires the deferred previous wrapper only after native EGL
+changes the binding; an explicit release retry can also finish it. Retention is
+limited to the calling thread's still-current released wrapper, rather than
+accumulating one orphan for every release failure. Release does not restore a
+retired previous wrapper that its acquisition just reclaimed. This is an EGL
+adapter lifetime fix; Mac CGL/EAGL paths are unchanged. `egl-context-release.c`
+includes the production EGL leaf against injected failures and covers retry,
+shared restoration,32 failure/switch cycles and a retired previous binding.
+It does not prove the retained n81 failure's cause or actual target teardown.
+
 ## Minimal next allocated target runs
 
 Linux can use the supplied original base directly, with a separate small writable

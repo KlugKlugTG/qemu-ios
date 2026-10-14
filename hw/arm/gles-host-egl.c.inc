@@ -45,11 +45,14 @@ typedef struct GLESEGLContext {
     void *texture_attachments;
     unsigned rectangle_zero;
     bool drawing_window_quad;
+    bool release_pending; /* final owner released, but still current here */
 } *CGLContextObj;
 static EGLDisplay gles_egl_display = EGL_NO_DISPLAY;
 static EGLConfig gles_egl_config;
 static unsigned gles_egl_rectangle_zero=0x60000000u;
 static __thread CGLContextObj gles_egl_current;
+
+static void CGLReleaseContext(CGLContextObj c);
 
 static int CGLSetCurrentContext(CGLContextObj c)
 {
@@ -61,19 +64,42 @@ static int CGLSetCurrentContext(CGLContextObj c)
         fprintf(stderr, "[gles-egl] make-current failed: 0x%x\n", eglGetError());
         return -1;
     }
+    CGLContextObj previous = gles_egl_current;
     gles_egl_current = c;
+    /* A failed final-release unbind retains one safety reference. Reclaim it
+     * only after EGL actually replaces the binding. This bounds retention to
+     * the calling thread's still-current wrapper, rather than one orphan per
+     * failed release. Do not rebind the retired context to clean it again. */
+    if (previous && previous != c && previous->release_pending) {
+        previous->release_pending = false;
+        CGLReleaseContext(previous);
+    }
     return 0;
 }
 static CGLContextObj CGLRetainContext(CGLContextObj c) { c->refs++; return c; }
 static void CGLReleaseContext(CGLContextObj c)
 {
     if (!c || --c->refs) return;
+    c->release_pending = false;
     CGLContextObj previous=gles_egl_current;
+    /* Acquiring c retires a deferred previous binding. Never restore that
+     * final-released wrapper after the successful switch has freed it. */
+    if (previous && previous->release_pending) previous = NULL;
     if (c->texture_cleanup) {
         bool current=CGLSetCurrentContext(c)==0;
-        c->texture_cleanup(c,current);
+        void (*cleanup)(struct GLESEGLContext *, bool) = c->texture_cleanup;
+        c->texture_cleanup = NULL; /* a retained release must not clean twice */
+        cleanup(c,current);
     }
-    if (gles_egl_current==c) CGLSetCurrentContext(previous==c ? NULL : previous);
+    if (gles_egl_current==c &&
+        CGLSetCurrentContext(previous==c ? NULL : previous) != 0) {
+        /* EGL and TLS still name c. Keep its wrapper and texture-list ref
+         * alive; a later successful switch/unbind releases this safety ref,
+         * or an explicit final-release retry can complete it. */
+        c->refs = 1;
+        c->release_pending = true;
+        return;
+    }
     struct GLESEGLContext **slot=&c->textures->contexts;
     while (*slot && *slot!=c) slot=&(*slot)->next_context;
     if (*slot) *slot=c->next_context;
