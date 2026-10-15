@@ -56,6 +56,11 @@ python3 contrib/portable/linux-cpu-profile.py report \
 
 The fixed event is `cpu-clock:u`, period20,000,000ns (about50 samples per
 user-CPU second), DWARF8192, eight mmap pages, explicit TIDs, no inheritance.
+`--no-buildid-cache` preserves build IDs in the recording but suppresses perf's
+default cache update. Without it perf can hardlink a frozen source DSO into its
+build-ID cache, changing that DSO's link count and ctime despite identical bytes,
+mode and mtime. Historical recordings made before this option retain their
+original commands and metadata-check failures; do not relabel those runs.
 Sudo is noninteractive; its own timeout is45s plus3s termination grace. The
 collector checks worker/thread start identities and engine mapping every0.5s,
 uses a worker pidfd for exit detection, and stops on identity changes. This

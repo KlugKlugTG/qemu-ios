@@ -139,7 +139,7 @@ def profile_argv(plan, output):
     tids = ','.join(str(t['tid']) for t in plan['threads'])
     return ['sudo', '-n', '/usr/bin/timeout', '--signal=INT', '--kill-after=3s', '45s',
             '/usr/bin/prlimit', '--fsize=' + str(MAX_BYTES) + ':' + str(MAX_BYTES), '--',
-            PERF, 'record', '-e', 'cpu-clock:u', '-c', '20000000', '--no-inherit',
+            PERF, 'record', '--no-buildid-cache', '-e', 'cpu-clock:u', '-c', '20000000', '--no-inherit',
             '-t', tids, '-m', '8', '--call-graph', 'dwarf,8192', '--clockid', 'mono',
             '-o', str(output / 'perf.data'), '--', '/usr/bin/sleep', '40']
 

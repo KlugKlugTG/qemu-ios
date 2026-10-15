@@ -37,6 +37,8 @@ class CpuProfile(unittest.TestCase):
         argv = profile.profile_argv({'threads': [{'tid': 101}, {'tid': 102}]}, Path('/private/new'))
         self.assertEqual(argv[argv.index('-t') + 1], '101,102')
         self.assertIn('--no-inherit', argv)
+        self.assertIn('--no-buildid-cache', argv)
+        self.assertNotIn('--no-buildid', argv) # Preserve recording identity; suppress only cache writes.
         self.assertEqual(argv[-3:], ['--', '/usr/bin/sleep', '40'])
         self.assertEqual(argv[argv.index('-e') + 1], 'cpu-clock:u')
         self.assertEqual(argv[argv.index('-c') + 1], '20000000')
