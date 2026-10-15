@@ -158,7 +158,7 @@ int main(void) {
     shutdown_cont_revision |= 1;
     assert(qemu_ios_ui_shutdown()==1 && strstr(last_line,"cont_stable=0"));
     shutdown_cont_revision++;
-    unsigned before_power=powerdown_calls;
+    int before_power=powerdown_calls;
     agent_status=2; assert(qemu_ios_ui_shutdown()==2 && powerdown_calls==before_power+1);
     assert(strstr(last_line,"agent=2 agent_present=1 prefer_agent=0 submit_attempt=0 submit_ok=0 route=2"));
     agent_status=1; request_success=false;
