@@ -1098,13 +1098,29 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             }
 
 #if defined(CONFIG_LT_DYNARMIC_PROBE) && !defined(CONFIG_USER_ONLY)
-            /* Default-off synthetic one-instruction bridge. No icount/replay,
-             * parallel execution or real board is eligible for this proof. */
-            if (cpu->singlestep_enabled && !icount_enabled() &&
+            /* Default-off synthetic bridge. The ARM callback limits the new
+             * Run path to one branch-terminated block of 2..8 instructions.
+             * No replay/icount/parallel or specialized TB budget is bypassed. */
+            bool alternate = false;
+            if (!icount_enabled() &&
                 replay_mode == REPLAY_MODE_NONE &&
-                !(s.cflags & CF_PARALLEL) &&
-                cpu->cc->tcg_ops->lt_dynarmic_probe_try &&
-                cpu->cc->tcg_ops->lt_dynarmic_probe_try(cpu)) {
+                !(s.cflags & CF_PARALLEL)) {
+                if (cpu->singlestep_enabled &&
+                    cpu->cc->tcg_ops->lt_dynarmic_probe_try) {
+                    if (cpu->cc->tcg_ops->lt_dynarmic_block_probe_invalidate) {
+                        cpu->cc->tcg_ops->lt_dynarmic_block_probe_invalidate(cpu);
+                    }
+                    alternate = cpu->cc->tcg_ops->lt_dynarmic_probe_try(cpu);
+                } else if (!cpu->singlestep_enabled &&
+                           !(s.cflags & (CF_COUNT_MASK | CF_SINGLE_STEP |
+                                         CF_NOIRQ | CF_MEMI_ONLY |
+                                         CF_USE_ICOUNT | CF_INVALID |
+                                         CF_BP_PAGE)) &&
+                           cpu->cc->tcg_ops->lt_dynarmic_block_probe_try) {
+                    alternate = cpu->cc->tcg_ops->lt_dynarmic_block_probe_try(cpu);
+                }
+            }
+            if (alternate) {
                 last_tb = NULL;
                 align_clocks(sc, cpu);
                 if (cpu->singlestep_enabled) {
@@ -1112,6 +1128,11 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                     cpu_loop_exit(cpu);
                 }
                 continue;
+            }
+            /* Every ordinary TCG handoff invalidates the retained alternate
+             * block. No full-system invalidation hook is being assumed. */
+            if (cpu->cc->tcg_ops->lt_dynarmic_block_probe_invalidate) {
+                cpu->cc->tcg_ops->lt_dynarmic_block_probe_invalidate(cpu);
             }
 #endif
 

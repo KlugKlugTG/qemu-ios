@@ -2371,6 +2371,8 @@ static const TCGCPUOps arm_tcg_ops = {
 #else
 #ifdef CONFIG_LT_DYNARMIC_PROBE
     .lt_dynarmic_probe_try = lt_dynarmic_probe_try,
+    .lt_dynarmic_block_probe_try = lt_dynarmic_block_probe_try,
+    .lt_dynarmic_block_probe_invalidate = lt_dynarmic_block_probe_invalidate,
 #endif
     .tlb_fill_align = arm_cpu_tlb_fill_align,
     .pointer_wrap = aprofile_pointer_wrap,

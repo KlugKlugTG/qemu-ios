@@ -12,7 +12,8 @@
  * C++ JIT exists. No debug-memory reads, MMIO reads, TCG return addresses or
  * longjmp-capable helper callbacks enter the JIT. */
 static bool probe_ram_word(CPUState *cs, uint32_t address,
-                           MMUAccessType access, uint32_t *value)
+                           MMUAccessType access, uint32_t *value,
+                           uint64_t *identity)
 {
     ARMCPU *cpu = ARM_CPU(cs);
     CPUTLBEntryFull translation;
@@ -34,6 +35,9 @@ static bool probe_ram_word(CPUState *cs, uint32_t address,
         return false;
     }
     *value = ldl_le_p((uint8_t *)memory_region_get_ram_ptr(region) + offset);
+    if (identity) {
+        *identity = (uintptr_t)memory_region_get_ram_ptr(region) + offset;
+    }
     return true;
 }
 
@@ -48,7 +52,8 @@ static bool prepare_step(CPUState *cs, const uint32_t regs[16], uint32_t cpsr,
 
     memset(step, 0, sizeof(*step));
     step->pc = regs[15];
-    if (!probe_ram_word(cs, step->pc, MMU_INST_FETCH, &opcode)) {
+    if (!probe_ram_word(cs, step->pc, MMU_INST_FETCH, &opcode,
+                        &step->code_identity)) {
         return false;
     }
     step->opcode = opcode;
@@ -110,7 +115,7 @@ not_alu:
         step->has_read = true;
         step->read_address = regs[rn] + (opcode & 0xfff);
         if (!probe_ram_word(cs, step->read_address, MMU_DATA_LOAD,
-                            &step->read_value)) {
+                            &step->read_value, NULL)) {
             return false;
         }
         step->expected_regs[rd] = step->read_value;
@@ -119,9 +124,15 @@ not_alu:
     return false;
 }
 
-/* Bounded snapshot-only block preparation. The actual execution-loop entry
- * below requests ONE step. Increasing that budget requires a separately
- * reviewed non-single-step caller and interrupt/lifecycle acceptance. */
+static bool is_branch(uint32_t opcode)
+{
+    return (opcode & 0xff000000) == 0xea000000 ||
+           (opcode & 0xff000000) == 0x0a000000 ||
+           (opcode & 0xff000000) == 0x1a000000;
+}
+
+/* Bounded snapshot preparation. Stop at the first branch so a Run caller
+ * never silently follows an unbounded chain or a prospective fault. */
 static bool prepare_plan(CPUState *cs, const uint32_t regs[16], uint32_t cpsr,
                          unsigned budget, LTDynarmicProbePlan *plan)
 {
@@ -138,8 +149,10 @@ static bool prepare_plan(CPUState *cs, const uint32_t regs[16], uint32_t cpsr,
     while (plan->count < budget) {
         LTDynarmicProbeStep *step = &plan->steps[plan->count];
 
-        /* Finish the safe prefix before a fault/unsupported operation.
-         * Normal TCG then sees the exact next PC and register state. */
+        /* Stop preparing at a fault/unsupported operation. The Step
+         * caller needs one instruction; Run additionally requires the
+         * final prepared instruction to be an eligible branch, otherwise
+         * the entire attempted block remains original-state TCG. */
         if (qatomic_load_acquire(&cs->exit_request) ||
             !prepare_step(cs, next_regs, next_cpsr, step)) {
             break;
@@ -147,6 +160,9 @@ static bool prepare_plan(CPUState *cs, const uint32_t regs[16], uint32_t cpsr,
         memcpy(next_regs, step->expected_regs, sizeof(next_regs));
         next_cpsr = step->expected_cpsr;
         plan->count++;
+        if (is_branch(step->opcode)) {
+            break;
+        }
     }
     return plan->count != 0;
 }
@@ -187,4 +203,77 @@ bool lt_dynarmic_probe_try(CPUState *cs)
     fprintf(stderr, "LT_DYNARMIC_PROBE executed=%u pc=0x%08x opcode=0x%08x r0=%u\n",
             executions, plan.steps[0].pc, plan.steps[0].opcode, regs[0]);
     return true;
+}
+
+bool lt_dynarmic_block_probe_try(CPUState *cs)
+{
+    ARMCPU *cpu = ARM_CPU(cs);
+    CPUARMState *env = &cpu->env;
+    LTDynarmicProbePlan plan;
+    LTDynarmicBlockStats stats;
+    uint32_t regs[16], cpsr;
+    static unsigned runs;
+    const char *enabled = g_getenv("LT_DYNARMIC_BLOCK_PROBE");
+
+    /* A separate explicit switch; the historical GDB-step experiment and
+     * all product builds/real boards retain their previous routes. */
+    if (!enabled || strcmp(enabled, "1") || runs >= 16384 ||
+        !object_dynamic_cast(OBJECT(qdev_get_machine()), MACHINE_TYPE_NAME("none")) ||
+        MACHINE(qdev_get_machine())->smp.cpus != 1 ||
+        cpu->midr != 0x410fb767 || env->aarch64 || env->thumb ||
+        (env->cp15.sctlr_el[1] & SCTLR_B) || (env->regs[15] & 3) ||
+        !QTAILQ_EMPTY(&cs->breakpoints) || !QTAILQ_EMPTY(&cs->watchpoints) ||
+        qatomic_load_acquire(&cs->exit_request) ||
+        cpu_loop_exit_requested(cs) || cpu_test_interrupt(cs, ~0)) {
+        return false;
+    }
+    cpsr = cpsr_read(env);
+    if ((cpsr & CPSR_M) != ARM_CPU_MODE_USR ||
+        (cpsr & (CPSR_E | CPSR_IT_0_1 | CPSR_IT_2_7))) {
+        return false;
+    }
+    memcpy(regs, env->regs, sizeof(regs));
+    if (!prepare_plan(cs, regs, cpsr, LT_DYNARMIC_PROBE_MAX_STEPS, &plan) ||
+        plan.count < 2 || !is_branch(plan.steps[plan.count - 1].opcode)) {
+        return false;
+    }
+    plan.owner = (uintptr_t)cs;
+    plan.context[0] = cpu->midr;
+    plan.context[1] = arm_mmu_idx(env);
+    plan.context[2] = env->cp15.sctlr_el[1];
+    plan.context[3] = env->cp15.ttbr0_el[1];
+    plan.context[4] = env->cp15.ttbr1_el[1];
+    plan.context[5] = env->cp15.tcr_el[1];
+    plan.context[6] = env->cp15.dacr_ns;
+    plan.context[7] = env->cp15.dacr_s;
+    plan.context[8] = env->cp15.fcseidr_ns |
+                      ((uint64_t)env->cp15.fcseidr_s << 32);
+    plan.context[9] = env->cp15.contextidr_ns;
+    plan.context[10] = env->cp15.contextidr_s;
+    plan.context[11] = cpsr & ~CPSR_NZCV;
+    if (qatomic_load_acquire(&cs->exit_request) ||
+        cpu_loop_exit_requested(cs) || cpu_test_interrupt(cs, ~0) ||
+        !lt_dynarmic_probe_block(&plan, regs, &cpsr, &stats)) {
+        return false;
+    }
+    /* Async exits arriving DURING Run are observed at this <=8-instruction
+     * architectural boundary. Commit the completed block before returning
+     * to cpu_handle_interrupt; do not discard already completed work. No
+     * QEMU longjmp/interrupt/timer helper is called under a C++ frame. */
+    memcpy(env->regs, regs, sizeof(regs));
+    cpsr_write(env, cpsr, CPSR_NZCV | CPSR_Q | CPSR_GE, CPSRWriteRaw);
+    runs++;
+    fprintf(stderr, "LT_DYNARMIC_BLOCK run=%u count=%u pc=0x%08x next=0x%08x "
+            "r0=%u reused=%u code_reads=%u data_reads=%u jit=%" PRIu64
+            " generation=%" PRIu64 "\n", runs, plan.count,
+            plan.steps[0].pc, regs[15], regs[0], stats.cache_hit,
+            stats.code_reads, stats.data_reads, stats.jit_creations,
+            stats.generation);
+    return true;
+}
+
+void lt_dynarmic_block_probe_invalidate(CPUState *cs)
+{
+    (void)cs;
+    lt_dynarmic_probe_block_invalidate();
 }

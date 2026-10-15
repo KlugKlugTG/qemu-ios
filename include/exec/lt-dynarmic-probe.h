@@ -4,5 +4,7 @@
 
 /* Internal, default-off diagnostic. No public qemu_ios ABI extension. */
 bool lt_dynarmic_probe_try(CPUState *cpu);
+bool lt_dynarmic_block_probe_try(CPUState *cpu);
+void lt_dynarmic_block_probe_invalidate(CPUState *cpu);
 
 #endif

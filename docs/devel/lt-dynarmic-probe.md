@@ -49,7 +49,7 @@ an alternate data-memory adapter, persistent cache identity/invalidation,
 Android/AArch64 deployment, iOS execution, free-running interrupts/lifecycle or
 any speedup. The fresh-JIT, single-step path is unsuitable for benchmarking.
 
-## Actual first proof
+## Actual first proof (historical)
 
 Engine source `653c948ab2` built with an independently pinned Ubuntu Dynarmic
 6.5 shared library. The same executable with the switch OFF and ON produced
@@ -71,7 +71,7 @@ target-required FDT dependency; attempt02 exposed a target-poisoning error in
 the generic execution loop. The tested correction routes the experiment
 through a default-off internal TCGCPUOps callback, assigned only by ARM.
 
-## Prepared RAM-read and bounded-capsule extension (UNBUILT / UNRUN)
+## Historical research02 preparation (subsequently tested below)
 
 The next source revision expands the single-step diagnostic with aligned
 `LDR Rd,[Rn,#imm12]` using positive, preindexed, non-writeback word addressing.
@@ -149,3 +149,76 @@ break/watchpoint rejection, MMIO/device accesses, injected C++ rejection
 atomicity, asynchronous interrupts/pause/Stop, persistent context/invalidation,
 real-board CP15/GLES and Android/AArch64/iOS execution remain unqualified.
 No performance or production-backend change follows from this proof.
+
+
+## Current research03: reusable bounded Jit::Run caller (SOURCE ONLY)
+
+The new `LT_DYNARMIC_BLOCK_PROBE=1` switch selects an independent, default-off
+MachineNone/ARM1176 diagnostic. **This revision has not been compiled or run.**
+All historical research02 receipts describe the preceding single-step source;
+none qualifies this caller. Real boards, production builds, Android and iOS
+remain on TCG. `LT_DYNARMIC_PROBE=1` retains the historical GDB-Step experiment.
+
+The new caller accepts one branch-terminated block of two through eight
+instructions. It uses one genuine `Jit::Run()`, never a loop of `Step()` calls.
+The whitelist is the previously tested immediate r0-r12 ALU/CMP, B/BEQ/BNE and
+aligned positive-offset non-writeback LDR word. The first branch terminates
+preparation, whether taken or not. No branch within eight instructions,
+unsupported instruction or fault before that branch rejects the entire block
+with original architectural state. A fault after the completed branch returns
+to ordinary TCG at the resulting exact PC. No stores or device accesses are
+prepared, and speculative MMIO never enters a C++ callback.
+
+C checks actual fetch/data permissions and ordinary RAM, then passes only a
+snapshot and scalar owner/code identities to C++. These identity integers are
+never dereferenced there. The complete final sixteen registers and full CPSR,
+exact tick count and exact ordered data-read count must match expectations
+before live QEMU state changes. Rejection has no memory-write side effect.
+C++ exceptions retire the private engine and return failure across the C ABI.
+Process-level signals or a library crash are not converted into success.
+
+One private thread-local JIT retains an eight-MiB code allocation. Compiled
+code is reusable only while CPU identity, MMU context, block length, every PC,
+opcode and resolved RAM identity match. Values for data reads are fresh on
+every preparation; callbacks explicitly report memory as not read-only.
+Every ordinary TCG handoff or historical Step entry invalidates compiled code;
+a signature change also clears it. Only the last signature is retained. This
+is deliberately narrow reuse, not a full-system code-cache invalidation scheme.
+A total 16384 successful block executions is a diagnostic cap, then TCG resumes.
+
+Block linking, return-stack-buffer and fast dispatch optimizations are disabled;
+safe IR optimizations remain. Cycle counting is enabled. `AddTicks` requests
+`UserDefined1` at the exact approved block budget; any different halt result,
+unapproved callback or state/count mismatch rejects the snapshot. The proposed
+tests must establish that the library really honors this boundary and that a
+warm cache uses zero code-read callbacks. Source inspection cannot prove it.
+
+Only one CPU and single-thread TCG are eligible. Debug single-step, active
+break/watchpoints, replay, icount, parallel execution and specialized TB count,
+no-IRQ, memory-instrumentation or breakpoint-page cflags remain TCG. Pending
+interrupts, exit requests and forced loop exits reject entry, checked again
+after preparation. An async request arriving during Run is observed after the
+completed block of at most eight instructions; its committed state then returns
+to ordinary QEMU interrupt/exit/timer handling. No QEMU helper or nonlocal exit
+runs beneath an active C++ frame. Actual device IRQ/timer injection, race stress
+and precise real-board timing remain unqualified even if QMP pause/resume passes.
+
+The matching LightTouch `tools/arm1176-dynarmic-blocks.py` is also UNRUN. Its
+finite contracts suite proposes same-binary OFF/ON and stock witness-required
+negative comparisons for dynamic LDR loop/cache reuse, changed code, genuine
+data/fetch faults after a block, unsupported tail, exhausted branch budget,
+single-step, breakpoints and read watchpoints. All sixteen registers plus CPSR
+must match across engines. The separate ON-only async suite proposes QMP
+stop/resume and debugger code modification while stopped, checking committed
+state against genuine block witnesses and rejecting diagnostic-cap exhaustion.
+Each harness has an original25s observation limit, original5s running-phase
+limits, ordinary QMP quit, and requires a separate aggregate resource guard.
+No engine is started by source preparation or documentation.
+
+Even a passing synthetic run would establish correctness of a small eligible
+block only. This implementation recomputes every expected instruction through
+C, performs MMU checks and logs every block; it is not a speed candidate. A
+useful performance decision requires a representative measured EL0 share,
+separate cold translation/warm execution/MMU/callback/handoff costs and genuine
+ARM64 Linux/Android execution after broader architectural contracts. No speedup
+or replacement production CPU engine is claimed.

@@ -39,6 +39,8 @@ struct TCGCPUOps {
 #ifdef CONFIG_LT_DYNARMIC_PROBE
     /* Internal default-off diagnostic; NULL for ineligible architectures. */
     bool (*lt_dynarmic_probe_try)(CPUState *cpu);
+    bool (*lt_dynarmic_block_probe_try)(CPUState *cpu);
+    void (*lt_dynarmic_block_probe_invalidate)(CPUState *cpu);
 #endif
 
     /**
