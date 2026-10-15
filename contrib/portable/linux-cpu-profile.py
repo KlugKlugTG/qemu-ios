@@ -20,10 +20,31 @@ import time
 
 MAX_BYTES = 256 * 1024 * 1024
 PERF = '/usr/bin/perf'
+PRESETS = {
+    'user-40s': {'event': 'cpu-clock:u', 'seconds': 40, 'timeout_seconds': 45,
+                 'outer_seconds': 48, 'max_bytes': MAX_BYTES, 'max_threads': 64,
+                 'include_misc': False},
+    'user-kernel-10s': {'event': 'cpu-clock', 'seconds': 10, 'timeout_seconds': 15,
+                       'outer_seconds': 18, 'max_bytes': 64 * 1024 * 1024,
+                       'max_threads': 2, 'include_misc': True},
+}
 
 
-def child_limits():
-    resource.setrlimit(resource.RLIMIT_FSIZE, (MAX_BYTES, MAX_BYTES))
+def capture_spec(plan):
+    # Absent capture is the original schema-1 plan; retain its exact defaults.
+    capture = plan.get('capture')
+    if capture is None:
+        return dict(PRESETS['user-40s'], preset='user-40s')
+    require(isinstance(capture, dict), 'invalid capture specification')
+    preset = capture.get('preset')
+    require(isinstance(preset, str) and preset in PRESETS, 'unknown capture preset')
+    expected = dict(PRESETS[preset], preset=preset)
+    require(capture == expected, 'capture specification differs from fixed preset')
+    return expected
+
+
+def child_limits(max_bytes=MAX_BYTES):
+    resource.setrlimit(resource.RLIMIT_FSIZE, (max_bytes, max_bytes))
 
 
 def owned_session_members(sid):
@@ -101,6 +122,8 @@ def identity(pid, tid=None):
 
 
 def validate(plan, verify_binary=True):
+    observed_begin = time.monotonic_ns()
+    spec = capture_spec(plan)
     require(plan['schema'] == 1 and type(plan['pid']) is int and plan['pid'] > 0,
             'invalid plan/worker PID')
     require(plan['uid'] == os.getuid() and plan['uid'] != 0, 'plan must identify this ordinary owner')
@@ -113,7 +136,7 @@ def validate(plan, verify_binary=True):
     require((root / 'cmdline').read_bytes().decode().split('\0')[:-1] == plan['argv'],
             'worker command changed')
     require('--worker' in plan['argv'], 'expected isolated Native14 worker')
-    require(plan['threads'] and len(plan['threads']) <= 64, 'explicit bounded thread list required')
+    require(plan['threads'] and len(plan['threads']) <= spec['max_threads'], 'explicit bounded thread list required')
     require(len({t['tid'] for t in plan['threads']}) == len(plan['threads']), 'duplicate thread')
     threads = {}
     for thread in plan['threads']:
@@ -131,17 +154,20 @@ def validate(plan, verify_binary=True):
         require(sha(engine) == plan['engine']['sha256'], 'engine hash changed')
         require(sha(PERF) == plan['perf_sha256'], 'perf binary changed')
     return {'worker': worker, 'threads': threads, 'maps': maps,
+            'observed_begin_monotonic_ns': observed_begin,
             'observed_monotonic_ns': time.monotonic_ns(),
             'clock_ticks_per_second': os.sysconf('SC_CLK_TCK')}
 
 
 def profile_argv(plan, output):
+    spec = capture_spec(plan)
+    require(0 < len(plan['threads']) <= spec['max_threads'], 'explicit bounded thread list required')
     tids = ','.join(str(t['tid']) for t in plan['threads'])
-    return ['sudo', '-n', '/usr/bin/timeout', '--signal=INT', '--kill-after=3s', '45s',
-            '/usr/bin/prlimit', '--fsize=' + str(MAX_BYTES) + ':' + str(MAX_BYTES), '--',
-            PERF, 'record', '--no-buildid-cache', '-e', 'cpu-clock:u', '-c', '20000000', '--no-inherit',
+    return ['sudo', '-n', '/usr/bin/timeout', '--signal=INT', '--kill-after=3s', str(spec['timeout_seconds']) + 's',
+            '/usr/bin/prlimit', '--fsize=' + str(spec['max_bytes']) + ':' + str(spec['max_bytes']), '--',
+            PERF, 'record', '--no-buildid-cache', '-e', spec['event'], '-c', '20000000', '--no-inherit',
             '-t', tids, '-m', '8', '--call-graph', 'dwarf,8192', '--clockid', 'mono',
-            '-o', str(output / 'perf.data'), '--', '/usr/bin/sleep', '40']
+            '-o', str(output / 'perf.data'), '--', '/usr/bin/sleep', str(spec['seconds'])]
 
 
 def outside_git(path):
@@ -166,7 +192,8 @@ def prepare(args):
             'start_ticks': worker['start_ticks'],
             'argv': (Path('/proc') / str(args.pid) / 'cmdline').read_bytes().decode().split('\0')[:-1],
             'threads': threads, 'engine': {'path': str(engine), 'sha256': sha(engine)},
-            'perf_sha256': sha(PERF), 'output': str(args.output)}
+            'perf_sha256': sha(PERF), 'output': str(args.output),
+            'capture': dict(PRESETS[args.preset], preset=args.preset)}
     validate(plan)
     save(args.plan, plan)
     print(json.dumps({'plan_sha256': sha(args.plan), 'tool_sha256': sha(__file__),
@@ -175,11 +202,12 @@ def prepare(args):
 
 def collect(args):
     plan = json.loads(args.plan.read_text())
+    spec = capture_spec(plan)
     before = validate(plan)
     output = Path(plan['output'])
     outside_git(output)
     argv = profile_argv(plan, output)
-    print(json.dumps({'preflight': 'PASS', 'argv': argv, 'attach_performed': False}), flush=True)
+    print(json.dumps({'preflight': 'PASS', 'argv': argv, 'capture': spec, 'attach_performed': False}), flush=True)
     if not args.execute_approved_sha256:
         return
     require(sha(args.plan) == args.execute_approved_sha256, 'approved plan differs')
@@ -211,7 +239,7 @@ def collect(args):
         with (output / 'record.stdout').open('xb') as stdout, (output / 'record.stderr').open('xb') as stderr:
             try:
                 def child_setup():
-                    child_limits()
+                    child_limits(spec['max_bytes'])
                     signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
                 child = subprocess.Popen(argv, stdout=stdout, stderr=stderr, stdin=subprocess.DEVNULL, start_new_session=True,
                                          preexec_fn=child_setup)
@@ -221,12 +249,12 @@ def collect(args):
             finally:
                 signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
             while child.poll() is None:
-                require(time.monotonic_ns() - began < 48_000_000_000, 'collector deadline expired')
+                require(time.monotonic_ns() - began < spec['outer_seconds'] * 1_000_000_000, 'collector deadline expired')
                 require(not retired.poll(0), 'owned worker retired during profile')
                 validate(plan, verify_binary=False)
                 for name in ['perf.data', 'record.stdout', 'record.stderr']:
                     p = output / name
-                    require(not p.exists() or p.stat().st_size <= MAX_BYTES, 'profile output ceiling exceeded')
+                    require(not p.exists() or p.stat().st_size <= spec['max_bytes'], 'profile output ceiling exceeded')
                 time.sleep(.5)
             require(child.returncode == 0, 'perf recording failed')
             after = validate(plan)
@@ -256,7 +284,9 @@ def collect(args):
                 'exit': child.returncode if child else None, 'failure': failure, 'cleanup_failure': cleanup_failure,
                 'perf_data_sha256': data_sha256,
                 'after': after, 'guest_scene_or_speedup_verified': False, 'native_sample_classification_pending': True,
-                'observer': '40s CPU samples, DWARF8192, 0.5s identity/maps reads; no guest input or capture'})
+                'capture': spec,
+                'observer': str(spec['seconds']) + 's ' + spec['event'] +
+                    ' samples, DWARF8192, 0.5s identity/maps reads; no guest input or capture'})
         if cleanup_failure is not None and failure is None:
             raise RuntimeError(cleanup_failure)
 
@@ -291,13 +321,14 @@ def report(args):
     require(sha(PERF) == plan['perf_sha256'], 'reporting perf binary differs')
     require(sha(plan['engine']['path']) == plan['engine']['sha256'], 'reporting engine symbols differ')
     require(sha(root / 'perf.data') == terminal['perf_data_sha256'], 'recording hash differs')
+    spec = capture_spec(plan)
     output = args.output.resolve()
     outside_git(output)
     output.mkdir(mode=0o700)
     commands = [
         ('native-self.txt', ['report', '--stdio', '--no-children', '--stdio-color', 'never', '--percent-limit', '0']),
         ('native-inclusive.txt', ['report', '--stdio', '--children', '--stdio-color', 'never']),
-        ('samples.txt', ['script', '--ns', '-G', '-F', 'pid,tid,time,period,ip,sym,dso']),
+        ('samples.txt', ['script', '--ns', '-G', '-F', 'pid,tid,time,period,' + ('misc,' if spec['include_misc'] else '') + 'ip,sym,dso']),
         ('mappings-lost.txt', ['script', '--ns', '--show-mmap-events', '--show-task-events', '--show-lost-events']),
         ('header.txt', ['report', '--header-only', '--stdio']),
     ]
@@ -305,20 +336,24 @@ def report(args):
         env = dict(os.environ, DEBUGINFOD_URLS='', PERF_PAGER='cat')
         with (output / name).open('xb') as stream, (output / (name + '.stderr')).open('xb') as error:
             result = subprocess.run([PERF, *options, '-i', str(root / 'perf.data')], stdout=stream,
-                                    stderr=error, env=env, timeout=30, preexec_fn=child_limits)
+                                    stderr=error, env=env, timeout=30,
+                                    preexec_fn=lambda: child_limits(spec['max_bytes']))
         require(result.returncode == 0, 'offline report failed: ' + name)
-    parsed = parse_samples((output / 'samples.txt').read_text())
+    parsed = parse_samples((output / 'samples.txt').read_text(), include_misc=spec['include_misc'])
     save(output / 'sample-bins.json', parsed)
     save(output / 'receipt.json', {'perf_data_sha256': terminal['perf_data_sha256'],
         'engine': plan['engine'], 'perf_sha256': plan['perf_sha256'],
         'files': {p.name: sha(p) for p in sorted(output.iterdir())},
-        'classification_valid': parsed['classification_valid'],
+        'capture': spec, 'classification_valid': parsed['classification_valid'],
         'loss_checked': False, 'workload_and_latency_qualified': False})
 
 
-def parse_samples(source):
-    bins, rows, rejected = collections.Counter(), [], []
-    pattern = re.compile(r'^\s*(\d+)[\s/]+(\d+)\s+([0-9]+\.[0-9]+):\s+(\d+)\s+((?:0x)?[0-9a-fA-F]+)\s+(.*?)\s+\((.*)\)\s*$')
+def parse_samples(source, include_misc=False):
+    bins, modes, per_thread, rows, rejected = (collections.Counter(), collections.Counter(),
+                                             collections.defaultdict(collections.Counter), [], [])
+    # perf prints misc immediately after PID/TID, regardless of -F field order.
+    mode_pattern = r'([UK])\s+' if include_misc else ''
+    pattern = re.compile(r'^\s*(\d+)[\s/]+(\d+)\s+' + mode_pattern + r'([0-9]+\.[0-9]+):\s+(\d+)\s+((?:0x)?[0-9a-fA-F]+)\s+(.*?)\s+\((.*)\)\s*$')
     for line in source.splitlines():
         if not line.strip() or line.startswith('#'):
             continue
@@ -326,24 +361,34 @@ def parse_samples(source):
         if not match:
             rejected.append(line)
             continue
-        pid, tid, clock, period, ip, symbol, dso = match.groups()
-        label = category(symbol, dso)
+        groups = list(match.groups())
+        mode = groups.pop(2) if include_misc else 'U'
+        pid, tid, clock, period, ip, symbol, dso = groups
+        context = 'kernel' if mode == 'K' else 'user'
+        modes[context] += int(period)
+        per_thread[tid][context] += int(period)
+        # Kernel symbols must never enter native QEMU/graphics/helper bins.
+        label = ('kernel-unresolved' if category(symbol, dso) == 'unresolved' else
+                 'kernel-resolved') if mode == 'K' else category(symbol, dso)
         bins[label] += int(period)
         rows.append({'pid': int(pid), 'tid': int(tid), 'monotonic_seconds': clock,
-                     'period_ns': int(period), 'ip': ip, 'symbol': symbol, 'dso': dso, 'category': label})
+                     'period_ns': int(period), 'ip': ip, 'symbol': symbol, 'dso': dso, 'category': label, 'cpu_mode': context})
     return {'samples': rows, 'period_ns_by_self_category': bins,
-        'unparsed_rows': rejected, 'classification_valid': bool(rows) and not rejected,
+        'period_ns_by_cpu_mode': modes, 'period_ns_by_thread_and_cpu_mode': per_thread, 'unparsed_rows': rejected, 'classification_valid': bool(rows) and not rejected,
         'limits': ['Statistical self CPU allocation, not exact elapsed translation time.',
                    'Inclusive reports overlap and must not be added to self bins.',
                    'Unknown/anonymous remains unresolved without recording-time JIT mapping evidence.',
                    'First/warm scene and latency require separately inspected input/frame evidence.',
-                   'Kernel time excluded; raw lost-event report must be reviewed separately.']}
+                   ('User and kernel CPU sampled; kernel symbols may remain unresolved; not off-CPU or GPU wait.'
+                    if include_misc else 'Kernel time excluded.'),
+                   'Raw lost-event report must be reviewed separately.']}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='operation', required=True)
     preparation = sub.add_parser('prepare')
+    preparation.add_argument('--preset', choices=PRESETS, default='user-40s')
     preparation.add_argument('--pid', type=int, required=True)
     preparation.add_argument('--thread', action='append', required=True, help='exact TID:owner-verified-role')
     preparation.add_argument('--engine', type=Path, required=True)
