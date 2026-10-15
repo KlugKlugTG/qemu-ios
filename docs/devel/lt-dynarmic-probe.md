@@ -70,3 +70,47 @@ attempts with the private integration receipt. Build attempt01 lacked the
 target-required FDT dependency; attempt02 exposed a target-poisoning error in
 the generic execution loop. The tested correction routes the experiment
 through a default-off internal TCGCPUOps callback, assigned only by ARM.
+
+## Prepared RAM-read and bounded-capsule extension (UNBUILT / UNRUN)
+
+The next source revision expands the single-step diagnostic with aligned
+`LDR Rd,[Rn,#imm12]` using positive, preindexed, non-writeback word addressing.
+Both registers must be r0-r12. QEMU checks actual EL0 data-load translation
+and permissions in C and resolves an ordinary RAM region before creating the
+JIT. A misaligned address, permission/translation failure, unassigned physical
+address, RAM-device region or other non-RAM region rejects the alternate path.
+TCG sees the original instruction and all original architectural state and
+performs the real access/fault. No MMIO callback is invoked speculatively.
+
+The C++ callback can read only the one prepared virtual address and value,
+exactly once, at the approved width. It cannot call QEMU or read live host RAM.
+Any other read, write, exception, SVC or fallback rejects the complete capsule.
+A successful actual JIT step must return `HaltReason::Step` and match all
+sixteen expected registers and the entire reconstructed CPSR before commit.
+Live QEMU breakpoints/watchpoints conservatively disable this diagnostic.
+
+The same source prepares ordinary r0-r12 MOV/ADD/SUB/AND/EOR/ORR with unrotated
+imm8, CMP with unrotated imm8, and B/BEQ/BNE with immediate displacement. Only
+CMP changes flags. A snapshot capsule/planner can represent up to eight
+ALU/branch/read steps and verifies actual intermediate states. It has no
+writes, indirect branches, PC operands, stack/link-register operands, VFP,
+Thumb, CP15 or privileged instructions. A failed prospective instruction ends
+the safe prefix; a future caller must return its final state to normal QEMU
+for precise unsupported/fault handling. Fresh JIT state is used per capsule.
+
+**The execution-loop caller still supplies budget=1 and still requires GDB
+single-step. No multi-instruction or free-running caller is enabled.** This
+preserves debug/interrupt/exit/timer boundaries while the new memory/flag/
+branch contracts await actual differential tests. Source preparation of the
+larger capsule is not a block-execution result or performance candidate.
+A useful block caller requires separate review of its instruction budget,
+async exits, interruption between steps, protected breakpoints, context and
+invalidation, followed by actual synthetic and guest lifecycle evidence.
+
+Before any build/run: freeze exact source/library hashes and use a separately
+admitted finite j1 build. First repeat the historical eight-state OFF/ON and
+stock witness-negative, then new exact load/ALU/flags/branch cases with
+witness-required negatives. Compare every integer register and CPSR, require
+real TCG permission/translation/alignment/prefetch faults with no alternate
+witness, and preserve all failed attempts. No iOS/Android/real-board operation
+or speed measurement is authorized by this source change.
