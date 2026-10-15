@@ -108,3 +108,11 @@ assertion must fail with the handlers that omit the mark.
 See [PowerVR capability replay feasibility](pvrvframe-feasibility.md) for current
 official platform metadata, ARM64 Mac/emulator integration limits and existing
 measured-capability regression coverage.
+
+The ELF inspector retains `x86_64` as its default. A separately compiled ARM64
+hardware ANGLE candidate must use the closed `--abi arm64` selector; its report
+records `arm64-v8a`. Machine type, little endian, suffixed SONAMEs, dependency
+closure and 16KiB LOAD alignment remain required. Cross-ABI files are rejected,
+not relabelled. Run `python3 tests/graphics/test-inspect-angle-android.py` for
+target-free tests of the production inspector and its rejection paths.
+

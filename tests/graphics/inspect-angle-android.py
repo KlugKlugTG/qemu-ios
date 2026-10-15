@@ -10,6 +10,8 @@ import subprocess
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--libraries', required=True, type=Path)
+parser.add_argument('--abi', choices=('x86_64', 'arm64'), default='x86_64',
+                    help='Expected ABI; defaults to the original x86_64 candidate')
 parser.add_argument('--readelf', default='readelf')
 parser.add_argument('--output', required=True, type=Path)
 args = parser.parse_args()
@@ -31,8 +33,10 @@ while pending:
     headers = subprocess.check_output([args.readelf, '-W', '-h', str(path)], text=True)
     segments = subprocess.check_output([args.readelf, '-W', '-l', str(path)], text=True)
     dynamic = subprocess.check_output([args.readelf, '-W', '-d', str(path)], text=True)
-    if 'ELF64' not in headers or 'Advanced Micro Devices X86-64' not in headers:
-        parser.exit(2, f'Unexpected ABI for x86 candidate: {name}\n')
+    machine = 'AArch64' if args.abi == 'arm64' else 'Advanced Micro Devices X86-64'
+    if ('ELF64' not in headers or machine not in headers or
+            "2's complement, little endian" not in headers):
+        parser.exit(2, f'Unexpected ABI for {args.abi} candidate: {name}\n')
     needed = re.findall(r'\(NEEDED\).*\[([^\]]+)\]', dynamic)
     sonames = re.findall(r'\(SONAME\).*\[([^\]]+)\]', dynamic)
     if sonames != [name]:
@@ -48,9 +52,10 @@ while pending:
                      'soname': sonames[0], 'needed': needed,
                      'load_alignments': [int(row[-1], 16) for row in loads]}
     pending.extend(needed)
-record = {'description': 'ELF dependency/alignment check only; actual Android loading, GLES1/GLES2 and ZIP alignment remain required.',
+record = {'abi': 'arm64-v8a' if args.abi == 'arm64' else 'x86_64',
+          'description': 'ELF dependency/alignment check only; actual Android loading, GLES1/GLES2 and ZIP alignment remain required.',
           'objects': objects,
           'platform_dependencies': sorted(set(dep for item in objects.values()
                                               for dep in item['needed'] if dep in platform))}
 args.output.write_text(json.dumps(record, indent=2) + '\n')
-print(f'PASS x86 Bionic packaged closure: {len(objects)} objects, SONAMEs and 16 KiB LOAD alignment')
+print(f'PASS {args.abi} Bionic packaged closure: {len(objects)} objects, SONAMEs and 16 KiB LOAD alignment')
