@@ -1,0 +1,94 @@
+Experimental LightTouch persistent frontend IR
+============================================
+
+This candidate is **off by default and not qualified for a product release**.
+It is not persistent native code, AOT compilation, or a replacement CPU backend.
+There is no measured performance claim. Actual Linux and Android guest correctness,
+cross-process hits, first-action measurements and final packaging remain required.
+
+The ARM translator can save pointer-free preoptimization TCG operations. A fresh
+worker restores temporary/label identities, binds exits to its own newly allocated
+TranslationBlock, then runs QEMU's normal optimizer, liveness passes, register
+allocator and host emitter. Existing page locking, generated-code publication,
+lookup, interrupt checks, SMC invalidation and TB retirement remain in place.
+Neither a native-code buffer nor a helper, CPU, label or TB address goes on disk.
+
+Current supported subset
+------------------------
+
+* Linux hosts (including Android), 64-bit TCG hosts, system mode without plugins.
+* Exact ARM1176 CPU, little-endian A32, single page, ordinary integer data
+  processing, byte/word LDR/STR and direct branches, and a closed helper-free IR
+  opcode set. CPU/guest state remains dynamic through existing TCG globals.
+* Unsupported blocks, including Thumb, VFP/SIMD, helper calls, privileged
+  instructions, dynamic lookup jumps, stepping, breakpoints, MMIO, plugin and
+  parallel translation contexts, use normal translation. They are not errors.
+* Cache hits skip ARM frontend decoding only. Optimization and native emission
+  are still performed. The supported subset and extra hashing/storage costs can
+  limit gains; measure real guest workloads before enabling by default.
+
+Identity and failure behavior
+-----------------------------
+
+The key binds the full remaining locked code page, PC, all TB context/compilation
+flags, instruction limit, CPU ISA identification/features/idle-loop setting,
+current global-temp layout, host optional-op support and SHA256 of the actual
+mapped engine file. The opened engine inode/device must match its executable
+mapping in ``/proc/self/maps``. Its size and timestamps must remain unchanged
+while hashing. An inaccessible/non-file image (for example an unextracted APK
+library path) disables caching. A key is checked again before publishing a miss.
+
+Records use explicit little-endian integers and symbolic temp/label/exit indices.
+The decoder checks all lengths, counts, enums, operand indices/types, instruction
+PCs/count, host CPU-state memory bounds, supported memory operation flags, label
+definitions, exit slots and host opcode availability before changing live TCG
+state. The file envelope checks build/key/SHA256 before decoding. Files must
+never be accepted from an archive, guest, network, user import or a shared cache:
+the owner-only store is trusted local process output, not an untrusted IR format.
+Processes with the same UID can already modify the engine and guest state; the
+cache is not a security boundary against them.
+
+An existing absolute directory must be owner-only (0700 recommended). Records
+and the lifetime exclusive lock are owner-only regular files, with no hard links;
+final symlinks are not followed. There are at most 4096 records, 32 MiB total and
+128 KiB per payload, including accounting for stale build records. Initialization
+loads only bounded valid records. A second owner, malformed/oversized/unsafe store
+or unknown leftover file disables caching; normal translation continues.
+Each record is written to a new private file, flushed, closed and atomically
+renamed; partial files never become hits. Unknown files are never removed. After
+a crash leaves a temporary file, normal translation remains available; explicitly
+replace the disposable private cache directory when the worker is stopped.
+No guest overlay/base/dirty-state or saved-state files are modified by this cache.
+
+Experimental invocation and frontend contract
+--------------------------------------------
+
+Root must allocate/review an actual engine build and guest run before using::
+
+    mkdir -m 700 /absolute/private/profile/cache/tcg-ir-candidate
+    LT_TCG_IR_CACHE_ENABLE=experimental-v1 \
+      LT_TCG_IR_CACHE=/absolute/private/profile/cache/tcg-ir-candidate \
+      <existing unchanged frontend invocation>
+
+The proposed shared frontend contract is a separately owned profile cache
+directory, inherited only by the fresh native worker through those two
+environment variables. It is **not yet wired into either frontend or packaged**.
+Do not infer guest-clean shutdown or a performance pass from cache statistics.
+Cache records are disposable, never bundled with firmware or shared publicly.
+The worker emits counters on ordinary process exit when the store was available.
+
+Source tests without an engine build
+------------------------------------
+
+Use an existing configured native Linux ARM system-mode build's compilation
+database (the command does not invoke configure/Ninja, a guest or a device)::
+
+    python3 tests/unit/run-tcg-ir-cache-tests.py \
+      --compile-commands /existing/qemu-build/compile_commands.json \
+      --out /new/private/evidence/directory --sanitize
+
+This checks real configured-header syntax, isolated store/codec tests, and actual
+separate producer/consumer execs for stored bytes. The codec's small independent
+integer fixture exercises relocated temps/labels/current-TB exits and interrupt
+branches. It is not actual QEMU-generated code execution or iOS qualification.
+The store unit also participates in the normal Meson unit suite.
