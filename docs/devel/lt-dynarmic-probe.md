@@ -266,8 +266,11 @@ The finite prospective workload is `ADD r0,#1; SUB r1,#1; CMP r1,#0; BNE loop`,
 initialized with1 or65536 iterations and followed by SVC plus privileged WFI.
 It has a closed instruction-count oracle of4*N user instructions, r0=N/r1=0,
 precise final flags and terminal state. The ON aggregate must account for every
-one of those instructions, with one cold block andN-1 warm blocks, and exactly
-one terminal segment. Same-built OFF and a stock witness-required negative
+one of those instructions across all segments, with one cold block and
+segment-blocks-minus-one warm blocks per segment. Ordinary asynchronous host
+exits may split the workload and conservatively recompile; intermediate PC,
+cumulative countdown/flags and final terminal state must still be exact. Total
+process CPU and measured cold/warm counts include those boundary costs. Same-built OFF and a stock witness-required negative
 must match all16registers/fullCPSR. No observer pause/input occurs during the
 workload. Completion observation and its uncertainty must be disclosed; low
 CPU-tick resolution must never be converted into a fabricated short-run ratio.
