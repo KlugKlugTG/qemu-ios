@@ -156,6 +156,7 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
     }
 
     i0 = tb_jmp_cache_hash_page(page_addr);
+    TB_CACHE_CLEAR_NOTE(jc, TB_CLEAR_page_total);
     for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
         qatomic_set(&jc->array[i0 + i].tb, NULL);
     }
@@ -390,6 +391,11 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
 
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 
+    TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_full_tlb);
+    TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache,
+                       !to_clean ? TB_CLEAR_tlb_clean :
+                       to_clean == ALL_MMUIDX_BITS ? TB_CLEAR_tlb_all :
+                       TB_CLEAR_tlb_partial);
     tcg_flush_jmp_cache(cpu);
 
     if (to_clean == ALL_MMUIDX_BITS) {
@@ -549,7 +555,9 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
      * Discard jump cache entries for any tb which might potentially
      * overlap the flushed page, which includes the previous.
      */
+    TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_page_previous);
     tb_jmp_cache_clear_page(cpu, addr - TARGET_PAGE_SIZE);
+    TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_page_current);
     tb_jmp_cache_clear_page(cpu, addr);
 }
 
@@ -740,6 +748,7 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
      * longer to clear each entry individually than it will to clear it all.
      */
     if (d.len >= (TARGET_PAGE_SIZE * TB_JMP_CACHE_SIZE)) {
+        TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_full_range);
         tcg_flush_jmp_cache(cpu);
         return;
     }
@@ -750,6 +759,9 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
      */
     d.addr -= TARGET_PAGE_SIZE;
     for (vaddr i = 0, n = d.len / TARGET_PAGE_SIZE + 1; i < n; i++) {
+        TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache,
+                           i == 0 ? TB_CLEAR_page_previous :
+                           TB_CLEAR_page_range);
         tb_jmp_cache_clear_page(cpu, d.addr);
         d.addr += TARGET_PAGE_SIZE;
     }

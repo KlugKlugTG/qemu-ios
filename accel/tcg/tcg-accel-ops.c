@@ -26,6 +26,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "tb-cache-clear-stats.h"
+#ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
+#include "tb-jmp-cache.h"
+#endif
 #include "accel/accel-ops.h"
 #include "accel/accel-cpu-ops.h"
 #include "system/tcg.h"
@@ -87,6 +91,7 @@ int tcg_cpu_exec(CPUState *cpu)
 
 static void tcg_cpu_reset_hold(CPUState *cpu)
 {
+    TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_full_reset);
     tcg_flush_jmp_cache(cpu);
 
     tlb_flush(cpu);
