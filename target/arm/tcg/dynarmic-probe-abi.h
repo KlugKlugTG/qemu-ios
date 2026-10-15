@@ -30,6 +30,13 @@ typedef struct LTDynarmicProbePlan {
     unsigned count;
     uint32_t initial_regs[16];
     uint32_t initial_cpsr;
+    /* Throughput trial uses decode/MMU checks without C ALU evaluation.
+     * Only ordinary register writes and NZCV changes are permitted. */
+    bool throughput;
+    uint16_t written_regs;
+    bool writes_nzcv;
+    uint32_t terminal_taken;
+    uint32_t terminal_fallthrough;
     uint64_t owner;
     uint64_t context[LT_DYNARMIC_PROBE_CONTEXT_WORDS];
     LTDynarmicProbeStep steps[LT_DYNARMIC_PROBE_MAX_STEPS];

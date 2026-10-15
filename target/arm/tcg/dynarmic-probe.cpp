@@ -194,6 +194,7 @@ struct BlockEngine {
     bool matches(const LTDynarmicProbePlan &plan) const {
         if (!valid || previous.owner != plan.owner ||
             previous.count != plan.count ||
+            previous.throughput != plan.throughput ||
             !std::equal(previous.context,
                         previous.context + LT_DYNARMIC_PROBE_CONTEXT_WORDS,
                         plan.context)) {
@@ -262,12 +263,31 @@ extern "C" bool lt_dynarmic_probe_block(const LTDynarmicProbePlan *plan,
         for (unsigned i = 0; i < plan->count; i++) {
             expected_reads += plan->steps[i].has_read;
         }
+        bool state_valid;
+        if (plan->throughput) {
+            /* No C instruction interpreter in this trial. Validate structural
+             * architectural boundaries; an external TCG differential harness
+             * must check the exact changed register/NZCV/branch result. */
+            const auto &actual = engine.jit->Regs();
+            uint32_t allowed_flags = plan->writes_nzcv ? 0xf0000000u : 0;
+            state_valid = !callbacks.data_reads &&
+                !((engine.jit->Cpsr() ^ plan->initial_cpsr) & ~allowed_flags) &&
+                (actual[15] == plan->terminal_taken ||
+                 actual[15] == plan->terminal_fallthrough);
+            for (unsigned i = 0; i < 15; i++) {
+                if (!(plan->written_regs & (1u << i)) &&
+                    actual[i] != plan->initial_regs[i]) {
+                    state_valid = false;
+                }
+            }
+        } else {
+            state_valid = engine.jit->Cpsr() == last.expected_cpsr &&
+                std::equal(last.expected_regs, last.expected_regs + 16,
+                           engine.jit->Regs().begin());
+        }
         if (callbacks.unsupported || halt != HaltReason::UserDefined1 ||
             callbacks.consumed != plan->count ||
-            callbacks.data_reads != expected_reads ||
-            engine.jit->Cpsr() != last.expected_cpsr ||
-            !std::equal(last.expected_regs, last.expected_regs + 16,
-                        engine.jit->Regs().begin())) {
+            callbacks.data_reads != expected_reads || !state_valid) {
             engine.invalidate();
             return false;
         }

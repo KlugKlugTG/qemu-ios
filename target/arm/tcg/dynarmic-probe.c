@@ -167,6 +167,61 @@ static bool prepare_plan(CPUState *cs, const uint32_t regs[16], uint32_t cpsr,
     return plan->count != 0;
 }
 
+/* Throughput candidate: structural whitelist and fetch/MMU checks only.
+ * No instruction result is interpreted in C, no data accesses are admitted.
+ * Full architectural output is checked against TCG by the external harness. */
+static bool prepare_throughput(CPUState *cs, const uint32_t regs[16],
+                               uint32_t cpsr, LTDynarmicProbePlan *plan)
+{
+    memset(plan, 0, sizeof(*plan));
+    memcpy(plan->initial_regs, regs, sizeof(plan->initial_regs));
+    plan->initial_cpsr = cpsr;
+    plan->throughput = true;
+    for (unsigned i = 0; i < LT_DYNARMIC_PROBE_MAX_STEPS; i++) {
+        LTDynarmicProbeStep *step = &plan->steps[i];
+        uint32_t op, family;
+        unsigned rd, rn;
+
+        step->pc = regs[15] + i * 4;
+        if (qatomic_load_acquire(&cs->exit_request) ||
+            !probe_ram_word(cs, step->pc, MMU_INST_FETCH, &step->opcode,
+                            &step->code_identity)) {
+            return false;
+        }
+        op = step->opcode;
+        rd = extract32(op, 12, 4);
+        rn = extract32(op, 16, 4);
+        plan->count++;
+        if (is_branch(op)) {
+            uint32_t displacement = (op & 0x00ffffff) << 2;
+            if (displacement & 0x02000000) {
+                displacement |= 0xfc000000;
+            }
+            plan->terminal_taken = step->pc + 8 + displacement;
+            plan->terminal_fallthrough = step->pc + 4;
+            return plan->count >= 2;
+        }
+        if ((op & 0xffff0f00) == 0xe3a00000 && rd < 13) {
+            plan->written_regs |= 1u << rd;
+            continue;
+        }
+        family = op & 0xfff00f00;
+        if (rd < 13 && rn < 13 &&
+            (family == 0xe2800000 || family == 0xe2400000 ||
+             family == 0xe2000000 || family == 0xe2200000 ||
+             family == 0xe3800000)) {
+            plan->written_regs |= 1u << rd;
+            continue;
+        }
+        if ((op & 0xfff0ff00) == 0xe3500000 && rn < 13) {
+            plan->writes_nzcv = true;
+            continue;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool lt_dynarmic_probe_try(CPUState *cs)
 {
     ARMCPU *cpu = ARM_CPU(cs);
@@ -205,6 +260,14 @@ bool lt_dynarmic_probe_try(CPUState *cs)
     return true;
 }
 
+/* Aggregate witnesses replace per-block stderr only for the separately opted-in
+ * throughput trial. Every TCG handoff publishes/reset this segment exactly once.
+ * First/last timestamps include preparation and CPU-loop overhead; cold-end
+ * brackets first preparation/Run/allocation. Only these three clock reads occur
+ * per segment. None is a pure-JIT timer or a production performance claim. */
+static uint64_t timed_blocks, timed_instructions, timed_cold, timed_warm;
+static int64_t first_run_us, first_run_end_us;
+
 bool lt_dynarmic_block_probe_try(CPUState *cs)
 {
     ARMCPU *cpu = ARM_CPU(cs);
@@ -213,11 +276,14 @@ bool lt_dynarmic_block_probe_try(CPUState *cs)
     LTDynarmicBlockStats stats;
     uint32_t regs[16], cpsr;
     static unsigned runs;
+    const char *trial = g_getenv("LT_DYNARMIC_THROUGHPUT");
+    bool throughput = trial && !strcmp(trial, "1");
     const char *enabled = g_getenv("LT_DYNARMIC_BLOCK_PROBE");
 
     /* A separate explicit switch; the historical GDB-step experiment and
      * all product builds/real boards retain their previous routes. */
-    if (!enabled || strcmp(enabled, "1") || runs >= 16384 ||
+    if (!enabled || strcmp(enabled, "1") ||
+        runs >= (throughput ? 1048576 : 16384) ||
         !object_dynamic_cast(OBJECT(qdev_get_machine()), MACHINE_TYPE_NAME("none")) ||
         MACHINE(qdev_get_machine())->smp.cpus != 1 ||
         cpu->midr != 0x410fb767 || env->aarch64 || env->thumb ||
@@ -233,7 +299,9 @@ bool lt_dynarmic_block_probe_try(CPUState *cs)
         return false;
     }
     memcpy(regs, env->regs, sizeof(regs));
-    if (!prepare_plan(cs, regs, cpsr, LT_DYNARMIC_PROBE_MAX_STEPS, &plan) ||
+    int64_t began_us = throughput && !timed_blocks ? g_get_monotonic_time() : 0;
+    if (!(throughput ? prepare_throughput(cs, regs, cpsr, &plan) :
+          prepare_plan(cs, regs, cpsr, LT_DYNARMIC_PROBE_MAX_STEPS, &plan)) ||
         plan.count < 2 || !is_branch(plan.steps[plan.count - 1].opcode)) {
         return false;
     }
@@ -263,6 +331,17 @@ bool lt_dynarmic_block_probe_try(CPUState *cs)
     memcpy(env->regs, regs, sizeof(regs));
     cpsr_write(env, cpsr, CPSR_NZCV | CPSR_Q | CPSR_GE, CPSRWriteRaw);
     runs++;
+    if (throughput) {
+        if (!timed_blocks) {
+            first_run_us = began_us;
+            first_run_end_us = g_get_monotonic_time();
+        }
+        timed_blocks++;
+        timed_instructions += plan.count;
+        timed_warm += stats.cache_hit;
+        timed_cold += !stats.cache_hit;
+        return true;
+    }
     fprintf(stderr, "LT_DYNARMIC_BLOCK run=%u count=%u pc=0x%08x next=0x%08x "
             "r0=%u reused=%u code_reads=%u data_reads=%u jit=%" PRIu64
             " generation=%" PRIu64 "\n", runs, plan.count,
@@ -274,6 +353,18 @@ bool lt_dynarmic_block_probe_try(CPUState *cs)
 
 void lt_dynarmic_block_probe_invalidate(CPUState *cs)
 {
-    (void)cs;
+    if (timed_blocks) {
+        CPUARMState *env = &ARM_CPU(cs)->env;
+        fprintf(stderr, "LT_DYNARMIC_THROUGHPUT blocks=%" PRIu64
+                " instructions=%" PRIu64 " cold=%" PRIu64 " warm=%" PRIu64
+                " first_us=%" PRId64 " cold_end_us=%" PRId64
+                " last_us=%" PRId64
+                " pc=0x%08x r0=%u r1=%u cpsr=0x%08x\n",
+                timed_blocks, timed_instructions, timed_cold, timed_warm,
+                first_run_us, first_run_end_us, g_get_monotonic_time(),
+                env->regs[15], env->regs[0],
+                env->regs[1], cpsr_read(env));
+        timed_blocks = timed_instructions = timed_cold = timed_warm = 0;
+    }
     lt_dynarmic_probe_block_invalidate();
 }

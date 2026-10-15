@@ -222,3 +222,72 @@ useful performance decision requires a representative measured EL0 share,
 separate cold translation/warm execution/MMU/callback/handoff costs and genuine
 ARM64 Linux/Android execution after broader architectural contracts. No speedup
 or replacement production CPU engine is claimed.
+
+## Research04 throughput candidate (SOURCE ONLY / UNBUILT / UNRUN)
+
+After the separately recorded successful research03 block/async contracts,
+`LT_DYNARMIC_THROUGHPUT=1` additionally opts the block experiment into a narrow
+throughput candidate. It still requires the dependency build and
+`LT_DYNARMIC_BLOCK_PROBE=1`; product/real-board behavior remains TCG. No current
+binary contains this candidate. Historical proof binaries/receipts are retained.
+
+This path decodes and MMU-checks each sequential code word before entry, but
+never evaluates the ALU result in C. Only the existing r0-r12 immediate ALU,
+CMP and first-terminal B/BEQ/BNE forms are accepted; loads remain confined to
+the fully checked correctness mode. No stores, Thumb, VFP, privileged or device
+operation is newly admitted. The same two-through-eight-instruction bound,
+pre-entry exit/interrupt checks, generic debugger/replay/icount/cflags rejection,
+post-block host handling, fresh context/code/RAM identity and TCG invalidation
+are retained. Correctness mode still compares the entire expected result.
+
+The candidate instead requires exact returned instruction/tick count, no data
+callback, exact non-NZCV CPSR preservation (all CPSR if no CMP), unchanged
+unwritten registers and PC at one of the prepared terminal branch outcomes.
+The external harness must compare the exact written registers/NZCV/branch
+outcome against TCG. This is a deliberate diagnostic contract boundary, not a
+claim that internally checking write masks proves instruction semantics. The
+cache signature distinguishes correctness and throughput plans. Rejection
+preserves original QEMU state and goes to normal TCG. A candidate run is capped
+at1048576 successful blocks, then ordinary TCG; cap exhaustion must fail the
+prospective witness gate.
+
+Per-block stderr witnesses are replaced by one aggregate at each TCG handoff:
+committed block and instruction totals, cold/warm counts, initial preparation
+start/first-commit/end times and terminal PC/r0/r1/CPSR. Three monotonic-clock
+reads per segment avoid a timer call at every warm block. The first interval
+includes allocation/translation/preparation/Run; the remaining span includes
+all MMU checks, signature matching, snapshots, actual JIT, commits and host-loop
+overhead. These wall intervals are diagnostic, not pure-JIT or isolated warm
+instruction timings. An external observer also measures complete process and
+vCPU-thread CPU ticks, records their resolution and retains raw observations.
+There are no per-block native CPU timers or hidden logging in the candidate.
+
+The finite prospective workload is `ADD r0,#1; SUB r1,#1; CMP r1,#0; BNE loop`,
+initialized with1 or65536 iterations and followed by SVC plus privileged WFI.
+It has a closed instruction-count oracle of4*N user instructions, r0=N/r1=0,
+precise final flags and terminal state. The ON aggregate must account for every
+one of those instructions, with one cold block andN-1 warm blocks, and exactly
+one terminal segment. Same-built OFF and a stock witness-required negative
+must match all16registers/fullCPSR. No observer pause/input occurs during the
+workload. Completion observation and its uncertainty must be disclosed; low
+CPU-tick resolution must never be converted into a fabricated short-run ratio.
+
+This is a bounded decision experiment, not an alternate iOS engine roadmap
+without stopping points. If complete warm workload CPU cost loses to TCG,
+first attribute overhead to the repeated MMU/snapshot/dispatcher boundaries;
+do not add instructions merely to expand synthetic test counts. A materially
+better path would require validated cached block metadata plus a live-MMU data
+adapter and meaningful larger execution windows without weakening exits. If
+cost remains dominated by safe boundary work, stop this hybrid direction.
+
+Before any production usefulness claim: measure actual iOS privileged/EL0 and
+ARM/Thumb hot-code fractions on an unchanged production engine. High EL0 ARM
+coverage is necessary for this limited path; otherwise Thumb/other engines
+are a separate explicit feasibility decision. Next qualify actual memory and
+SMC/context changes, precise fault/IRQ/timer/debug exits and real board PL0
+CP15/GLES handoffs. Build the proven library for ARM64 Linux, run the same
+finite differential tests there, then Android app-UID JIT/cache/lifecycle tests
+on both4/16KiB hosts. Only then measure an isolated real iOS guest workload
+against the production TCG baseline and decide whether a product option helps.
+KVM/AVF cannot replace this ISA/MMU work. No candidate speedup, ARM64 support,
+Android installation or iOS CPU change is claimed from source or x86 results.
