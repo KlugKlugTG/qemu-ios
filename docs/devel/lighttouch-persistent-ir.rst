@@ -96,3 +96,21 @@ separate producer/consumer execs for stored bytes. The codec's small independent
 integer fixture exercises relocated temps/labels/current-TB exits and interrupt
 branches. It is not actual QEMU-generated code execution or iOS qualification.
 The store unit also participates in the normal Meson unit suite.
+
+Real generated-code differential probe
+--------------------------------------
+
+``tests/portable-ir-cache-engine.py`` can exercise an existing pinned standalone
+``qemu-system-arm`` build after the owner allocates a runtime slot. It uses an
+asset-free ARM1176 ``none`` machine with 16 MiB RAM, handwritten integer/load/store
+code, and QMP run/stop plus GDB observation. It never single-steps or sets code
+breakpoints, because those deliberately disable cache eligibility. Separate
+processes cover cache-off, cold storage, fresh-process hits, a changed CPU mode,
+and changed guest instruction bytes, with actual registers and RAM checked.
+Default invocation is plan-only; execution needs ``--execute``. Controller
+contract checks are ``python3 tests/portable-ir-cache-engine-test.py``.
+
+This is an additional real generated-code correctness step. Its fixed execution
+window includes deliberate sleep/debug transport and cannot rank performance.
+It does not boot iOS or qualify a frontend, Android, real workload coverage,
+audio/input, persistence or a practical reduction in first-action latency.

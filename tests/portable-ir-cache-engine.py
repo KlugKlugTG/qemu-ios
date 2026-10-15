@@ -1,0 +1,284 @@
+#!/usr/bin/env python3
+"""Real generated-code ARM1176 cache differential; no iOS assets or speed claim.
+
+Uses one pinned qemu-system-arm binary, machine=none and 16MiB RAM. No stepping
+or breakpoints (those disable caching). QMP stops a normal running guest, then
+GDB observes register/RAM results. Every case starts a fresh process. The owner
+must separately allocate the host/CPU slot; --execute is required for execution.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import struct
+import subprocess
+import tempfile
+import time
+
+COUNTERS = re.compile(r'^LightTouch TCG IR cache: hits=(\d+) misses=(\d+) rejected=(\d+) stored=(\d+); frontend IR only, fresh native code$', re.M)
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with path.open('rb') as f:
+        while chunk := f.read(65536):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def counters(log):
+    rows = [dict(zip(('hits', 'misses', 'rejected', 'stored'), map(int, m)))
+            for m in COUNTERS.findall(log)]
+    for previous, current in zip(rows, rows[1:]):
+        if any(current[k] < previous[k] for k in current):
+            raise ValueError('Mixed/reset cache counter epochs')
+    return rows[-1] if rows else None
+
+
+def words(subtract=False):
+    # MOV r1,#7; ADD/SUB r0,r0,r1; MOV r2,#0x3000; STR r0,[r2]; B0x2000.
+    return struct.pack('<5I', 0xe3a01007,
+                       0xe0400001 if subtract else 0xe0800001,
+                       0xe3a02a03, 0xe5820000, 0xea0003fa)
+
+
+class GDB:
+    def __init__(self, path):
+        self.socket = socket.socket(socket.AF_UNIX)
+        self.socket.settimeout(2)
+        self.socket.connect(str(path))
+
+    def byte(self):
+        value = self.socket.recv(1)
+        if not value:
+            raise RuntimeError('GDB disconnected')
+        return value
+
+    def packet(self, command):
+        body = command.encode()
+        self.socket.sendall(b'$' + body + b'#' + f'{sum(body) & 255:02x}'.encode())
+        while self.byte() != b'$':
+            pass
+        answer = bytearray()
+        while (value := self.byte()) != b'#':
+            answer += value
+        checksum = self.byte() + self.byte()
+        if int(checksum, 16) != sum(answer) & 255:
+            raise RuntimeError('GDB checksum mismatch')
+        self.socket.sendall(b'+')
+        text = answer.decode()
+        if text.startswith('E'):
+            raise RuntimeError('GDB error ' + text)
+        return text
+
+    def set(self, reg, value):
+        if self.packet(f'P{reg:x}=' + struct.pack('<I', value).hex()) != 'OK':
+            raise RuntimeError('GDB register write rejected')
+
+    def get(self, reg):
+        value = bytes.fromhex(self.packet(f'p{reg:x}'))
+        if len(value) != 4:
+            raise RuntimeError('Unexpected GDB register width')
+        return int.from_bytes(value, 'little')
+
+    def write(self, address, value):
+        if self.packet(f'M{address:x},{len(value):x}:' + value.hex()) != 'OK':
+            raise RuntimeError('GDB memory write rejected')
+
+    def read(self, address, size):
+        value = bytes.fromhex(self.packet(f'm{address:x},{size:x}'))
+        if len(value) != size:
+            raise RuntimeError('GDB short memory read')
+        return value
+
+
+class QMP:
+    def __init__(self, path):
+        self.socket = socket.socket(socket.AF_UNIX)
+        self.socket.settimeout(2)
+        self.socket.connect(str(path))
+        self.stream = self.socket.makefile('rwb', buffering=0)
+        greeting = json.loads(self.stream.readline())
+        if 'QMP' not in greeting:
+            raise RuntimeError('Missing QMP greeting')
+        self.command('qmp_capabilities')
+
+    def command(self, name):
+        self.stream.write((json.dumps({'execute': name}) + '\n').encode())
+        while True:
+            line = self.stream.readline()
+            if not line:
+                raise RuntimeError('QMP disconnected')
+            answer = json.loads(line)
+            if 'event' in answer:
+                continue
+            if 'error' in answer:
+                raise RuntimeError('QMP error ' + str(answer))
+            return answer['return']
+
+
+def proc_identity(pid):
+    text = Path(f'/proc/{pid}/stat').read_text()
+    fields = text[text.rfind(')') + 2:].split()
+    return {'pid': pid, 'startTicks': fields[19],
+            'hostBootId': Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
+
+
+def trial(qemu, expected_hash, output, cache, *, enabled, mode=0x13,
+          subtract=False):
+    if digest(qemu) != expected_hash:
+        raise RuntimeError('Engine identity changed')
+    output.mkdir(mode=0o700, exist_ok=False)
+    started = time.monotonic()
+    result = {'scope': 'REAL_TCG_ASSET_FREE_CORRECTNESS_ONLY', 'engineSHA256': expected_hash,
+              'enabled': enabled, 'cpuMode': mode, 'subtract': subtract, 'cases': []}
+    process = qmp = gdb = None
+    with tempfile.TemporaryDirectory(prefix='ltir-') as temporary, (output / 'engine.log').open('wb') as log:
+        root = Path(temporary)
+        qpath, gpath = root / 'q', root / 'g'
+        argv = [str(qemu), '-M', 'none', '-cpu', 'arm1176,has_el3=off',
+                '-m', '16M', '-accel', 'tcg,thread=single,tb-size=8', '-nodefaults',
+                '-display', 'none', '-serial', 'none', '-monitor', 'none', '-S',
+                '-qmp', f'unix:{qpath},server=on,wait=off',
+                '-gdb', f'unix:{gpath},server=on,wait=off']
+        environment = dict(os.environ)
+        for key in ('LT_TCG_IR_CACHE_ENABLE', 'LT_TCG_IR_CACHE', 'LT_DYNARMIC_PROBE', 'IT_VCPU_ACCT', 'IT_VCPU_ACCT_LOG'):
+            environment.pop(key, None)
+        if enabled:
+            environment.update(LT_TCG_IR_CACHE_ENABLE='experimental-v1', LT_TCG_IR_CACHE=str(cache))
+        (output / 'command.json').write_text(json.dumps({'argv': argv, 'cacheEnvironment':
+            {k: environment.get(k) for k in ('LT_TCG_IR_CACHE_ENABLE', 'LT_TCG_IR_CACHE')}}, indent=2) + '\n')
+        try:
+            process = subprocess.Popen(argv, env=environment, stdout=log, stderr=log,
+                                       start_new_session=True)
+            result['identity'] = proc_identity(process.pid)
+            while not qpath.exists() or not gpath.exists():
+                if process.poll() is not None:
+                    raise RuntimeError('Engine exited before debug sockets')
+                if time.monotonic() - started > 5:
+                    raise TimeoutError('Debug socket deadline')
+                time.sleep(.01)
+            qmp, gdb = QMP(qpath), GDB(gpath)
+            gdb.write(0x1000, words(subtract))
+            gdb.write(0x2000, struct.pack('<I', 0xeafffffe))
+            for seed in (19, 111):
+                if time.monotonic() - started > 12:
+                    raise TimeoutError('Trial deadline')
+                gdb.set(25, mode)
+                gdb.set(0, seed)
+                gdb.set(15, 0x1000)
+                gdb.write(0x3000, b'\0' * 4)
+                begin = time.monotonic_ns()
+                qmp.command('cont')
+                time.sleep(.04)
+                qmp.command('stop')
+                stopped = time.monotonic_ns()
+                # Read only after QMP stop; no single-step or breakpoint cflags.
+                state = {'r0': gdb.get(0), 'r1': gdb.get(1), 'r2': gdb.get(2),
+                         'pc': gdb.get(15), 'cpsr': gdb.get(25),
+                         'ram': int.from_bytes(gdb.read(0x3000, 4), 'little')}
+                expected = (seed - 7 if subtract else seed + 7) & 0xffffffff
+                if state != {'r0': expected, 'r1': 7, 'r2': 0x3000, 'pc': 0x2000,
+                             'cpsr': mode, 'ram': expected}:
+                    raise RuntimeError('Actual generated-code state differs: ' + str(state))
+                result['cases'].append({'seed': seed, 'actual': state,
+                    'continueBeginNS': begin, 'stoppedNS': stopped,
+                    'limits': 'Fixed execution window includes deliberate sleep/debug transport; not a speed metric.'})
+            qmp.command('quit')
+            exit_code = process.wait(timeout=3)
+            if exit_code:
+                raise RuntimeError('Engine nonzero exit ' + str(exit_code))
+            result.update(status='PASS', engineExitCode=exit_code)
+        except Exception as exc:
+            result.update(status='FAIL', error=str(exc))
+        finally:
+            if gdb:
+                gdb.socket.close()
+            if qmp:
+                qmp.stream.close(); qmp.socket.close()
+            if process and process.poll() is None:
+                result['forcedRetirement'] = True
+                os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL); process.wait(timeout=1)
+            if process:
+                result['engineExitCode'] = process.returncode
+                result['processRetired'] = process.poll() is not None
+            result['elapsedSeconds'] = time.monotonic() - started
+    text = (output / 'engine.log').read_text(errors='replace')
+    result['cacheCounters'] = counters(text)
+    result['cacheEnabledWitness'] = 'LightTouch TCG IR cache: experimental enabled,' in text
+    (output / 'RESULT.json').write_text(json.dumps(result, indent=2) + '\n')
+    if result['status'] != 'PASS':
+        raise RuntimeError('Trial failed: ' + str(output))
+    return result
+
+
+def validate_matrix(rows):
+    if any(row['status'] != 'PASS' or not row['processRetired'] for row in rows.values()):
+        raise ValueError('A real engine trial failed or remains live')
+    identities = [tuple(sorted(row['identity'].items())) for row in rows.values()]
+    if len(identities) != len(set(identities)):
+        raise ValueError('Trials did not use fresh processes')
+    if len({row['engineSHA256'] for row in rows.values()}) != 1:
+        raise ValueError('Different engine identities')
+    if rows['off']['cacheCounters'] or rows['off']['cacheEnabledWitness']:
+        raise ValueError('Default-off unexpectedly enabled')
+    for name in ('cold', 'reuse', 'different_cpu_mode', 'changed_guest_bytes'):
+        if not rows[name]['cacheEnabledWitness'] or not rows[name]['cacheCounters']:
+            raise ValueError('Missing actual cache witness: ' + name)
+    if not rows['cold']['cacheCounters']['stored']:
+        raise ValueError('Cold process stored no real IR')
+    if not rows['reuse']['cacheCounters']['hits']:
+        raise ValueError('No fresh-process real IR hits')
+    # Each process executes two identical seeds; dynamic state must not enter key.
+    if rows['different_cpu_mode']['cacheCounters']['hits']:
+        raise ValueError('Changed mode unexpectedly reused prior-context IR')
+    if not rows['different_cpu_mode']['cacheCounters']['stored']:
+        raise ValueError('Changed mode did not translate/store')
+    if not rows['changed_guest_bytes']['cacheCounters']['stored']:
+        raise ValueError('Changed bytes did not translate/store')
+    return {'status': 'PASS', 'scope': 'REAL_GENERATED_CODE_CORRECTNESS_ONLY',
+            'iosAcceptance': False, 'performanceQualified': False}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--qemu', type=Path, required=True)
+    parser.add_argument('--sha256', required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--execute', action='store_true')
+    args = parser.parse_args()
+    if not args.execute:
+        print(json.dumps({'execution': False, 'scope': 'plan-only', 'qemu': str(args.qemu),
+                          'engineSHA256': args.sha256, 'cases': ['off', 'cold', 'reuse', 'different_cpu_mode', 'changed_guest_bytes']}))
+        return
+    qemu, output = args.qemu.resolve(), args.output.resolve()
+    if not re.fullmatch('[a-f0-9]{64}', args.sha256) or digest(qemu) != args.sha256:
+        raise ValueError('Exact engine SHA256 required')
+    output.mkdir(mode=0o700, exist_ok=False)
+    cache = output / 'cache'; cache.mkdir(mode=0o700)
+    rows = {}
+    variants = [('off', False, 0x13, False), ('cold', True, 0x13, False),
+                ('reuse', True, 0x13, False), ('different_cpu_mode', True, 0x10, False),
+                ('changed_guest_bytes', True, 0x13, True)]
+    for name, enabled, mode, subtract in variants:
+        if name == 'cold' and any(cache.iterdir()):
+            raise ValueError('Cold cache directory is not initially empty')
+        rows[name] = trial(qemu, args.sha256, output / name, cache,
+                           enabled=enabled, mode=mode, subtract=subtract)
+        (output / 'PROGRESS.json').write_text(json.dumps(rows, indent=2) + '\n')
+    result = validate_matrix(rows)
+    result['trials'] = rows
+    (output / 'RESULT.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == '__main__':
+    main()
