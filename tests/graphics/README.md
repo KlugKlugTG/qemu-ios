@@ -104,3 +104,7 @@ The test models dirty-selected storage copying; it does not execute a GL driver
 or establish actual guest rendering. `SURFACE_ATTACHMENTS_SOURCE` can select an
 exact predecessor handler include as a negative control: the outgoing-texture
 assertion must fail with the handlers that omit the mark.
+
+See [PowerVR capability replay feasibility](pvrvframe-feasibility.md) for current
+official platform metadata, ARM64 Mac/emulator integration limits and existing
+measured-capability regression coverage.
