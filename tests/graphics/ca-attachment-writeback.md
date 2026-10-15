@@ -22,11 +22,15 @@ selection, and that no guest-storage copy occurs during the attachment switch.
 The exact previous handlers fail the outgoing-A assertion. The storage copy in
 this test is modeled; it is neither driver rendering nor guest acceptance.
 
-Actual Linux and Android observations also show a full Home icon grid becoming
-mostly black at a guest minute change, leaving Contacts, status and dock. Linux
-raw guest pixels confirm this reaches the shared native publication path. The
-lost-write sequence above is an established source defect; the existing logs do
-not establish that it caused those particular minute-change frames. Qualification
-requires a new exact engine, full native and frontend images before and after a
-minute change, input-driven redraw, and clean shutdown. Preserve prior failing
-captures and keep partial scenes out of full-scene acceptance.
+An earlier interpretation of Linux image previews as a disappearing Home icon
+grid was incorrect. Independent exact pixel comparisons found the complete
+icon grid and dock unchanged across the retained minute-change pairs; only
+status-clock pixels differed. Those Linux frames do not establish the proposed
+composition failure, and no diagnostic or behavioral patch should be inferred
+from that preview interpretation.
+
+The lost-write sequence above remains an independently reproduced source defect.
+It has not been established as the cause of any particular retained guest scene.
+Driver probes and actual guest regressions remain distinct from this offline
+ownership test. Preserve original captures and test failures when correcting
+an interpretation of their contents.
