@@ -84,3 +84,23 @@ magenta ADD result with active texture 0 and 1, independent of the portability
 wrappers. It cross-builds with `check.sh`; actual Android execution is pending.
 See [pinned ANGLE Android candidate](angle-android-candidate.md) for the supported
 frontend alternative and the unexecuted heavy-build recipe.
+
+`surface-attachments.c` executes the production framebuffer attachment handlers
+and outgoing IOSurface dirty-mark helper. It checks texture-to-texture and
+texture-to-renderbuffer replacement, deferred writeback selection, mark failure
+before mutation, depth-only changes, detached textures and the default drawable.
+A framebuffer whose color attachment changes must retain the old texture's
+pending writeback; waiting until the next framebuffer bind/flush sees only the
+new attachment. Marking does not publish an unfinished frame.
+
+```sh
+cc -O2 -Wall -Wextra -Werror -fsanitize=address,undefined \
+  -fno-omit-frame-pointer tests/graphics/surface-attachments.c \
+  $(pkg-config --cflags --libs glib-2.0) -o /absolute/private/surface-attachments
+/absolute/private/surface-attachments
+```
+
+The test models dirty-selected storage copying; it does not execute a GL driver
+or establish actual guest rendering. `SURFACE_ATTACHMENTS_SOURCE` can select an
+exact predecessor handler include as a negative control: the outgoing-texture
+assertion must fail with the handlers that omit the mark.
