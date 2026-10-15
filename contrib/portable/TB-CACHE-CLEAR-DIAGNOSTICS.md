@@ -165,3 +165,19 @@ rounded accounting-clock separation, never converts them to CPU time or
 cache-miss attribution. Site totals need not equal the central total because
 their atomic observations are independent. Host tests cover real append and
 partial-line publication as well as refusal paths; they do not execute a guest.
+
+A launcher adapter must keep ownership checks separate from record parsing.
+The private Runtime-style adapter uses a retained pidfd plus PID start ticks,
+host boot and UID, exact worker argv/parent and selected engine/base/state
+paths. It verifies the selected immutable engine's hash once at admission,
+then checks its metadata and mapped device/inode on each guard, together with
+the log's owned regular-file identity and the worker's stderr FD. This avoids
+rehashing a large engine on every polling iteration. A symlink/replaced log,
+retired worker, changed engine metadata or missing mapping must be refused.
+The guard returns the complete identity before and after each read, including
+the launcher's explicit fresh-worker/no-CPU-recreation certificate. Checking
+procfs does not itself establish that certificate or inspect guest scenes.
+The adapter must also pin this parser's hash, preserve exclusive witness-file
+creation and retain failures. Its plan-only mode must not open a live owner.
+Tests with an owned inert Python child and mapped data file validate these
+host boundaries; such a fixture provides no engine or guest qualification.
