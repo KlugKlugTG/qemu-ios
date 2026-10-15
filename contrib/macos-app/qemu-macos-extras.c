@@ -23,6 +23,8 @@
 #include "qapi/qapi-commands-qom.h"
 #include "qobject/qnum.h"
 #include "qemu/thread.h"
+#include "qemu/atomic.h"
+#include "hw/arm/ipod-agent.h"
 #include "qobject/qjson.h"
 #include "qobject/qdict.h"
 #include "qapi/qapi-commands-control.h"
@@ -506,12 +508,47 @@ void qemu_ios_ui_paste(const char *utf8)
 
 typedef void (*qmp_void_fn)(Error **errp);
 
+/* Closed, fresh-worker diagnostic. Host entry points read the environment;
+ * the BQL callback only stores atomic metadata, with no getenv, IO or wait. */
+static bool shutdown_diag_enabled(void)
+{
+#ifdef __APPLE__
+    return false;
+#else
+    return ipod_shutdown_diag_flag(getenv("IT_SHUTDOWN_DIAG"));
+#endif
+}
+
+static int shutdown_cont_diag_enabled;
+static unsigned shutdown_cont_revision, shutdown_cont_outcome;
+static unsigned shutdown_cont_running, shutdown_decisions;
+static uint64_t shutdown_cont_serial;
+static int64_t shutdown_cont_ms;
+
+/* Only qmp_bh writes these fields, under the existing BQL. 1=returned OK,
+ * 2=returned error, 3=storage refusal. Serial counts completions, not requests. */
+static void shutdown_cont_record(unsigned outcome)
+{
+    qatomic_inc(&shutdown_cont_revision);
+    smp_wmb();
+    qatomic_set(&shutdown_cont_serial, qatomic_read(&shutdown_cont_serial) + 1);
+    qatomic_set(&shutdown_cont_outcome, outcome);
+    qatomic_set(&shutdown_cont_running, runstate_is_running());
+    qatomic_set(&shutdown_cont_ms, g_get_monotonic_time() / 1000);
+    smp_wmb();
+    qatomic_inc(&shutdown_cont_revision);
+}
+
 static void qmp_bh(void *opaque)
 {
     qmp_void_fn fn = opaque;
     Error *err = NULL;
+    bool trace_cont = fn == qmp_cont && qatomic_read(&shutdown_cont_diag_enabled);
 
     if (qemu_ios_ui_storage_failed() && fn != qmp_quit) {
+        if (trace_cont) {
+            shutdown_cont_record(3);
+        }
         fprintf(stderr, "[machine] NAND storage failed; relaunch after fixing storage\n");
         return;
     }
@@ -519,6 +556,9 @@ static void qmp_bh(void *opaque)
         qemu_ios_ui_cancel_input();
     }
     fn(&err);
+    if (trace_cont) {
+        shutdown_cont_record(err ? 2 : 1);
+    }
     if (err) {
         fprintf(stderr, "[machine] %s\n", error_get_pretty(err));
         error_free(err);
@@ -529,6 +569,9 @@ static void schedule_qmp(qmp_void_fn fn)
 {
     if (!qemu_ios_ui_ready()) {
         return;
+    }
+    if (fn == qmp_cont) {
+        qatomic_set(&shutdown_cont_diag_enabled, shutdown_diag_enabled());
     }
     aio_bh_schedule_oneshot(qemu_get_aio_context(), qmp_bh, (void *)fn);
 }
@@ -698,23 +741,82 @@ void qemu_ios_agent_cancel(const char *id)
     if (id && qemu_ios_ui_ready()) {
         IPodAgent *a = ipod_agent_acquire();
         if (a) {
-            ipod_agent_cancel(a, id);
+            ipod_agent_cancel_diagnostic(a, id, shutdown_diag_enabled());
         }
         ipod_agent_free(a);
     }
+}
+
+/* Host thread only. At most eight records per worker, including not-ready
+ * decisions. Cancellation snapshots use trylock; cont snapshots never retry.
+ * Ages/serials describe the last observed event, not an asserted cause. */
+static void shutdown_trace_decision(bool ready, bool storage, int agent,
+                                    bool attempted, bool accepted, int route)
+{
+    if (!shutdown_diag_enabled()) {
+        return;
+    }
+    unsigned serial = 0;
+    for (unsigned tries = 0; tries < IPOD_SHUTDOWN_DIAG_LIMIT; tries++) {
+        unsigned old = qatomic_read(&shutdown_decisions);
+        if (!ipod_shutdown_diag_in_budget(old + 1)) {
+            return;
+        }
+        if (qatomic_cmpxchg(&shutdown_decisions, old, old + 1) == old) {
+            serial = old + 1;
+            break;
+        }
+    }
+    if (!serial) {
+        return;
+    }
+    IPodShutdownCancelTrace cancel = {};
+    IPodAgent *a = ready ? ipod_agent_acquire() : NULL;
+    bool cancel_stable = a && ipod_agent_shutdown_trace(a, &cancel);
+    ipod_agent_free(a);
+    unsigned revision = qatomic_read(&shutdown_cont_revision);
+    smp_rmb();
+    uint64_t cont_serial = qatomic_read(&shutdown_cont_serial);
+    unsigned cont_outcome = qatomic_read(&shutdown_cont_outcome);
+    unsigned cont_running = qatomic_read(&shutdown_cont_running);
+    int64_t cont_ms = qatomic_read(&shutdown_cont_ms);
+    smp_rmb();
+    bool cont_stable = !(revision & 1) &&
+                       revision == qatomic_read(&shutdown_cont_revision);
+    int64_t now = g_get_monotonic_time() / 1000;
+    fprintf(stderr, "[shutdown-diag] seq=%u at_ms=%" PRId64
+            " ready=%d storage=%d agent=%d "
+            "agent_present=%d prefer_agent=%d submit_attempt=%d submit_ok=%d "
+            "route=%d cancel_stable=%d cancel_seq=%" PRIu64
+            " cancel_reason=%u cancel_age_ms=%" PRId64
+            " cont_stable=%d cont_seq=%" PRIu64
+            " cont_result=%u cont_running=%u cont_age_ms=%" PRId64 "\n",
+            serial, now, ready, storage, agent, agent > 0, agent == 1,
+            attempted, accepted, route, cancel_stable, cancel.serial,
+            cancel.reason, cancel_stable && cancel.serial ? now - cancel.monotonic_ms : -1,
+            cont_stable, cont_serial, cont_outcome, cont_running,
+            cont_stable && cont_serial ? now - cont_ms : -1);
 }
 
 /* A clean shutdown: the agent's halt (reboot2(RB_HALT), where SpringBoard's power-off slider ends), else
  * (1.x has no agent) the board's power-off gesture. */
 int qemu_ios_ui_shutdown(void)
 {
-    if (!qemu_ios_ui_ready() || qemu_ios_ui_storage_failed()) {
+    bool ready = qemu_ios_ui_ready();
+    bool storage = ready && qemu_ios_ui_storage_failed();
+    if (!ready || storage) {
+        shutdown_trace_decision(ready, storage, -1, false, false, 0);
         return 0;
     }
-    if (qemu_ios_agent_status() == 1 && qemu_ios_agent_request("qemu-ios-shutdown halt\n")) {
+    int agent = qemu_ios_agent_status();
+    bool attempted = agent == 1;
+    bool accepted = attempted && qemu_ios_agent_request("qemu-ios-shutdown halt\n");
+    if (accepted) {
+        shutdown_trace_decision(ready, storage, agent, attempted, accepted, 1);
         return 1;
     }
     qemu_ios_ui_powerdown();
+    shutdown_trace_decision(ready, storage, agent, attempted, accepted, 2);
     return 2;
 }
 

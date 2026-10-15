@@ -1,6 +1,8 @@
 #ifndef HW_ARM_IPOD_AGENT_H
 #define HW_ARM_IPOD_AGENT_H
 
+#include "hw/arm/ipod-shutdown-diagnostics.h"
+
 /* Local host/guest RPC. Tokens identify a daemon session, not a security boundary. */
 #define IT_AGENT_REQUEST_MAX (256 * 1024)
 #define IT_AGENT_RESPONSE_MAX (1024 * 1024)
@@ -24,6 +26,10 @@ void ipod_agent_set_clock_offset(IPodAgent *a, int64_t offset);
 int ipod_agent_submit(IPodAgent *a, const char *request);
 const char *ipod_agent_submit_error(int error);
 bool ipod_agent_cancel(IPodAgent *a, const char *id);
+/* Internal host diagnostics, not the exported engine ABI. Metadata is omitted
+ * unless record is true; the snapshot never waits for the agent lock. */
+bool ipod_agent_cancel_diagnostic(IPodAgent *a, const char *id, bool record);
+bool ipod_agent_shutdown_trace(IPodAgent *a, IPodShutdownCancelTrace *out);
 /* Owned result string; empty when none. */
 char *ipod_agent_take_result(IPodAgent *a);
 const char *ipod_agent_status(IPodAgent *a, int64_t now_ms);
