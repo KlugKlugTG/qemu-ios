@@ -49,6 +49,9 @@ PRELUDE = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include "qemu/compiler.h"
+_Noreturn void QEMU_ERROR("code path is reachable") qemu_build_not_reached_always(void);
+/* BUILD_ASSERT_FROM_OSDEP */
 #include "qemu/atomic.h"
 typedef uint64_t vaddr;
 typedef struct TranslationBlock { vaddr pc; unsigned cflags; } TranslationBlock;
@@ -232,7 +235,13 @@ def prepare(output):
         target.write_text(body)
     slices = ''.join(function((ROOT / path).read_text(), signature)
                      for path, signatures in FUNCTIONS.items() for signature in signatures)
-    source = PRELUDE + slices + TEST
+    # Atomic width assertions normally arrive through osdep.h. Extract its
+    # exact optimized definitions rather than weakening/stubbing the check.
+    osdep = (ROOT / 'include/qemu/osdep.h').read_text().splitlines()
+    assertions = '\n'.join(next(line for line in osdep if line.startswith(prefix))
+                           for prefix in ['#define qemu_build_not_reached()  qemu_build_not_reached_always()',
+                                          '#define qemu_build_assert(test)'])
+    source = PRELUDE.replace('/* BUILD_ASSERT_FROM_OSDEP */', assertions) + slices + TEST
     (output / 'clear.c').write_text(source)
     # Negative controls must fail real production state/counter assertions.
     old = '    TB_CACHE_CLEAR_NOTE(jc, TB_CLEAR_full_total);\n'
@@ -244,6 +253,7 @@ def prepare(output):
     inputs = list(FUNCTIONS) + ['accel/tcg/tb-jmp-cache.h',
                                'accel/tcg/tb-cache-clear-stats.h',
                                'include/qemu/atomic.h', 'include/qemu/compiler.h',
+                               'include/qemu/osdep.h',
                                str(Path(__file__).relative_to(ROOT))]
     receipt = {'schema': 1, 'scope': 'production functions; stubbed external MMU/TLB work',
                'inputs': {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in inputs},
@@ -270,14 +280,20 @@ def run(output, cc):
             command.append('-DQEMU_EXPERIMENTAL_TB_CACHE_STATS=1')
         if sanitize:
             command.extend(['-fsanitize=address,undefined', '-fno-omit-frame-pointer'])
+        stages.append({'command': command, 'exit': None})
+        (output / 'results.json').write_text(json.dumps(stages, indent=2) + '\n')
         built = subprocess.run(command, capture_output=True, text=True, timeout=30)
         (output / (name + '.compile.stderr')).write_text(built.stderr)
-        stages.append({'command': command, 'exit': built.returncode})
+        stages[-1]['exit'] = built.returncode
+        (output / 'results.json').write_text(json.dumps(stages, indent=2) + '\n')
         assert built.returncode == 0, built.stderr
+        stages.append({'command': [str(output / name)], 'exit': None})
+        (output / 'results.json').write_text(json.dumps(stages, indent=2) + '\n')
         tested = subprocess.run([str(output / name)], capture_output=True, text=True, timeout=30)
         (output / (name + '.stdout')).write_text(tested.stdout)
         (output / (name + '.stderr')).write_text(tested.stderr)
-        stages.append({'command': [str(output / name)], 'exit': tested.returncode})
+        stages[-1]['exit'] = tested.returncode
+        (output / 'results.json').write_text(json.dumps(stages, indent=2) + '\n')
         expected = 'full_total' if name == 'negative-counter' else 'empty[i]'
         if name.startswith('negative'):
             assert tested.returncode < 0 and expected in tested.stderr, tested.stderr
