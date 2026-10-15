@@ -125,3 +125,10 @@ added for a translator that rejects `GL_MAX_TEXTURE_UNITS`; it supplies no
 replacement capability value and makes no production provider change. The
 existing fake `egl-limits` regression covers an overstated limit, not rejection
 of the limit query. Retain the exact probe source/binary for each target attempt.
+
+`egl-enable-state.c` is a bounded raw platform GLES1 diagnostic for the retained
+gfxstream server-enable query crash. It uses `glGetBooleanv` only, requires the
+actually advertised cube-map extension, checks cube/2D state transitions on two
+verified server units and lighting, and restores original states/selectors. It
+does not exercise `glIsEnabled`, draw pixels, or qualify a guest/provider. Compile
+and target execution require their own reviewed grants.
