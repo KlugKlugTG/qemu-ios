@@ -26,7 +26,7 @@ class CpuProfile(unittest.TestCase):
     def test_prepare_refuses_ordinary_nonworker_without_writing(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
-            args = Mock(pid=os.getpid(), thread=[str(os.getpid()) + ':test-only'],
+            args = Mock(pid=os.getpid(), preset='user-40s', thread=[str(os.getpid()) + ':test-only'],
                         engine=Path(sys.executable), plan=root / 'plan.json', output=root / 'new')
             with self.assertRaisesRegex(ValueError, 'Native14 worker'):
                 profile.prepare(args)
@@ -43,6 +43,77 @@ class CpuProfile(unittest.TestCase):
         self.assertEqual(argv[argv.index('-e') + 1], 'cpu-clock:u')
         self.assertEqual(argv[argv.index('-c') + 1], '20000000')
         self.assertNotIn('-p', argv)
+
+    def test_narrow_kernel_preset_binds_bounds_and_event(self):
+        spec = dict(profile.PRESETS['user-kernel-10s'], preset='user-kernel-10s')
+        plan = {'capture': spec, 'threads': [{'tid': 101}, {'tid': 102}]}
+        argv = profile.profile_argv(plan, Path('/private/new'))
+        self.assertEqual(argv[-1], '10')
+        self.assertIn('15s', argv)
+        self.assertEqual(argv[argv.index('-e') + 1], 'cpu-clock')
+        self.assertIn('--fsize=67108864:67108864', argv)
+        self.assertEqual(spec['outer_seconds'], 18)
+        self.assertTrue(spec['include_misc'])
+        plan['threads'].append({'tid': 103})
+        with self.assertRaisesRegex(ValueError, 'bounded thread'):
+            profile.profile_argv(plan, Path('/private/new'))
+        for changed in ({'preset': 'unbounded'}, dict(spec, seconds=11),
+                        dict(spec, event='cpu-clock:u'), dict(spec, max_bytes=profile.MAX_BYTES)):
+            with self.subTest(changed=changed):
+                with self.assertRaises(ValueError):
+                    profile.capture_spec({'capture': changed})
+
+    def test_legacy_and_explicit_default_argv_identical(self):
+        old = {'threads': [{'tid': 101}]}
+        explicit = dict(old, capture=dict(profile.PRESETS['user-40s'], preset='user-40s'))
+        self.assertEqual(profile.profile_argv(old, Path('/private/new')),
+                         profile.profile_argv(explicit, Path('/private/new')))
+
+    def test_kernel_mode_never_classified_as_native_qemu(self):
+        source = '\n'.join([
+            '11/12 U 10.123456789: 20000000 abc tlb_flush (/private/libqemu-arm.so)',
+            '11/12 K 10.223456789: 20000000 def tlb_flush ([kernel.kallsyms])',
+            '11/13 K 10.323456789: 20000000 0 [unknown] ([kernel.kallsyms])',
+        ])
+        parsed = profile.parse_samples(source, include_misc=True)
+        self.assertTrue(parsed['classification_valid'])
+        self.assertEqual(parsed['period_ns_by_cpu_mode'], {'user': 20000000, 'kernel': 40000000})
+        self.assertEqual(parsed['period_ns_by_thread_and_cpu_mode'],
+                         {'12': {'user': 20000000, 'kernel': 20000000}, '13': {'kernel': 20000000}})
+        self.assertEqual([r['category'] for r in parsed['samples']],
+                         ['native-execution-helper-or-mmu', 'kernel-resolved', 'kernel-unresolved'])
+        self.assertFalse(profile.parse_samples(source)['classification_valid'])
+        self.assertFalse(profile.parse_samples(source.replace(' K ', ' ? '), include_misc=True)['classification_valid'])
+        self.assertFalse(profile.parse_samples(source.replace(' U ', ' '), include_misc=True)['classification_valid'])
+
+    def test_actual_inert_worker_prepare_and_preflight_never_attach(self):
+        # Only a test-owned inert Python child carrying the worker marker.
+        child = subprocess.Popen([sys.executable, '-c',
+            'import sys; print("ready", flush=True); sys.stdin.read()', '--worker'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(child.stdout.readline().strip(), 'ready')
+            with tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                args = Mock(pid=child.pid, preset='user-kernel-10s',
+                            thread=[str(child.pid) + ':inert-test-only'],
+                            engine=Path('/proc') / str(child.pid) / 'exe',
+                            plan=root / 'plan.json', output=root / 'recording')
+                with patch('builtins.print'), patch.object(profile.subprocess, 'Popen') as popen:
+                    profile.prepare(args)
+                    profile.collect(Mock(plan=args.plan, execute_approved_sha256=None))
+                popen.assert_not_called()
+                plan = json.loads(args.plan.read_text())
+                self.assertEqual(plan['capture']['event'], 'cpu-clock')
+                self.assertEqual(plan['capture']['max_threads'], 2)
+                self.assertEqual(plan['threads'][0]['start_ticks'],
+                                 profile.identity(child.pid)['start_ticks'])
+                self.assertFalse(args.output.exists())
+                self.assertFalse((root / 'ROOT-GRANT.json').exists())
+        finally:
+            child.stdin.close()
+            child.wait(timeout=2)
+            child.stdout.close()
 
     def test_actual_output_refusals(self):
         with tempfile.TemporaryDirectory() as name:
