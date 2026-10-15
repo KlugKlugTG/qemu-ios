@@ -77,7 +77,9 @@ directory, inherited only by the fresh native worker through those two
 environment variables. It is **not yet wired into either frontend or packaged**.
 Do not infer guest-clean shutdown or a performance pass from cache statistics.
 Cache records are disposable, never bundled with firmware or shared publicly.
-The worker emits counters on ordinary process exit when the store was available.
+The worker emits image identity plus bounded counter milestones into its existing
+native stderr log and final counters on ordinary process exit. Milestones remain
+available even when Android kills the terminal worker without running atexit.
 
 Source tests without an engine build
 ------------------------------------

@@ -62,12 +62,17 @@ static bool mapped_image_matches(const struct stat *st)
     return match;
 }
 
-static void finish_cache(void)
+static void report_cache(void)
 {
     fprintf(stderr, "LightTouch TCG IR cache: hits=%" PRIu64
             " misses=%" PRIu64 " rejected=%" PRIu64 " stored=%" PRIu64
             "; frontend IR only, fresh native code\n",
             hits, misses, rejected, stored);
+}
+
+static void finish_cache(void)
+{
+    report_cache();
     tcg_ir_store_close(store);
     store = NULL;
 }
@@ -139,6 +144,9 @@ static void initialize_cache(void)
     g_checksum_get_digest(checksum, engine_hash, &digest_len);
     store = tcg_ir_store_open(directory, engine_hash);
     if (store) {
+        fprintf(stderr, "LightTouch TCG IR cache: experimental enabled, "
+                "mapped-image-sha256=%s; 32MiB/4096 records maximum\n",
+                g_checksum_get_string(checksum));
         atexit(finish_cache);
     }
 }
@@ -659,6 +667,9 @@ bool arm_tcg_ir_cache_load(CPUState *cpu, TranslationBlock *tb, int max_insns,
     }
     replay_ir(b, tb);
     hits++;
+    /* Android intentionally kills terminal workers without running atexit.
+     * Log bounded milestones into its existing private native log as well. */
+    if ((hits & (hits - 1)) == 0) { report_cache(); }
     g_free(b);
     g_mutex_unlock(&cache_lock);
     return true;
@@ -689,7 +700,10 @@ void arm_tcg_ir_cache_save(CPUState *cpu, TranslationBlock *tb,
     }
     g_free(b);
     g_mutex_lock(&cache_lock);
-    if (tcg_ir_store_put(store, key->bytes, bytes)) { stored++; }
+    if (tcg_ir_store_put(store, key->bytes, bytes)) {
+        stored++;
+        if ((stored & (stored - 1)) == 0) { report_cache(); }
+    }
     g_mutex_unlock(&cache_lock);
     g_bytes_unref(bytes);
 }
