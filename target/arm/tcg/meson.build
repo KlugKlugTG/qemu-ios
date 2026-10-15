@@ -54,6 +54,11 @@ arm_user_ss.add(when: 'TARGET_AARCH64', if_false: files('cpu-v7m.c'))
 
 arm_common_ss.add(zlib)
 
+if lt_dynarmic_probe.found()
+  arm_common_system_ss.add(lt_dynarmic_probe,
+    files('dynarmic-probe.c', 'dynarmic-probe.cpp'))
+endif
+
 arm_common_ss.add(files(
   'arith_helper.c',
   'crypto_helper.c',

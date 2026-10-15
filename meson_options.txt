@@ -394,3 +394,5 @@ option('strict_rust_lints', type: 'boolean', value: false,
        description: 'Enable stricter set of Rust warnings')
 
 option('ltm_angle_prefix', type: 'string', value: '', description: 'Experimental ES1 ANGLE build prefix (same guest executor, no snapshots)')
+option('lt_dynarmic_probe_prefix', type: 'string', value: '',
+       description: 'Default-off asset-free ARM1176 Dynarmic bridge probe dependency prefix')

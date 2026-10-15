@@ -46,6 +46,9 @@
 #include "tb-context.h"
 #include "tb-internal.h"
 #include "internal-common.h"
+#if defined(CONFIG_LT_DYNARMIC_PROBE) && defined(TARGET_ARM) && !defined(CONFIG_USER_ONLY)
+#include "exec/lt-dynarmic-probe.h"
+#endif
 
 /* -icount align implementation. */
 
@@ -1096,6 +1099,22 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
             if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
                 break;
             }
+
+#if defined(CONFIG_LT_DYNARMIC_PROBE) && defined(TARGET_ARM) && !defined(CONFIG_USER_ONLY)
+            /* Default-off synthetic one-instruction bridge. No icount/replay,
+             * parallel execution or real board is eligible for this proof. */
+            if (cpu->singlestep_enabled && !icount_enabled() &&
+                replay_mode == REPLAY_MODE_NONE &&
+                !(s.cflags & CF_PARALLEL) && lt_dynarmic_probe_try(cpu)) {
+                last_tb = NULL;
+                align_clocks(sc, cpu);
+                if (cpu->singlestep_enabled) {
+                    cpu->exception_index = EXCP_DEBUG;
+                    cpu_loop_exit(cpu);
+                }
+                continue;
+            }
+#endif
 
             tb = tb_lookup(cpu, s);
             if (tb == NULL) {

@@ -2359,6 +2359,20 @@ endif
 
 config_host_data = configuration_data()
 
+lt_dynarmic_probe = not_found
+lt_dynarmic_prefix = get_option('lt_dynarmic_probe_prefix')
+if lt_dynarmic_prefix != ''
+  if 'cpp' not in all_languages or not have_system or get_option('plugins')
+    error('Dynarmic probe requires C++, system emulation and plugins disabled')
+  endif
+  lt_dynarmic_library = cxx.find_library('dynarmic',
+    dirs: [lt_dynarmic_prefix / 'lib', lt_dynarmic_prefix / 'lib/x86_64-linux-gnu'],
+    required: true)
+  lt_dynarmic_probe = declare_dependency(dependencies: lt_dynarmic_library,
+    include_directories: include_directories(lt_dynarmic_prefix / 'include'))
+endif
+config_host_data.set('CONFIG_LT_DYNARMIC_PROBE', lt_dynarmic_probe.found())
+
 config_host_data.set('CONFIG_HAVE_RUST', have_rust)
 audio_drivers_selected = []
 if have_system
