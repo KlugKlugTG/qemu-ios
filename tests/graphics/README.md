@@ -108,3 +108,13 @@ assertion must fail with the handlers that omit the mark.
 See [PowerVR capability replay feasibility](pvrvframe-feasibility.md) for current
 official platform metadata, ARM64 Mac/emulator integration limits and existing
 measured-capability regression coverage.
+
+`egl-combine --diagnose-units` additionally logs the raw GLES1 texture-unit
+capability query through linked and public resolver entry points. It tries at
+most eight server/client selectors, consumes and reports each probe error,
+restores both original selectors, and then runs the existing real two-unit ADD
+pixel checks. Selector acceptance alone is not a rendering pass. This mode was
+added for a translator that rejects `GL_MAX_TEXTURE_UNITS`; it supplies no
+replacement capability value and makes no production provider change. The
+existing fake `egl-limits` regression covers an overstated limit, not rejection
+of the limit query. Retain the exact probe source/binary for each target attempt.

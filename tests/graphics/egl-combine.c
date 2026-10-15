@@ -22,13 +22,55 @@ static bool extension(const char *extensions, const char *name)
         if ((p==extensions || p[-1]==' ') && (!p[length] || p[length]==' ')) return true;
     return false;
 }
-int main(void)
+/* Diagnose a broken capability query without supplying a guessed replacement.
+ * All generated probe errors are reported/consumed, and both selectors are
+ * restored before the existing real two-unit draw runs. */
+static bool diagnose_units(void)
 {
+    GLenum prior=glGetError();
+    fprintf(stderr,"[raw-units] init-error=0x%x uid=%u\n",prior,(unsigned)getuid());
+    if (prior) return false;
+    GLint reported=-1,active=-1,client=-1;
+    glGetIntegerv(GL_MAX_TEXTURE_UNITS,&reported);
+    GLenum query_error=glGetError();
+    fprintf(stderr,"[raw-units] MAX_TEXTURE_UNITS=%d error=0x%x\n",reported,query_error);
+    void (*get)(GLenum,GLint *)=(void *)eglGetProcAddress("glGetIntegerv");
+    if (get) {
+        GLint alternate=-1;get(GL_MAX_TEXTURE_UNITS,&alternate);
+        fprintf(stderr,"[raw-units] GetProcAddress MAX_TEXTURE_UNITS=%d error=0x%x\n",alternate,glGetError());
+    }
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&active);
+    glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE,&client);
+    GLenum error=glGetError();
+    fprintf(stderr,"[raw-units] saved-active=0x%x client=0x%x error=0x%x\n",active,client,error);
+    if (error || active<GL_TEXTURE0 || client<GL_TEXTURE0) return false;
+    unsigned usable=0;
+    for (unsigned unit=0;unit<8;unit++) {
+        glActiveTexture(GL_TEXTURE0+unit);GLenum server_error=glGetError();
+        glClientActiveTexture(GL_TEXTURE0+unit);GLenum client_error=glGetError();
+        fprintf(stderr,"[raw-units] unit=%u server-error=0x%x client-error=0x%x\n",unit,server_error,client_error);
+        if (server_error || client_error) break;
+        usable++;
+    }
+    glActiveTexture(active);glClientActiveTexture(client);
+    error=glGetError();
+    GLint after_active=-1,after_client=-1;
+    glGetIntegerv(GL_ACTIVE_TEXTURE,&after_active);glGetIntegerv(GL_CLIENT_ACTIVE_TEXTURE,&after_client);
+    GLenum after_error=glGetError();
+    fprintf(stderr,"[raw-units] usable-selectors=%u restored=0x%x/0x%x error=0x%x/0x%x; actual two-unit pixels required next\n",
+        usable,after_active,after_client,error,after_error);
+    return usable>=2 && !error && !after_error && after_active==active && after_client==client;
+}
+int main(int argc,char **argv)
+{
+    bool units=argc==2 && !strcmp(argv[1],"--diagnose-units");
+    if (argc!=1 && !units) { fprintf(stderr,"usage: egl-combine [--diagnose-units]\n");return 64; }
     setbuf(stderr,NULL); signal(SIGALRM,expired); signal(SIGSEGV,expired); alarm(20);
     fprintf(stderr,"[raw-combine] entry\n");
     CGLContextObj context=NULL;
     if (!gles_egl_create(NULL,1,&context)) return 2;
     fprintf(stderr,"[raw-combine] renderer=%s version=%s\n",glGetString(GL_RENDERER),glGetString(GL_VERSION));
+    if (units && !diagnose_units()) { CGLReleaseContext(context);return 2; }
     PFNGLGENFRAMEBUFFERSOESPROC gen=(PFNGLGENFRAMEBUFFERSOESPROC)eglGetProcAddress("glGenFramebuffersOES");
     PFNGLBINDFRAMEBUFFEROESPROC bind=(PFNGLBINDFRAMEBUFFEROESPROC)eglGetProcAddress("glBindFramebufferOES");
     PFNGLFRAMEBUFFERTEXTURE2DOESPROC attach=(PFNGLFRAMEBUFFERTEXTURE2DOESPROC)eglGetProcAddress("glFramebufferTexture2DOES");
