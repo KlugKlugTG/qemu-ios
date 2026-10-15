@@ -251,6 +251,18 @@ class FileWitnesses(unittest.TestCase):
             with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'owner/epoch'):
                 clear.observe(fd, OWNER, 'before', lambda: {**OWNER, **change})
 
+    def test_identity_change_during_read_refused(self):
+        fd = self.open_log(line())
+        calls = []
+
+        def guard():
+            calls.append(True)
+            return OWNER if len(calls) == 1 else {**OWNER, 'cpu_epoch': 'recreated-during-read'}
+
+        with self.assertRaisesRegex(ValueError, 'owner/epoch'):
+            clear.observe(fd, OWNER, 'before', guard)
+        self.assertEqual(len(calls), 2)
+
     def test_real_overbound_tail_and_future_target_refused(self):
         fd = self.open_log(line())
         with self.assertRaises(ValueError):
