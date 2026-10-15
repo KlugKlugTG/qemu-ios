@@ -114,3 +114,21 @@ This is an additional real generated-code correctness step. Its fixed execution
 window includes deliberate sleep/debug transport and cannot rank performance.
 It does not boot iOS or qualify a frontend, Android, real workload coverage,
 audio/input, persistence or a practical reduction in first-action latency.
+
+Retained iOS session comparison
+------------------------------
+
+``contrib/portable/ir-cache-session-report.py`` compares retained actual iOS
+session manifests only. It checks matching engine/frontend/base/seed-state/
+workload/host identities, separate native processes, strict clean shutdown and
+resource witnesses, retained image/log hashes and cache cold-producer/reuse
+inventory binding. It requires at least two runs per variant and reports input/
+source-frame latency brackets plus worker-process CPU time. The latter includes
+host emulation/render/audio/runtime work, not guest iOS CPU utilization.
+
+The output is explicitly owner-evidence comparison: offline byte checks do not
+independently verify live process witnesses or visual scene judgments. Fixed
+execution-window timings from the asset-free differential cannot be substituted
+for actual app/menu actions. Check the reporter with
+``python3 tests/portable-ir-cache-session-report.py``; synthetic contract tests
+never qualify an actual performance gain.
