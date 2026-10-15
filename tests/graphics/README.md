@@ -125,3 +125,10 @@ records `arm64-v8a`. Machine type, little endian, suffixed SONAMEs, dependency
 closure and 16KiB LOAD alignment remain required. Cross-ABI files are rejected,
 not relabelled. Run `python3 tests/graphics/test-inspect-angle-android.py` for
 target-free tests of the production inspector and its rejection paths.
+
+`egl-enable-state.c` is a bounded raw platform GLES1 diagnostic for the retained
+gfxstream server-enable query crash. It uses `glGetBooleanv` only, requires the
+actually advertised cube-map extension, checks cube/2D state transitions on two
+verified server units and lighting, and restores original states/selectors. It
+does not exercise `glIsEnabled`, draw pixels, or qualify a guest/provider. Compile
+and target execution require their own reviewed grants.
