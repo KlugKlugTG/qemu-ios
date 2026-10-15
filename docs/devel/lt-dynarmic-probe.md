@@ -1,8 +1,8 @@
 # Asset-free Dynarmic/QEMU bridge experiment
 
 This default-off, unqualified diagnostic is not a product CPU backend or a
-performance optimization. Its first revision is source only until an actual
-build and differential execution receipt exists.
+performance optimization. The first Linux/x86-64 build and synthetic
+differential proof passed in the narrow scope recorded below.
 
 The empty `lt_dynarmic_probe_prefix` Meson option preserves existing builds.
 An explicit dependency prefix compiles two experimental ARM source files and
@@ -48,3 +48,25 @@ This experiment does not qualify the board-only PL0 CP15 QEMU_CALL/GLES bridge,
 an alternate data-memory adapter, persistent cache identity/invalidation,
 Android/AArch64 deployment, iOS execution, free-running interrupts/lifecycle or
 any speedup. The fresh-JIT, single-step path is unsuitable for benchmarking.
+
+## Actual first proof
+
+Engine source `653c948ab2` built with an independently pinned Ubuntu Dynarmic
+6.5 shared library. The same executable with the switch OFF and ON produced
+identical complete sixteen-register/CPSR observations in eight cases: actual
+CP15 MMU bootstrap, two integer instructions, readable load, permission and
+translation data aborts, current pre-v7 ignored-XN behavior and an unmapped
+instruction-fetch prefetch abort. ON emitted the two required execution
+witnesses; OFF emitted none. A stock-engine negative passed the same state
+assertions but correctly failed the required execution witnesses.
+
+The proof used only legal synthetic RAM with no iOS assets or device model.
+Data loads and all architectural faults executed through TCG. The observation
+does not establish a Dynarmic data-MMU adapter, board CP15/GLES behavior,
+interrupt/lifecycle correctness, Android/AArch64 support or a speedup.
+
+Retain the exact build/source/library hashes and failed configuration/compile
+attempts with the private integration receipt. Build attempt01 lacked the
+target-required FDT dependency; attempt02 exposed a target-poisoning error in
+the generic execution loop. The tested correction routes the experiment
+through a default-off internal TCGCPUOps callback, assigned only by ARM.
