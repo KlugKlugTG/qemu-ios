@@ -3,6 +3,9 @@
 
 No shell command evaluation, source-cache migration or device operations.
 The plan is an operator-owned local artifact, not an untrusted job format.
+The historical max_group_rss_kib input now bounds the sampled RSS sum of the
+owned session, including Ninja job process groups. Shared pages may be counted
+more than once; this polling guard is not a kernel-enforced memory limit.
 """
 import argparse
 import hashlib
@@ -71,32 +74,66 @@ def preflight(plan):
             'tool_version_checks': len(plan['tools'])}
 
 
-def group_rss_kib(group):
-    """Aggregate resident pages in this command's own process group only."""
-    pages = 0
+def session_processes(session):
+    """Ninja creates job process groups, all in our start_new_session session."""
+    members = []
     for path in Path('/proc').iterdir():
         if not path.name.isdigit():
             continue
         try:
             fields = (path / 'stat').read_text().rsplit(')', 1)[1].split()
-            if int(fields[2]) == group:  # pgrp, field5; fields begins with state
-                pages += max(0, int(fields[21]))  # rss, field24
+            if int(fields[3]) == session:  # session, field6
+                members.append({'pid': int(path.name), 'pgrp': int(fields[2]),
+                                'start': int(fields[19]), 'state': fields[0],
+                                'rss_pages': max(0, int(fields[21]))})
         except (OSError, ValueError, IndexError):
             continue
-    return pages * os.sysconf('SC_PAGE_SIZE') // 1024
+    return members
 
 
-def dispose_group(process):
-    # start_new_session makes this an owned group; never signal the operator's.
-    for number, wait in [(signal.SIGTERM, 2), (signal.SIGKILL, 2)]:
-        try:
-            os.killpg(process.pid, number)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=wait)
-        except subprocess.TimeoutExpired:
-            continue
+def session_rss_kib(session):
+    return sum(p['rss_pages'] for p in session_processes(session)) * os.sysconf('SC_PAGE_SIZE') // 1024
+
+
+def capture_session(process):
+    # Capture before poll()/wait() can reap even a very short-lived leader.
+    leader = next((p for p in session_processes(process.pid) if p['pid'] == process.pid), None)
+    require(leader is not None and leader['pgrp'] == process.pid, 'new command session identity unavailable')
+    process.candidate_session_start = leader['start']
+
+
+def owned_session(process):
+    members = session_processes(process.pid)
+    leader = next((p for p in members if p['pid'] == process.pid), None)
+    # A reused leader PID is a different session, even if its numeric SID agrees.
+    require(leader is None or leader['start'] == process.candidate_session_start,
+            'command session identity changed')
+    return members
+
+
+def dispose_session(process):
+    # Signal only groups with a still-matching member in the owned session.
+    # Ninja's separate job groups must also retire when the scheduler exits.
+    for number in (signal.SIGTERM, signal.SIGKILL):
+        members = owned_session(process)
+        for group in sorted({p['pgrp'] for p in members if p['state'] != 'Z'}):
+            current = owned_session(process)
+            matching = any(p['pgrp'] == group and p['state'] != 'Z' and
+                           any(p['pid'] == old['pid'] and p['start'] == old['start']
+                               for old in members) for p in current)
+            if matching:
+                require(group != os.getpgrp(), 'refusing operator process group')
+                try:
+                    os.killpg(group, number)
+                except ProcessLookupError:
+                    pass
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            process.poll()  # Reap the owned direct child, never another process.
+            if not any(p['state'] != 'Z' for p in owned_session(process)):
+                return True
+            time.sleep(.05)
+    return False
 
 
 def run_step(plan, output, label, argv, cwd, timeout, events):
@@ -120,6 +157,7 @@ def run_step(plan, output, label, argv, cwd, timeout, events):
                     stdout=stream, stderr=subprocess.STDOUT, start_new_session=True,
                     preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_SETMASK, original_mask))
                 event['pid'] = process.pid
+                capture_session(process)
             finally:
                 # Pending host signals unwind only once the owned handle is
                 # available to the surrounding finally.
@@ -128,25 +166,46 @@ def run_step(plan, output, label, argv, cwd, timeout, events):
             last_report = begin
             while process.poll() is None:
                 now = time.monotonic()
-                rss = group_rss_kib(process.pid)
+                rss = session_rss_kib(process.pid)
                 peak = max(peak, rss)
                 require(now - begin < timeout, 'command deadline expired: ' + label)
                 require(rss <= plan['max_group_rss_kib'], 'command RSS ceiling exceeded: ' + label)
                 if now - last_report >= 30:
                     print(json.dumps({'running': label, 'pid': process.pid,
-                                      'seconds': now - begin, 'group_rss_kib': rss}), flush=True)
+                                      'seconds': now - begin, 'session_rss_kib': rss}), flush=True)
                     last_report = now
                 time.sleep(.5)
             require(process.returncode == 0, 'command failed: ' + label)
         finally:
+            cleanup_error = None
             if process is not None:
-                if process.poll() is None or group_rss_kib(process.pid):
-                    dispose_group(process)
+                try:
+                    if hasattr(process, 'candidate_session_start'):
+                        if process.poll() is None or owned_session(process):
+                            event['cleanup_session_retired'] = dispose_session(process)
+                    else:
+                        # Session admission failed. The unreaped direct child
+                        # is ours; do not signal unverified descendant groups.
+                        for number in (signal.SIGTERM, signal.SIGKILL):
+                            if process.poll() is not None:
+                                break
+                            process.send_signal(number)
+                            try:
+                                process.wait(timeout=2)
+                            except subprocess.TimeoutExpired:
+                                pass
+                        event['cleanup_session_retired'] = not session_processes(process.pid)
+                except BaseException as error:
+                    event['cleanup_error'] = str(error)
+                    cleanup_error = error
                 event['exit'] = process.poll()
             event.update(seconds=time.monotonic() - begin,
-                         sampled_peak_group_rss_kib=peak, log_sha256=sha(log))
+                         sampled_peak_session_rss_kib=peak, log_sha256=sha(log))
             (output / 'commands.json').write_text(json.dumps(events, indent=2) + '\n')
             print(json.dumps(event), flush=True)
+            if cleanup_error is not None:
+                raise cleanup_error
+            require(event.get('cleanup_session_retired', True), 'owned command session did not retire')
 
 
 def clean_environment(plan):
