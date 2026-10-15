@@ -652,8 +652,8 @@ static void amc_decode_publish(IPodTouchAMCState *s)
      * transfer job (amc_engine0), and enables engine 0's completion to do
      * so, so there a frame waits for a job and goes to its slot. The job
      * moves a whole slot, and its size is the driver's: 8 KiB for iOS 6's
-     * AAC program (n90ap-10B329), whose frames fill half of it; the slot's
-     * sample count gives the frame's length. 3.1's (n88ap-7E18: sources
+     * AAC program (n90ap-10B329), whose samples are 32 bits (below); the
+     * slot's sample count gives the frame's length. 3.1's (n88ap-7E18: sources
      * 0x101004) enables the DE's completion and not engine 0's, and takes
      * each frame from its slot on that completion, as AMC 2.0's does; 6.1.3
      * enables 0x111000. So a frame goes by job unless the driver enabled
@@ -684,9 +684,20 @@ static void amc_decode_publish(IPodTouchAMCState *s)
         memset(d->pcm->data, 0, bytes);
         d->cursor = 0;
     }
+    /* The AAC program of 5.x and 6.x (n90ap-9B206, 10A5316k and 10B329; n88ap-10B500)
+     * gives a frame 32-bit samples, 24-bit values sign-extended: its jobs' slots are
+     * twice an S16 frame, and the driver plays the whole slot as 32-bit stereo. S16
+     * there played as full-scale noise; at 8.24 (<< 9) the ringtone clips at its peaks,
+     * at << 8 it matches a decode of the m4r. iOS 7's slots (n90ap-11D257) are an S16
+     * frame's. */
+    bool wide = jobs && s->xfer[0] == 2 * d->capacity;
+    g_autofree uint8_t *out = wide ? g_malloc(2 * bytes) : NULL;
+    for (unsigned i = 0; wide && i < bytes / 2; i++) {
+        stl_le_p(out + 4 * i, (int16_t)lduw_le_p(d->pcm->data + d->cursor + 2 * i) * 256);
+    }
     if (address_space_write(&address_space_memory,
         base + 0x100 + offset, MEMTXATTRS_UNSPECIFIED,
-        d->pcm->data + d->cursor, bytes)) {
+        wide ? out : d->pcm->data + d->cursor, wide ? 2 * bytes : bytes)) {
         return;
     }
     stw_le_p(header + 2, d->buffers);

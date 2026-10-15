@@ -129,6 +129,21 @@ typedef struct IPodTouchLCDState
      * scanout base shown last vsync, to flag a new frame from a held one. */
     FrameTimeline ftl;
     uint32_t ftl_last_base;
+
+    /*
+     * The M2 CLCD's lookup tables, behind the indirect port at +0x408 (bit16 write, bits 12-14 table, bits 0-7
+     * entry), +0x40c (data in) and +0x410 (data out). Tables 4-6 are the output gamma of R, G and B: 256 entries of
+     * f(i - 1) << 10 | f(i), 10 bits each. While +0x400 (gamma_ctrl) bit0 is on, as the n72's iBoot leaves it after
+     * loading them, the panel shows every pixel through them (hw/arm/panel-gamma.h). White on Black reads them back, mirrors them and
+     * writes them again with the bit off, then puts it back (AppleM2CLCD, 8C148 0x8082d1fc and 0x8082d740).
+     * ponytail: tables 1-3 and 7 (the MIE's degamma and engamma) are kept, not applied.
+     */
+    uint32_t gamma_ctrl;
+    uint32_t lut_addr;
+    uint32_t lut[8][256];
+    uint32_t calib[3][256];     /* the panel's calibration (panel_gamma) */
+    uint8_t gamma8[3][256];     /* tables 4-6 as the panel shows them, 8 bits in, 8 out */
+    bool gamma_identity;
 } IPodTouchLCDState;
 
 bool lcd_backlight_is_off(void);

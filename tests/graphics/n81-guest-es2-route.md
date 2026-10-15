@@ -15,9 +15,11 @@ These Mac results do not qualify Linux or Android.
 
 The existing Linux supplemental run is stronger route evidence: engine b88
 initialized a guest-api=2 context, logged the first CoreAnimation surface attach,
-and executed16 glDrawElements(ES2) offscreen draws. This occurred during the
+and logged16 glDrawElements(ES2) offscreen shader-path draw attempts. This occurred during the
 built-in SpringBoard/QuartzCore workload, without installing a GL application.
 It proves that this supplied guest requests ES2 and reaches the shader draw path.
+The logger can also describe a draw awaiting guest-page fault retry; these lines
+do not independently establish that every attempt executed.
 The run missed its briefly lit interval, captured an aged black640x960 frame,
 and retained EGL_BAD_ACCESS at teardown. It does not prove visible ES2 output,
 Home/input, or compatibility of a later engine.

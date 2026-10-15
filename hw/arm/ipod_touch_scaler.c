@@ -86,7 +86,7 @@ static bool scaler_write_bus(IPodScalerState *s, uint32_t va, const void *buf,
  * two past the pitch, the kernel maps the buffer in 64 KiB windows of 64 KiB / stride rows,
  * each packed at the pitch and only as many pages mapped as those rows fill: 2x of a 1x
  * iPad app, 960x640 at stride 4096 (16 rows of 3840 bytes, 15 pages of each window; issue
- * 47), as the Zoom source below (11 of 16 at 683 wide).
+ * 47), as the iPad 3.2 Zoom source (11 of 16 at 683 wide).
  */
 static uint32_t scaler_row(uint32_t base, unsigned y, unsigned stride, unsigned pitch)
 {
@@ -96,81 +96,6 @@ static uint32_t scaler_row(uint32_t base, unsigned y, unsigned stride, unsigned 
         return base + (y / rows) * 0x10000 + (y % rows) * pitch;
     }
     return base + y * stride;
-}
-
-/*
- * 32-bit RGB to 32-bit RGB with scaling: what iPad Accessibility > Zoom asks
- * for. CA renders the visible crop (683x512 at 1.5x) and the scaler blows it
- * up onto the 1024x768 framebuffer. +0x10/+0x30 formats (low 3 bits 6 =
- * 32 bpp, same layout both sides, so pixels are copied as they are), +0x14
- * source, +0x24 source w << 16 | h, +0x34 destination, +0x3c destination
- * stride in pixels, +0x40 destination w << 16 | h, +0x50/+0x54 x/y step in
- * 16.16.
- *
- * The source as measured (7B500 Zoom, a one-shot dump of dart2 stream 2):
- * rows of ALIGN(w, 64) pixels, packed, but reached through an IOVA range in
- * which only the leading pages of every 64 KiB window are mapped (11 of 16
- * for w = 683). Read back-to-back, the mapped pages hold exactly that packed
- * image, so the source is gathered that way; +0x1c (0x0400_0400 here) is not
- * what locates the rows.
- * ponytail: layout inferred from one mode (Zoom, 32 bpp); nearest sampling
- * where the hardware has polyphase taps at +0x70 on. Decode +0x1c and the
- * mapping properly if another RGB client shows up.
- */
-static bool scaler_rgb(IPodScalerState *s)
-{
-    uint32_t *r = s->regs;
-    unsigned sw = (r[0x24 / 4] >> 16) & 0x1fff, sh = r[0x24 / 4] & 0x1fff;
-    unsigned dw = (r[0x40 / 4] >> 16) & 0x1fff, dh = r[0x40 / 4] & 0x1fff;
-    unsigned ds = (r[0x3c / 4] & 0xffff) * 4, pitch = ROUND_UP(sw, 64);
-    uint32_t sx = r[0x50 / 4], sy = r[0x54 / 4];
-    size_t need, got = 0;
-
-    if ((r[0x10 / 4] & 7) != 6 || (r[0x30 / 4] & 7) != 6 || !sw || !sh ||
-        !dw || !dh || sw > 2048 || sh > 2048 || dw > 2048 || dh > 2048 ||
-        ds < dw * 4) {
-        return false;
-    }
-    /* Rotated 90 degrees when the steps walk the destination's rows down the source's
-     * columns: a 1x iPhone app on the iPad's landscape panel (320x480 -> 480x320 at 1:1,
-     * 960x640 at 2x), the way the rest of the portrait UI is turned. */
-    bool rot = sx && sy && sw != sh && ((uint64_t)dw * sx) >> 16 == sh && ((uint64_t)dh * sy) >> 16 == sw;
-    sx = sx ? sx : ((uint64_t)sw << 16) / dw;
-    sy = sy ? sy : ((uint64_t)sh << 16) / dh;
-    need = (size_t)pitch * sh * 4;
-    g_autofree uint8_t *src = g_malloc(need);
-    /* Gather the mapped pages in IOVA order; give up after 4x the size. */
-    for (uint32_t va = r[0x14 / 4]; got < need && va - r[0x14 / 4] < need * 4;
-         va += 0x1000) {
-        hwaddr pa = scaler_pa(s, va);
-
-        if (pa != (hwaddr)-1) {
-            size_t n = MIN(0x1000, need - got);
-            cpu_physical_memory_read(pa, src + got, n);
-            got += n;
-        }
-    }
-    if (got < need) {
-        return false;
-    }
-    g_autofree uint32_t *row = g_new(uint32_t, dw);
-    for (unsigned y = 0; y < dh; y++) {
-        const uint32_t *line = (const uint32_t *)src +
-            (size_t)MIN(((uint64_t)y * sy) >> 16, sh - 1) * pitch;
-
-        for (unsigned x = 0; x < dw; x++) {
-            if (rot) {      /* destination (x, y) is source column sw - 1 - y, row x */
-                unsigned u = sw - 1 - MIN(((uint64_t)y * sy) >> 16, sw - 1);
-                row[x] = ((const uint32_t *)src)[(size_t)MIN(((uint64_t)x * sx) >> 16, sh - 1) * pitch + u];
-            } else {
-                row[x] = line[MIN(((uint64_t)x * sx) >> 16, sw - 1)];
-            }
-        }
-        if (!scaler_write_bus(s, scaler_row(r[0x34 / 4], y, ds, ROUND_UP(dw, 64) * 4), row, dw * 4)) {
-            return false;
-        }
-    }
-    return true;
 }
 
 /* Read `len` bytes at a bus address, a page at a time. False if any page is unmapped. */
@@ -189,6 +114,70 @@ static bool scaler_read_bus(IPodScalerState *s, uint32_t va, void *buf, unsigned
         va += n;
         p += n;
         len -= n;
+    }
+    return true;
+}
+
+/*
+ * 32-bit RGB to 32-bit RGB with scaling: what Accessibility > Zoom asks for.
+ * CA renders the visible crop (683x512 at 1.5x on the iPad) and the scaler
+ * blows it up onto the framebuffer. +0x10/+0x30 formats (low 3 bits 6 =
+ * 32 bpp, same layout both sides, so pixels are copied as they are), +0x14
+ * source, +0x1c source stride in pixels, +0x24 source w << 16 | h, +0x34
+ * destination, +0x3c destination stride in pixels, +0x40 destination
+ * w << 16 | h, +0x50/+0x54 x/y step in 16.16.
+ *
+ * Both sides are addressed the same way (scaler_row). The iPad 3.2 Zoom
+ * source is programmed at a stride of 1024 pixels and mapped in 64 KiB
+ * windows of rows packed at ALIGN(w, 64) (11 of 16 pages for w = 683); 4.x's
+ * crop on the iPhone 4 is linear at the stride it programs (432 pixels for a
+ * 427-wide crop, not a multiple of 64), which reading the source as packed at
+ * ALIGN(w, 64) sheared into streaks.
+ * ponytail: nearest sampling where the hardware has polyphase taps at +0x70
+ * on.
+ */
+static bool scaler_rgb(IPodScalerState *s)
+{
+    uint32_t *r = s->regs;
+    unsigned sw = (r[0x24 / 4] >> 16) & 0x1fff, sh = r[0x24 / 4] & 0x1fff;
+    unsigned dw = (r[0x40 / 4] >> 16) & 0x1fff, dh = r[0x40 / 4] & 0x1fff;
+    unsigned ss = (r[0x1c / 4] & 0xffff) * 4, ds = (r[0x3c / 4] & 0xffff) * 4, pitch = sw;
+    uint32_t sx = r[0x50 / 4], sy = r[0x54 / 4];
+
+    if ((r[0x10 / 4] & 7) != 6 || (r[0x30 / 4] & 7) != 6 || !sw || !sh ||
+        !dw || !dh || sw > 2048 || sh > 2048 || dw > 2048 || dh > 2048 ||
+        ss < sw * 4 || ds < dw * 4) {
+        return false;
+    }
+    /* Rotated 90 degrees when the steps walk the destination's rows down the source's
+     * columns: a 1x iPhone app on the iPad's landscape panel (320x480 -> 480x320 at 1:1,
+     * 960x640 at 2x), the way the rest of the portrait UI is turned. */
+    bool rot = sx && sy && sw != sh && ((uint64_t)dw * sx) >> 16 == sh && ((uint64_t)dh * sy) >> 16 == sw;
+    sx = sx ? sx : ((uint64_t)sw << 16) / dw;
+    sy = sy ? sy : ((uint64_t)sh << 16) / dh;
+    g_autofree uint8_t *src = g_malloc((size_t)pitch * sh * 4);
+    for (unsigned y = 0; y < sh; y++) {
+        if (!scaler_read_bus(s, scaler_row(r[0x14 / 4], y, ss, ROUND_UP(sw, 64) * 4),
+                             src + (size_t)y * pitch * 4, sw * 4)) {
+            return false;
+        }
+    }
+    g_autofree uint32_t *row = g_new(uint32_t, dw);
+    for (unsigned y = 0; y < dh; y++) {
+        const uint32_t *line = (const uint32_t *)src +
+            (size_t)MIN(((uint64_t)y * sy) >> 16, sh - 1) * pitch;
+
+        for (unsigned x = 0; x < dw; x++) {
+            if (rot) {      /* destination (x, y) is source column sw - 1 - y, row x */
+                unsigned u = sw - 1 - MIN(((uint64_t)y * sy) >> 16, sw - 1);
+                row[x] = ((const uint32_t *)src)[(size_t)MIN(((uint64_t)x * sx) >> 16, sh - 1) * pitch + u];
+            } else {
+                row[x] = line[MIN(((uint64_t)x * sx) >> 16, sw - 1)];
+            }
+        }
+        if (!scaler_write_bus(s, scaler_row(r[0x34 / 4], y, ds, ROUND_UP(dw, 64) * 4), row, dw * 4)) {
+            return false;
+        }
     }
     return true;
 }

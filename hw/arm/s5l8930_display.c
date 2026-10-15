@@ -19,6 +19,7 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/arm/s5l8930.h"
 #include "hw/arm/frame-timeline.h"
+#include "hw/arm/panel-gamma.h"
 #include "system/runstate.h"
 #include "ui/input.h"
 #include "qemu/cutils.h"
@@ -52,8 +53,19 @@
 #define DP_IRQ_SWAP_DONE    0x100
 
 #define CLCD_CTRL           0x00      /* bit8 = soft reset, self-clearing */
+#define CLCD_IRQ_ENABLE     0x08      /* bit0: the CLCD's interrupt on */
+#define CLCD_GAMMA_CTRL     0x2c      /* bit0: the output gamma on (AppleCLCD's "Gamma Correction") */
+#define CLCD_LUT_CTRL       0x34      /* bit16 write, bits 12-14 table, bits 0-7 entry */
+#define CLCD_LUT_WDATA      0x38      /* an entry, then the next (the index steps) */
+#define CLCD_LUT_RDATA      0x3c
 #define CLCD_ENVID          0x50      /* bit0 ENVID, bit1 "ready down" */
 #define CLCD_SIZE           0x60      /* (w - 1) << 16 | (h - 1) */
+#define CLCD_IRQ_MASK       0x64      /* the sources that interrupt: 0x4 the frame */
+#define CLCD_IRQ_STATUS     0x68      /* W1C */
+
+#define CLCD_IRQ_FRAME      0x4
+#define CLCD_LUT_TABLES     8
+#define CLCD_LUT_GAMMA      4         /* tables 4, 5, 6: the output gamma of R, G, B */
 
 #define VBL_PERIOD_NS       (NANOSECONDS_PER_SECOND / 60)
 #define QUIET_RELATCH_VBLS  15        /* ~250 ms without a swap */
@@ -92,6 +104,21 @@ struct S5L8930DisplayState {
 
     DisplayPipe pipe[2];     /* 0 = DisplayPipe0 (scanned out), 1 = RGBOUT */
     uint32_t clcd[2][CLCD_WORDS];
+    /*
+     * The CLCD's lookup tables (CLCD_LUT_*): 256 entries each, f(i - 1) << 10 | f(i) in 10 bits for the output gamma
+     * (tables 4-6), 12 bits for the MIE's (1-3). While CLCD_GAMMA_CTRL bit0 is on, as iBoot leaves it, the panel
+     * shows every pixel through the output gamma (hw/arm/panel-gamma.h), which is how White on Black inverts it:
+     * AppleCLCD reads the tables back, mirrors them (8C148 0x809da7e0) and loads them from its frame interrupt
+     * (0x809dbbac). 7.x turns the bit off around each load and back on only if it found it on (11D257 0x80b23740),
+     * and it reloads a table it saved only while the bit was on, so with the bit off its loads of a never-read
+     * (all-zero) table stay unseen.
+     * ponytail: the MIE's tables are kept, not applied; model them if a guest turns the MIE on.
+     */
+    uint32_t lut[CLCD_LUT_TABLES][256];
+    uint32_t clcd_status;    /* CLCD_IRQ_STATUS */
+    uint32_t calib[3][256];  /* the panel's calibration (panel_gamma) */
+    uint8_t gamma8[3][256];  /* tables 4-6 as the panel shows them, 8 bits in, 8 out */
+    bool gamma_identity;
     uint32_t tvout[TVOUT_SIZE / 4];
     S5L8930Dart dart;        /* dart2 (hw/arm/s5l8930_dart.c) */
 
@@ -255,6 +282,7 @@ static const MemoryRegionOps pipe_ops = {
 };
 
 static void front_latch(S5L8930DisplayState *s);
+static void clcd_update_irq(S5L8930DisplayState *s);
 
 /*
  * The frame end on one pipe: its queued swap completes (swap ID to 0x1048) and
@@ -358,6 +386,9 @@ static void vbl_tick(void *opaque)
     s->pipe[1].swap_pending = false;
     pipe_frame_end(&s->pipe[0]);
     pipe_frame_end(&s->pipe[1]);
+    /* ponytail: the frame is the only CLCD source raised, the one AppleCLCD enables (its LUT and dither updates). */
+    s->clcd_status |= CLCD_IRQ_FRAME;
+    clcd_update_irq(s);
 #ifndef __APPLE__
     /* Adapted from upstream 97860b36b0e9fcdd008e95e58efff9609ca44aee.
      * Paint the completed latch at vsync for visible portable consoles, so
@@ -372,25 +403,84 @@ static void vbl_tick(void *opaque)
 
 /* ---- CLCD timing generator ---------------------------------------------- */
 
+static void clcd_update_irq(S5L8930DisplayState *s)
+{
+    qemu_set_irq(s->clcd_irq, (s->clcd[0][CLCD_IRQ_ENABLE / 4] & 1) &&
+                              (s->clcd_status & s->clcd[0][CLCD_IRQ_MASK / 4]));
+}
+
+/* The output gamma as the panel shows it, 8 bits in and out. */
+static void gamma_update(S5L8930DisplayState *s)
+{
+    s->gamma_identity = panel_gamma(s->lut + CLCD_LUT_GAMMA, s->calib, s->clcd[0][CLCD_GAMMA_CTRL / 4] & 1,
+                                    s->gamma8);
+    s->shown = 0;           /* the panel redraws through the new tables */
+}
+
+/* What iBoot leaves in the output gamma: a straight line, f(i) = 4i (the n72's iBoot writes it), and the gamma on. */
+static void gamma_reset(S5L8930DisplayState *s)
+{
+    s->clcd[0][CLCD_GAMMA_CTRL / 4] = 1;
+    for (int c = 0; c < 3; c++) {
+        for (int i = 0; i < 256; i++) {
+            s->lut[CLCD_LUT_GAMMA + c][i] = MAX(i - 1, 0) * 4 << 10 | i * 4;
+        }
+    }
+    panel_gamma_reset(s->calib);
+    gamma_update(s);
+}
+
 static uint64_t clcd_read(void *opaque, hwaddr addr, unsigned size)
 {
     S5L8930DisplayState *s = opaque;
     uint32_t v = panel_word(&s->pipe[0], addr, s->clcd[0][addr / 4]);
+    uint32_t ctrl = s->clcd[0][CLCD_LUT_CTRL / 4];
 
-    if (addr == CLCD_ENVID) {
+    switch (addr) {
+    case CLCD_ENVID:
         v = (v & ~2u) | ((v & 1) ? 0 : 2);
+        break;
+    case CLCD_LUT_RDATA:
+        v = s->lut[(ctrl >> 12) & 7][ctrl & 0xff];
+        break;
+    case CLCD_IRQ_STATUS:
+        v = s->clcd_status;
+        break;
     }
     return v;
 }
 
 static void clcd_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
-    uint32_t *regs = ((S5L8930DisplayState *)opaque)->clcd[0];
+    S5L8930DisplayState *s = opaque;
+    uint32_t *regs = s->clcd[0];
+    uint32_t ctrl = regs[CLCD_LUT_CTRL / 4];
 
-    if (addr == CLCD_CTRL) {
+    switch (addr) {
+    case CLCD_CTRL:
         val &= ~0x100;    /* soft reset completes at once */
+        break;
+    case CLCD_LUT_WDATA:
+        if (ctrl & 0x10000) {
+            unsigned t = (ctrl >> 12) & 7;
+
+            s->lut[t][ctrl & 0xff] = val & 0xffffff;    /* bit 31: AppleCLCD's upload marks each entry */
+            regs[CLCD_LUT_CTRL / 4] = (ctrl & ~0xffu) | ((ctrl + 1) & 0xff);
+            if (t >= CLCD_LUT_GAMMA && t < CLCD_LUT_GAMMA + 3) {
+                gamma_update(s);
+            }
+        }
+        break;
+    case CLCD_IRQ_STATUS:
+        s->clcd_status &= ~val;
+        clcd_update_irq(s);
+        return;
     }
     regs[addr / 4] = val;
+    if (addr == CLCD_GAMMA_CTRL) {
+        gamma_update(s);
+    }
+    clcd_update_irq(s);
 }
 
 /*
@@ -798,6 +888,17 @@ static void front_latch(S5L8930DisplayState *s)
     }
 }
 
+/* One row of the panel through the output gamma (BGRA: B in bits 0-7, R in 16-23). */
+static void gamma_row(const S5L8930DisplayState *s, const uint32_t *src, uint32_t *d, unsigned w)
+{
+    for (unsigned x = 0; x < w; x++) {
+        uint32_t p = src[x];
+
+        d[x] = (p & 0xff000000u) | (uint32_t)s->gamma8[0][(p >> 16) & 0xff] << 16 |
+               (uint32_t)s->gamma8[1][(p >> 8) & 0xff] << 8 | s->gamma8[2][p & 0xff];
+    }
+}
+
 /* ponytail: full redraw every host refresh (~30 Hz, 3 MiB), add dirty
  * tracking via framebuffer_update_display if it shows up in profiles. */
 static void display_update(void *opaque)
@@ -850,10 +951,12 @@ static void display_update(void *opaque)
     for (unsigned y = 0; y < h; y++) {
         uint8_t *d = surface_data(surface) + y * surface_stride(surface);
 
-        if (img) {
+        if (!img) {
+            memset(d, 0, w * 4);
+        } else if (s->gamma_identity) {
             memcpy(d, img + (size_t)y * w, w * 4);
         } else {
-            memset(d, 0, w * 4);
+            gamma_row(s, img + (size_t)y * w, (uint32_t *)d, w);
         }
     }
     dpy_gfx_update(s->con, 0, 0, w, h);
@@ -877,6 +980,9 @@ static void s5l8930_display_reset(DeviceState *dev)
         s->pipe[i].swap_pending = false;
     }
     memset(s->clcd, 0, sizeof(s->clcd));
+    memset(s->lut, 0, sizeof(s->lut));
+    s->clcd_status = 0;
+    gamma_reset(s);
     memset(s->tvout, 0, sizeof(s->tvout));
     memset(&s->dart, 0, sizeof(s->dart));
     s->front_valid = false;
@@ -1001,6 +1107,8 @@ static int s5l8930_display_post_load(void *opaque, int version_id)
      * from the restored guest RAM so the panel resumes on a whole frame. */
     front_latch(opaque);
     pipes_update_irq(opaque);
+    gamma_update(opaque);
+    clcd_update_irq(opaque);
     return 0;
 }
 
@@ -1040,6 +1148,19 @@ static const VMStateDescription vmstate_display_pipe = {
     }
 };
 
+/* The CLCD's tables and interrupt status; a subsection, so older saves load with the boot tables. */
+static const VMStateDescription vmstate_s5l8930_display_lut = {
+    .name = "s5l8930.display/lut",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT32_2DARRAY(lut, S5L8930DisplayState, CLCD_LUT_TABLES, 256),
+        VMSTATE_UINT32_2DARRAY(calib, S5L8930DisplayState, 3, 256),
+        VMSTATE_UINT32(clcd_status, S5L8930DisplayState),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
 static const VMStateDescription vmstate_s5l8930_display = {
     .name = "s5l8930.display",
     .version_id = 1,
@@ -1054,6 +1175,10 @@ static const VMStateDescription vmstate_s5l8930_display = {
         VMSTATE_UINT32_2DARRAY(dart.ste, S5L8930DisplayState, S5L8930_DART_SIDS, S5L8930_DART_SEGS),
         VMSTATE_TIMER_PTR(vbl, S5L8930DisplayState),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_s5l8930_display_lut,
+        NULL
     }
 };
 
