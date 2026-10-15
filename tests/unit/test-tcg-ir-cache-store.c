@@ -172,6 +172,19 @@ static void hardlink_record(void)
     cleanup();
 }
 
+static void bounded_directory(void)
+{
+    setup();
+    for (unsigned i = 0; i <= TCG_IR_CACHE_MAX_RECORDS; i++) {
+        char name[65];
+        snprintf(name, sizeof(name), "%064x", i);
+        g_autofree char *p = g_build_filename(directory, name, NULL);
+        g_assert_cmpint(symlink("/dev/null", p), ==, 0);
+    }
+    g_assert_null(tcg_ir_store_open(directory, build));
+    cleanup();
+}
+
 int main(int argc, char **argv)
 {
     /* Python driver invokes these modes as different execs, proving the
@@ -199,5 +212,6 @@ int main(int argc, char **argv)
     g_test_add_func("/ir-store/huge", huge_record);
     g_test_add_func("/ir-store/symlink-record", symlink_record);
     g_test_add_func("/ir-store/hardlink-record", hardlink_record);
+    g_test_add_func("/ir-store/bounded-directory", bounded_directory);
     return g_test_run();
 }

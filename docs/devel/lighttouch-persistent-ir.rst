@@ -35,8 +35,10 @@ flags, instruction limit, CPU ISA identification/features/idle-loop setting,
 current global-temp layout, host optional-op support and SHA256 of the actual
 mapped engine file. The opened engine inode/device must match its executable
 mapping in ``/proc/self/maps``. Its size and timestamps must remain unchanged
-while hashing. An inaccessible/non-file image (for example an unextracted APK
-library path) disables caching. A key is checked again before publishing a miss.
+while hashing. For native libraries mapped directly from an Android APK, it hashes
+the exact mapped backing APK and library member name; this conservatively
+invalidates on any APK content change and avoids extraction. An inaccessible or
+non-file image disables caching. A key is checked again before publishing a miss.
 
 Records use explicit little-endian integers and symbolic temp/label/exit indices.
 The decoder checks all lengths, counts, enums, operand indices/types, instruction

@@ -303,6 +303,45 @@ static void reject_pointer_and_helper(void)
 int main(int argc, char **argv)
 {
     allocations = g_ptr_array_new_with_free_func(g_free);
+    if (argc == 3 && (!strcmp(argv[1], "--produce-ir") ||
+                     !strcmp(argv[1], "--consume-ir"))) {
+        g_setenv("LT_TCG_IR_CACHE_ENABLE", "experimental-v1", true);
+        g_setenv("LT_TCG_IR_CACHE", argv[2], true);
+        TCGContext *s = new_context();
+        ARMCPU *cpu = g_new0(ARMCPU, 1);
+        TranslationBlock tb = new_tb();
+        uint8_t page[1024] = { 0 };
+        ARMTcgIRCacheKey key;
+        memcpy(page, code, sizeof(code));
+        bool hit = arm_tcg_ir_cache_load(CPU(cpu), &tb, 512, tb.pc, page, &key);
+        if (!strcmp(argv[1], "--produce-ir")) {
+            g_assert_false(hit);
+            g_assert_true(key.eligible);
+            IRBlock *b = fixture();
+            replay_ir(b, &tb);
+            arm_tcg_ir_cache_save(CPU(cpu), &tb, tb.pc, page, &key);
+            g_assert_cmpuint(stored, ==, 1);
+            g_free(b);
+        } else {
+            g_assert_true(hit);
+            g_assert_cmpuint(hits, ==, 1);
+            uint32_t r0 = 99;
+            g_assert_cmphex(run_fixture(0, &r0), ==, (uintptr_t)&tb);
+            g_assert_cmpuint(r0, ==, 3);
+        }
+        g_free(cpu); g_free(s); g_ptr_array_unref(allocations);
+        return 0;
+    }
+    if (argc == 3 && !strcmp(argv[1], "--disabled")) {
+        g_unsetenv("LT_TCG_IR_CACHE_ENABLE");
+        g_setenv("LT_TCG_IR_CACHE", argv[2], true);
+        ARMTcgIRCacheKey key;
+        g_assert_false(arm_tcg_ir_cache_load(NULL, NULL, 0, 0, NULL, &key));
+        g_assert_false(key.eligible);
+        g_assert_null(store);
+        g_ptr_array_unref(allocations);
+        return 0;
+    }
     g_test_init(&argc, &argv, NULL);
     g_test_add_func("/arm-ir/relocation-and-interrupts", roundtrip_relocation);
     g_test_add_func("/arm-ir/adversarial-and-all-truncations", malformed_ir);

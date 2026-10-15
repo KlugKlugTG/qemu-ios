@@ -77,6 +77,8 @@ static void initialize_cache(void)
     const char *directory = getenv("LT_TCG_IR_CACHE");
     const char *enable = getenv("LT_TCG_IR_CACHE_ENABLE");
     Dl_info image;
+    g_autofree char *backing_file = NULL;
+    const char *member;
     struct stat st, after;
     g_autoptr(GChecksum) checksum = NULL;
     uint8_t buffer[65536];
@@ -89,7 +91,19 @@ static void initialize_cache(void)
         !dladdr(arm_tcg_ir_cache_load, &image) || !image.dli_fname) {
         return;
     }
-    fd = open(image.dli_fname, O_RDONLY | O_CLOEXEC);
+    /* Android commonly maps uncompressed native libraries directly from its
+     * APK. Hashing that exact mapped backing APK plus member name also binds
+     * every engine byte, without extracting/copying it or trusting a supplied
+     * build string. It conservatively invalidates on any APK content change. */
+    member = strstr(image.dli_fname, ".apk!/");
+    if (member) {
+        backing_file = g_strndup(image.dli_fname,
+                                member - image.dli_fname + strlen(".apk"));
+        member += strlen(".apk!");
+    } else {
+        backing_file = g_strdup(image.dli_fname);
+    }
+    fd = open(backing_file, O_RDONLY | O_CLOEXEC);
     if (fd < 0) {
         return;
     }
@@ -100,6 +114,9 @@ static void initialize_cache(void)
         return;
     }
     checksum = g_checksum_new(G_CHECKSUM_SHA256);
+    if (member) {
+        g_checksum_update(checksum, (const uint8_t *)member, strlen(member) + 1);
+    }
     while ((n = read(fd, buffer, sizeof(buffer))) != 0) {
         if (n < 0) {
             if (errno == EINTR) {
@@ -305,7 +322,8 @@ static IRBlock *capture_ir(TranslationBlock *tb, const void *code)
             goto fail;
         }
         b->temp[i] = (IRTemp){ t->kind, t->base_type, t->type,
-                               t->temp_subindex, t->val };
+                               t->temp_subindex,
+                               t->kind == TEMP_CONST ? t->val : 0 };
     }
     QTAILQ_FOREACH(op, &s->ops, link) {
         const TCGOpDef *d;
@@ -436,7 +454,7 @@ static bool validate_operands(const IRBlock *b, const IROp *o)
         int64_t off = o->args[2];
         /* Bounds include the negative CPUState header used by the interrupt
          * prologue. In particular no arbitrary host pointer bases/offsets. */
-        if (off < -(int64_t)sizeof(CPUState) ||
+        if (o->p2 || off < -(int64_t)sizeof(CPUState) ||
             off > (int64_t)sizeof(CPUARMState) - 4) { return false; }
     } else if (o->opc == INDEX_op_qemu_ld || o->opc == INDEX_op_qemu_st) {
         uint64_t oi = o->args[2];

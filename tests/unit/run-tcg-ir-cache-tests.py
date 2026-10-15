@@ -76,6 +76,13 @@ def main():
         Path(d).chmod(0o700)
         run("fresh-producer", [str(output / "store"), "--produce", d])
         run("fresh-consumer", [str(output / "store"), "--consume", d])
+    with tempfile.TemporaryDirectory(prefix="lighttouch-ir-hook-process-") as d:
+        Path(d).chmod(0o700)
+        run("disabled-by-default", [str(output / "codec"), "--disabled", d])
+        if list(Path(d).iterdir()):
+            raise RuntimeError("Disabled cache created files")
+        run("fresh-ir-producer", [str(output / "codec"), "--produce-ir", d])
+        run("fresh-ir-consumer", [str(output / "codec"), "--consume-ir", d])
     files = ("target/arm/tcg/ir-cache.c", "target/arm/tcg/ir-cache.h",
              "include/tcg/ir-cache-store.h", "tcg/ir-cache-store.c",
              "tests/unit/test-arm-tcg-ir-cache.c",

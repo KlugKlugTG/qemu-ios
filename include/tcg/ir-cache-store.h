@@ -2,6 +2,8 @@
 #ifndef TCG_IR_CACHE_STORE_H
 #define TCG_IR_CACHE_STORE_H
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <glib.h>
 
 /* These are hard limits, including stale records from a different build. */

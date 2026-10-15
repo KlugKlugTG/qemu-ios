@@ -131,6 +131,7 @@ TCGIRCacheStore *tcg_ir_store_open(const char *directory,
     TCGIRCacheStore *s;
     DIR *dir;
     struct dirent *entry;
+    unsigned scanned_records = 0;
     int fd;
 
     if (!directory || directory[0] != '/') {
@@ -163,6 +164,11 @@ TCGIRCacheStore *tcg_ir_store_open(const char *directory,
     }
     while ((entry = readdir(dir))) {
         if (record_name(entry->d_name)) {
+            if (++scanned_records > TCG_IR_CACHE_MAX_RECORDS) {
+                closedir(dir);
+                tcg_ir_store_close(s);
+                return NULL;
+            }
             read_record(s, entry->d_name);
             if (s->disk_bytes > TCG_IR_CACHE_MAX_BYTES) {
                 closedir(dir);
