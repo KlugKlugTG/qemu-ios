@@ -7,6 +7,14 @@ same experimental compilation gate used by the lookup-reason experiment;
 this source revision alone adds clear accounting, not lookup-reason counters.
 Combining the two patches requires a separately reviewed producer.
 
+The explicit `build-engine.py --experimental-tb-cache-clear` selector enables
+only this compile gate and requires an absent fresh Linux output. Android,
+source-update, existing directories and dangling symlinks are refused before
+output creation. The exact macro is recorded in the normal recipe argv;
+no existing production cache may be reused with changed flags. Omit the flag
+to retain production behavior. This experimental build needs its own actual
+engine/configuration validation before any guest allocation.
+
 The motivation is to distinguish clearing from collisions when a lookup sees
 an empty cache slot but usually finds an existing translation in the slow
 table. An empty slot does not itself prove invalidation: it can also be cold,
