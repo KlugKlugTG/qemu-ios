@@ -132,3 +132,11 @@ actually advertised cube-map extension, checks cube/2D state transitions on two
 verified server units and lighting, and restores original states/selectors. It
 does not exercise `glIsEnabled`, draw pixels, or qualify a guest/provider. Compile
 and target execution require their own reviewed grants.
+
+The retained NVIDIA/gfxstream GLES1 case advertises cube maps, but its encoder
+crashes when `glIsEnabled(GL_TEXTURE_CUBE_MAP)` treats the server token as a
+client-array index. The raw enable diagnostic also rejected `glGetBooleanv` as
+a replacement: cube/2D enabled states on both units and global lighting read
+back false with zero errors. Neither an absent-extension guard nor a constant
+false/query substitution is justified by this case. A probe process returning
+exit 6 is a failed state-preservation test even when all GL errors are zero.
