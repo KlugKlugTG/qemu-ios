@@ -22,6 +22,7 @@ struct IPodAgent {
     int64_t last_poll;
     int64_t clock_offset;
     bool claimed;
+    IPodShutdownCancelTrace shutdown_cancel;
 };
 
 static void item_free(void *p)
@@ -53,6 +54,7 @@ void ipod_agent_reset(IPodAgent *a)
     g_queue_clear_full(&a->done, item_free);
     a->token = 0;
     a->claimed = false;
+    memset(&a->shutdown_cancel, 0, sizeof(a->shutdown_cancel));
     qemu_mutex_unlock(&a->lock);
 }
 
@@ -160,9 +162,10 @@ const char *ipod_agent_submit_error(int error)
                              "Invalid agent request";
 }
 
-bool ipod_agent_cancel(IPodAgent *a, const char *id)
+bool ipod_agent_cancel_diagnostic(IPodAgent *a, const char *id, bool record)
 {
     bool found = false;
+    unsigned reason = IPOD_CANCEL_NOT_FOUND;
     qemu_mutex_lock(&a->lock);
     for (GList *p = a->pending.head; p; p = p->next) {
         AgentItem *item = p->data;
@@ -172,6 +175,9 @@ bool ipod_agent_cancel(IPodAgent *a, const char *id)
                  * Late WRITE/DONE calls cannot complete another request. */
                 a->claimed = false;
                 a->token = 0;
+                reason = IPOD_CANCEL_CLAIM_RESET;
+            } else {
+                reason = IPOD_CANCEL_UNDISPATCHED;
             }
             g_queue_delete_link(&a->pending, p);
             item_free(item);
@@ -186,12 +192,32 @@ bool ipod_agent_cancel(IPodAgent *a, const char *id)
                 g_queue_delete_link(&a->done, p);
                 item_free(item);
                 found = true;
+                reason = IPOD_CANCEL_COMPLETED;
                 break;
             }
         }
     }
+    if (record) {
+        ipod_shutdown_cancel_record(&a->shutdown_cancel, reason,
+                                    g_get_monotonic_time() / 1000);
+    }
     qemu_mutex_unlock(&a->lock);
     return found;
+}
+
+bool ipod_agent_cancel(IPodAgent *a, const char *id)
+{
+    return ipod_agent_cancel_diagnostic(a, id, false);
+}
+
+bool ipod_agent_shutdown_trace(IPodAgent *a, IPodShutdownCancelTrace *out)
+{
+    if (qemu_mutex_trylock(&a->lock)) {
+        return false;
+    }
+    *out = a->shutdown_cancel;
+    qemu_mutex_unlock(&a->lock);
+    return true;
 }
 
 char *ipod_agent_take_result(IPodAgent *a)
