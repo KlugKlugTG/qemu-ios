@@ -51,6 +51,14 @@ EGLAPI EGLBoolean EGLAPIENTRY eglChooseConfig(EGLDisplay d, const EGLint *a,
     (void)d; (void)a; assert(n == 1); *c = (EGLConfig)(uintptr_t)1;
     *found = 1; return EGL_TRUE;
 }
+EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay d, EGLint attribute)
+{
+    (void)d; (void)attribute; return "controlled EGL";
+}
+EGLAPI EGLBoolean EGLAPIENTRY eglTerminate(EGLDisplay d)
+{
+    (void)d; return EGL_TRUE;
+}
 EGLAPI EGLBoolean EGLAPIENTRY eglBindAPI(EGLenum api)
 {
     (void)api; return EGL_TRUE;
