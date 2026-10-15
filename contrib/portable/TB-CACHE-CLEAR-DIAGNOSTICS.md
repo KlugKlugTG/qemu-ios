@@ -117,3 +117,51 @@ counter macro arguments are not evaluated. Negative controls remove only the
 new total increment or the original preceding-page clear and must fail the
 corresponding counter or cache-validity assertion. No result is claimed until
 those native checks actually run.
+
+## Publication witnesses and offline extraction
+
+`tb-clear-delta.py` implements the exact 15-field, single-line schema above.
+Its `observe(fd, identity, mode, guard, ...)` library function reads an already
+opened regular log file; it does not open processes, send input, write logs or
+control an engine. The caller owns a bounded `guard()` that returns a freshly
+validated identity: `host_boot_id`, `pid`, `start_ticks` (decimal string),
+`engine_sha256`, `cpu`, and `cpu_epoch`. The last field is a caller-certified
+CPU-allocation lifetime, not a guest boot ID inferred from the line. A fresh
+worker and no CPU recreation during the observation are suitable evidence;
+CPU number alone is insufficient. These attestations remain a limitation of
+offline verification. Only 4096-entry clear-only logs are accepted.
+
+BEFORE selects the latest complete record, ignoring a currently partial tail.
+AFTER first records EOF after the inspected full target source, then waits at
+most five seconds of polling for the first complete record whose **start** is
+at or after that EOF. Completing a line already partially present is not a new
+record. Both calls retain raw line/hash/offset, log device/inode, bounded tail
+hash/EOF and HOST_MONOTONIC read brackets. Rewrites, truncation, malformed
+complete records and owner/epoch changes are refused. Polling bounds cannot
+bound an external guard or a blocking filesystem syscall; the caller retains
+its original outer watchdog. Log reads are capped at 16 MiB and tail reads at
+1 MiB. File append is the only expected live modification.
+
+After strict retirement, the caller creates a schema-1 selection containing
+`identity`, `label`, final `log: {path, sha256}`, returned `before` and `after`
+witnesses, and `action` with `down_begin_monotonic_ns`,
+`down_end_monotonic_ns`, `last_transition_source_ns`, and
+`first_complete_source_ns`. The last two are actual source-frame timestamps
+from independently inspected transition/full-target images. The AFTER call
+also takes `first_complete_source_ns`. The caller retains the strict terminal,
+frame evidence and CPU-lifetime certification separately; the extractor does
+not independently attest retirement or image content.
+
+```sh
+python3 contrib/portable/tb-clear-delta.py /private/final-selection.json
+python3 tests/portable-tb-clear-delta.py
+```
+
+The command writes JSON to stdout only. It validates final log hash, exact
+retained line/tail bytes, EOF eligibility, latest/first selection, owner/epoch,
+unsigned ranges, fieldwise monotonicity and input/source/publication ordering.
+An incomplete final counter line is refused. It reports operation deltas and
+rounded accounting-clock separation, never converts them to CPU time or
+cache-miss attribution. Site totals need not equal the central total because
+their atomic observations are independent. Host tests cover real append and
+partial-line publication as well as refusal paths; they do not execute a guest.
