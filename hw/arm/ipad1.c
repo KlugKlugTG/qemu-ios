@@ -818,6 +818,27 @@ static void ipad1_cpu_reset(void *opaque)
         a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
                    &(A4DTEdit){ "product", "product-id", s->board->product_id, 20 });
     }
+    /*
+     * The USB keyboard's EHCI, up next to device mode (docs/ipad1/usb-keyboard.md).
+     * 4.3-5.1.1 DTs give usb-ehci publish-criteria 0xc: AppleEmbeddedUSBArbitrator's
+     * updatePublishedNubs publishes a child whose criteria meet its mask, and the
+     * mask has 0x8 while usb-complex has hsic-enabled (which kboot adds), so the
+     * EHCI is up from start. 6.0 dropped that bit (0x4: host mode only, as with a
+     * Camera Connection Kit) and gave the root port a usb-ehci-port1 node with
+     * port-type 2, a dock port left unpowered (PORTSC PP cleared in the middle of
+     * the first reset) unless the cable is a host-side one, so 6.x and 7.x never
+     * enumerated the keyboard. The 5.x criteria and port-type 0 (the port's other
+     * valid type, powered as a built-in port) bring them in line; DTs without the
+     * port node or the property walk past.
+     */
+    {
+        static const uint8_t usb_criteria[4] = { 0xc }, usb_port_type[4] = { 0 };
+
+        a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
+                   &(A4DTEdit){ "usb-ehci", "publish-criteria", usb_criteria, 4 });
+        a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
+                   &(A4DTEdit){ "usb-ehci-port1", "port-type", usb_port_type, 4 });
+    }
     if (address_space_write(&address_space_memory, load_pa,
                             MEMTXATTRS_UNSPECIFIED, data, image_len) != MEMTX_OK) {
         error_report("ipad1: cannot stage kboot bundle at 0x%x", load_pa);

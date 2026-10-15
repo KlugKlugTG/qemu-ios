@@ -64,6 +64,21 @@ Does EHCI need the OTG core in host mode? No. EHCI and OTG are separate register
 coupling is `USB_CTL` bit 0 (the PHY mux on real silicon), and the emulator has no shared PHY to
 mux.
 
+**4.3 and later: `publish-criteria`.** From 4.3 each `usb-complex` child carries a
+`publish-criteria` mask instead of `cable-type`. On 6.1.6 (n81ap 10B500 AppleEmbeddedUSB,
+`updatePublishedNubs` 0x8087b178) a child is published when its criteria meet the arbitrator's
+mask: the cable gives 1 (detached), 3 (`USBHost*`, device mode) or 5 (`USBDevice*`, host mode;
+mapper 0x8087b540), and `hsic-enabled` adds 8, which also sets `hsic-enabled` on the nub (bit 4
+sets `AAPL,power-supply` 50). The 4.3-5.1.1 DTs give `usb-ehci` 0xc, so with kboot's
+`hsic-enabled` the EHCI is up from start. 6.0 changed two things: `usb-ehci` is 0x4 (host mode
+only), and its root port is a `usb-ehci-port1` node with `port-type` 2, a dock port the host stack
+leaves unpowered in device mode (with 0xc alone it starts EHCI, sets PORTSC PR, then clears PP
+in the middle of the reset and halts). So no 6.x or 7.x A4 board enumerated the keyboard. The
+kboot loader (`ipad1.c`) sets the criteria back to 0xc and `port-type` to 0 (the port's other
+valid type); the keyboard then enumerates and the built-in host still configures device mode
+(tests/slice/ipad1-usb-host.c). `force-usb-host` (a CCK, host mode) enumerates it too, but
+device mode, and with it usbmux, goes.
+
 ## What a Camera Connection Kit is to the iPad
 
 The CCK is a 30-pin accessory. The dock's accessory detection tells the power source it has a
