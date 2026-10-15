@@ -4702,30 +4702,7 @@ static bool gles_refresh_surfaces(CPUState *cpu)
  * display surface is scanned out from that memory, and a partial frame written at a
  * framebuffer switch was latched as a black (dimmed wallpaper only) frame on 4.2.1's
  * app-close zoom. */
-static int64_t gles_sync_surface_1(CPUState *cpu)
-{
-    GLint kind = 0, texture = 0;
-    if (!gh.surfaces || !gh.bound_framebuffer) return 0;
-    glGetFramebufferAttachmentParameterivEXT(GL_FRAMEBUFFER_EXT,
-        GL_COLOR_ATTACHMENT0_EXT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_EXT, &kind);
-    if (kind != GL_TEXTURE) return 0;
-    glGetFramebufferAttachmentParameterivEXT(GL_FRAMEBUFFER_EXT,
-        GL_COLOR_ATTACHMENT0_EXT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME_EXT, &texture);
-    GLESSurface *s = g_hash_table_lookup(gh.surfaces, GUINT_TO_POINTER(texture));
-    if (!s) return 0;
-    if (s->detached) {                  /* rendering into a plain texture: no longer the surface's copy */
-        g_hash_table_remove(gh.surfaces, GUINT_TO_POINTER(texture));
-        return 0;
-    }
-    if (s->format != GLES_SURFACE_BGRA32 && s->format != GLES_SURFACE_RGBA32 &&
-        s->format != GLES_SURFACE_RGB565 && s->format != GLES_SURFACE_RGB555) {
-        char fourcc[12];
-        gles_refuse("surface:render:%s", gles_fourcc(s->format, fourcc));
-        return -1;
-    }
-    s->dirty = true;
-    return 0;
-}
+#include "gles-host-surface-sync.c.inc"
 
 static bool gles_surface_metrics_enabled(void)
 {
@@ -7398,50 +7375,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
                                  gles_rb_format(a[1]), a[2], a[3]);
         return 0;
 
-    case GLES_SLOT_FB_RENDERBUFFER: {    /* target, attach, rbtarget, rb */
-        uint32_t attach = a[1], rb = a[3];
-
-        if (attach == GL_COLOR_ATTACHMENT0_EXT) {
-            /* A color renderbuffer that never got GL storage is the CA
-             * drawable, so from now on this framebuffer MEANS gh.fbo. Any
-             * other color attachment takes that meaning away again. */
-            gles_set_drawable(gh.bound_framebuffer,
-                              rb && !g_hash_table_contains(
-                                  gh.rb_sized, GUINT_TO_POINTER(rb)));
-        }
-        gles_trace_attach("glFramebufferRenderbuffer", attach, rb);
-        gh.fb_dirty = true;
-        if (gles_is_drawable(gh.bound_framebuffer)) {
-            /* gh.fbo already carries the color target we present out of and a
-             * matching depth buffer; re-attaching over either breaks the
-             * present path. */
-            return 0;
-        }
-        glFramebufferRenderbufferEXT(GL_FRAMEBUFFER_EXT, attach,
-                                     GL_RENDERBUFFER_EXT, rb);
-        return 0;
-    }
-
-    case GLES_SLOT_FB_TEXTURE_2D:        /* target, attach, textarget, tex, lvl */
-        /* Attaching a texture as color makes this a real offscreen target,
-         * even if the very same framebuffer was the drawable a moment ago.
-         * Engines reuse ONE framebuffer object and swap its attachments --
-         * save the binding, attach a texture, render, attach the drawable
-         * renderbuffer back -- and Labyrinth does exactly that. Treating
-         * "drawable" as a permanent property of the NAME rather than of the
-         * current color attachment sent its render-to-texture pass to the
-         * screen and left the texture empty, which composited as a white
-         * level while the menus (UIKit) looked perfect. */
-        if (a[1] == GL_COLOR_ATTACHMENT0_EXT) {
-            gles_set_drawable(gh.bound_framebuffer, false);
-        }
-        gles_trace_attach("glFramebufferTexture2D", a[1], a[3]);
-        gh.fb_dirty = true;
-        if (gles_is_drawable(gh.bound_framebuffer)) {
-            return 0;
-        }
-        glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, a[1], a[2], a[3], a[4]);
-        return 0;
+#include "gles-host-surface-attachments.c.inc"
 
     case GLES_SLOT_DELETE_RENDERBUFFERS:
     case GLES_SLOT_DELETE_FRAMEBUFFERS: {   /* n, guest const uint* */
