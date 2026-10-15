@@ -11,6 +11,7 @@
 
 #include "qemu/rcu.h"
 #include "exec/cpu-common.h"
+#include "tb-cache-clear-stats.h"
 
 #define TB_JMP_CACHE_BITS 12
 #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
@@ -24,6 +25,9 @@
  */
 typedef struct CPUJumpCache {
     struct rcu_head rcu;
+#ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
+    TBClearStats clear_stats;
+#endif
     struct {
         TranslationBlock *tb;
         vaddr pc;

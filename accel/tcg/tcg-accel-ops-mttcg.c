@@ -37,6 +37,9 @@
 #include "tcg/startup.h"
 #include "tcg-accel-ops.h"
 #include "tcg-accel-ops-mttcg.h"
+#ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
+#include "tb-jmp-cache.h"
+#endif
 
 #ifdef CONFIG_DARWIN
 #include <pthread/qos.h>
@@ -237,6 +240,11 @@ static void *mttcg_cpu_thread_fn(void *arg)
             if (now >= acct_next_dump) {
                 acct_next_dump = now + acct_interval_ns;
                 mttcg_acct_dump(now);
+#ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
+                tb_cache_clear_dump(stderr, (now - acct_t0) / 1e9,
+                                    cpu->cpu_index, TB_JMP_CACHE_SIZE,
+                                    &cpu->tb_jmp_cache->clear_stats);
+#endif
             }
         }
 

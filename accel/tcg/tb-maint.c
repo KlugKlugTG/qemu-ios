@@ -780,6 +780,7 @@ void tb_flush__exclusive_or_serial(void)
            (current_cpu && cpu_in_serial_context(current_cpu)));
 
     CPU_FOREACH(cpu) {
+        TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_full_tb);
         tcg_flush_jmp_cache(cpu);
     }
 
@@ -905,6 +906,7 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
     if (tb_cflags(tb) & CF_PCREL) {
         /* A TB may be at any virtual address */
         CPU_FOREACH(cpu) {
+            TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_full_pcrel);
             tcg_flush_jmp_cache(cpu);
         }
     } else {
@@ -913,7 +915,9 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
         CPU_FOREACH(cpu) {
             CPUJumpCache *jc = cpu->tb_jmp_cache;
 
+            TB_CACHE_CLEAR_NOTE(jc, TB_CLEAR_tb_check);
             if (qatomic_read(&jc->array[h].tb) == tb) {
+                TB_CACHE_CLEAR_NOTE(jc, TB_CLEAR_tb_match);
                 qatomic_set(&jc->array[h].tb, NULL);
             }
         }
