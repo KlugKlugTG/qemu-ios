@@ -116,3 +116,12 @@ closure and 16KiB LOAD alignment remain required. Cross-ABI files are rejected,
 not relabelled. Run `python3 tests/graphics/test-inspect-angle-android.py` for
 target-free tests of the production inspector and its rejection paths.
 
+`egl-combine --diagnose-units` additionally logs the raw GLES1 texture-unit
+capability query through linked and public resolver entry points. It tries at
+most eight server/client selectors, consumes and reports each probe error,
+restores both original selectors, and then runs the existing real two-unit ADD
+pixel checks. Selector acceptance alone is not a rendering pass. This mode was
+added for a translator that rejects `GL_MAX_TEXTURE_UNITS`; it supplies no
+replacement capability value and makes no production provider change. The
+existing fake `egl-limits` regression covers an overstated limit, not rejection
+of the limit query. Retain the exact probe source/binary for each target attempt.
