@@ -114,3 +114,38 @@ witness-required negatives. Compare every integer register and CPSR, require
 real TCG permission/translation/alignment/prefetch faults with no alternate
 witness, and preserve all failed attempts. No iOS/Android/real-board operation
 or speed measurement is authorized by this source change.
+
+## Actual RAM/ALU/flags/branch follow-up
+
+Source `c6a943c63a` compiled and linked successfully against the pinned
+Dynarmic6.5 Linux/x86-64 library. Its real data-load adapter executed aligned
+LDR successfully. Twelve serial synthetic processes covered the historical
+reference plus new integer, flags/branch and memory suites, each with same
+binary OFF/ON and a stock witness-required negative.
+
+All 35 complete sixteen-register/CPSR observations matched across OFF, ON and
+stock. ON emitted exactly 23 real execution witnesses across four fresh
+processes: four historical MOV/ADD/load witnesses, eight integer witnesses,
+eight flag/branch witnesses and three new LDR witnesses. OFF and stock emitted
+none. All four stock harnesses passed every state assertion but returned the
+required failure solely for missing alternate-execution witnesses. All twelve
+QEMU processes exited normally with no owned process remaining.
+
+Actual TCG fallbacks retained precise permission, translation and alignment
+data-abort states, plus genuine unmapped-fetch prefetch abort. Byte loads,
+writeback loads, SP operands and Thumb stayed on TCG and matched the controls.
+Current pre-v7 ignored-XN behavior remains separately named; this does not
+qualify architectural XN protection. The memory tests used real CP15/MMU
+bootstrap and SCTLR.A for the alignment negative.
+
+The measured guard ceilings were respected: one build at 253329408 bytes
+owned RSS, and the serial runtime matrix at 83152896 bytes; minimum available
+host RAM stayed above 18 GB. These tiny synthetic wall times are not CPU
+throughput measurements. Exact hashes, source snapshots, commands, raw states,
+logs and retirement evidence remain in the private research02 receipt.
+
+The larger capsule still has no enabled multi-instruction caller. Actual
+break/watchpoint rejection, MMIO/device accesses, injected C++ rejection
+atomicity, asynchronous interrupts/pause/Stop, persistent context/invalidation,
+real-board CP15/GLES and Android/AArch64/iOS execution remain unqualified.
+No performance or production-backend change follows from this proof.
