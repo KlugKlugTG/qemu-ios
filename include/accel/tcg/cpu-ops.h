@@ -36,6 +36,11 @@ struct TCGCPUOps {
      */
     bool precise_smc;
 
+#ifdef CONFIG_LT_DYNARMIC_PROBE
+    /* Internal default-off diagnostic; NULL for ineligible architectures. */
+    bool (*lt_dynarmic_probe_try)(CPUState *cpu);
+#endif
+
     /**
      * @guest_default_memory_order: default barrier that is required
      *                              for the guest memory ordering.

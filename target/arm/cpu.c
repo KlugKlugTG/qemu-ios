@@ -31,6 +31,9 @@
 #ifdef CONFIG_TCG
 #include "exec/translation-block.h"
 #include "accel/tcg/cpu-ops.h"
+#if defined(CONFIG_LT_DYNARMIC_PROBE) && !defined(CONFIG_USER_ONLY)
+#include "exec/lt-dynarmic-probe.h"
+#endif
 #endif /* CONFIG_TCG */
 #include "internals.h"
 #include "cpu-features.h"
@@ -2366,6 +2369,9 @@ static const TCGCPUOps arm_tcg_ops = {
     .record_sigbus = arm_cpu_record_sigbus,
     .untagged_addr = aarch64_untagged_addr,
 #else
+#ifdef CONFIG_LT_DYNARMIC_PROBE
+    .lt_dynarmic_probe_try = lt_dynarmic_probe_try,
+#endif
     .tlb_fill_align = arm_cpu_tlb_fill_align,
     .pointer_wrap = aprofile_pointer_wrap,
     .cpu_exec_interrupt = arm_cpu_exec_interrupt,
