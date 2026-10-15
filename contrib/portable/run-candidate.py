@@ -38,8 +38,11 @@ def source_check(plan):
 
 
 def preflight(plan):
-    require(plan['schema'] == 1 and plan['android_api'] == 28 and plan['jobs'] == 1,
-            'only reviewed API28, sequential j1 candidate plans are supported')
+    require(plan['schema'] == 1 and plan['android_api'] in (28, 29) and plan['jobs'] == 1,
+            'only explicit API28/29, sequential j1 candidate plans are supported')
+    if plan['android_api'] == 29:
+        require([t['abi'] for t in plan['targets']] == ['arm64-v8a'],
+                'API29 experiment requires exactly one ARM64 target')
     source_check(plan)
     for pin in plan['files']:
         require(sha(pin['path']) == pin['sha256'], 'input changed: ' + pin['path'])
@@ -63,13 +66,15 @@ def preflight(plan):
         require('--source-update' not in target['configure_argv'], 'cache migration is forbidden')
         if target['abi'] != 'linux':
             argv = target['configure_argv']
-            require(argv[argv.index('--android-api') + 1] == '28', 'Android compiler API differs')
+            require(argv.count('--android-api') == 1 and
+                    argv[argv.index('--android-api') + 1] == str(plan['android_api']),
+                    'Android compiler API differs')
     for destination in destinations:
         require(destination.is_absolute() and '..' not in destination.parts, 'invalid destination')
         require(not destination.exists() and not destination.is_symlink(), 'destination exists: ' + str(destination))
         require(not any((p / '.git').exists() for p in (destination, *destination.parents)),
                 'candidate outputs must be outside Git')
-    return {'preflight': 'PASS', 'source': plan['source_revision'], 'android_api': 28,
+    return {'preflight': 'PASS', 'source': plan['source_revision'], 'android_api': plan['android_api'],
             'targets': [t['abi'] for t in plan['targets']], 'native_compilation_performed': False,
             'tool_version_checks': len(plan['tools'])}
 

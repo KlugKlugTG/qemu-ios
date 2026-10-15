@@ -19,6 +19,30 @@ spec.loader.exec_module(candidate)
 
 
 class Candidate(unittest.TestCase):
+    def test_explicit_api29_plan_is_arm64_only_and_preserves_api_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = {'schema': 1, 'android_api': 29, 'jobs': 1,
+                    'files': [], 'tools': [], 'source_revision': 'fixture',
+                    'run_output': str(root / 'run'), 'path_environment': os.environ['PATH'],
+                    'targets': [{'abi': 'arm64-v8a', 'build': str(root / 'build'),
+                                 'notices': str(root / 'notices'),
+                                 'configure_argv': ['build-engine.py', '--android-api', '29']}]}
+            with mock.patch.object(candidate, 'source_check'):
+                self.assertEqual(candidate.preflight(plan)['android_api'], 29)
+                plan['targets'][0]['configure_argv'][-1] = '28'
+                with self.assertRaisesRegex(RuntimeError, 'compiler API differs'):
+                    candidate.preflight(plan)
+                plan['targets'][0]['configure_argv'] = ['build-engine.py', '--android-api', '29',
+                                                       '--android-api', '28']
+                with self.assertRaisesRegex(RuntimeError, 'compiler API differs'):
+                    candidate.preflight(plan)
+                plan['targets'][0]['abi'] = 'linux'
+                with self.assertRaisesRegex(RuntimeError, 'exactly one ARM64'):
+                    candidate.preflight(plan)
+            self.assertFalse((root / 'run').exists())
+            self.assertFalse((root / 'build').exists())
+
     def test_real_ninja_job_group_is_counted_and_retired_on_rss_limit(self):
         # No compiler: Ninja runs one small Python allocation, in its real job
         # process group. It ignores TERM so cleanup must reach that group/KILL.
