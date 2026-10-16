@@ -112,7 +112,7 @@ void qemu_ios_ui_touch2(int phase, double nx, double ny)
     t->phase = phase;
     t->nx = nx;
     t->ny = ny;
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), mtt_bh, t);
+    qemu_ios_ui_input_later(mtt_bh, t);
 }
 
 /* --- keyboard ------------------------------------------------------------ */
@@ -142,7 +142,7 @@ static void qemu_ios_ui_key(int qcode, bool down)
     struct key_event *k = g_new0(struct key_event, 1);
     k->qcode = qcode;
     k->down = down;
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), key_bh, k);
+    qemu_ios_ui_input_later(key_bh, k);
 }
 
 void qemu_ios_ui_key_mac(int mac_keycode, bool down)

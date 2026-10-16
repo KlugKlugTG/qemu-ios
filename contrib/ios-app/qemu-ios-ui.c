@@ -494,6 +494,46 @@ void qemu_ios_ui_frame_size(int *width, int *height)
     qemu_mutex_unlock(&ios.frame_lock);
 }
 
+/*
+ * Host input in the order the host sent it. Bottom halves scheduled before one main-loop poll run in reverse:
+ * aio_bh_enqueue pushes onto the head of the list aio_bh_poll walks from the head. A press and release sent together,
+ * as a trackpad's tap to click sends them, ran release first, so the touch went down and stayed down (the next touch
+ * was only its motion) and a button stayed pressed. Every input goes through one FIFO instead; each bottom half
+ * drains it in order, and one that finds it empty does nothing.
+ */
+struct ios_input {
+    void (*fn)(void *);
+    void *opaque;
+};
+static GMutex ios_input_lock;
+static GQueue ios_input_queue = G_QUEUE_INIT;
+
+static void ios_input_bh(void *unused)
+{
+    for (;;) {
+        g_mutex_lock(&ios_input_lock);
+        struct ios_input *e = g_queue_pop_head(&ios_input_queue);
+        g_mutex_unlock(&ios_input_lock);
+        if (!e) {
+            return;
+        }
+        e->fn(e->opaque);
+        g_free(e);
+    }
+}
+
+void qemu_ios_ui_input_later(void (*fn)(void *), void *opaque)
+{
+    struct ios_input *e = g_new(struct ios_input, 1);
+
+    e->fn = fn;
+    e->opaque = opaque;
+    g_mutex_lock(&ios_input_lock);
+    g_queue_push_tail(&ios_input_queue, e);
+    g_mutex_unlock(&ios_input_lock);
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_input_bh, NULL);
+}
+
 struct ios_touch {
     double nx, ny;             /* normalized 0..1 over the panel */
     bool down;
@@ -561,7 +601,7 @@ void qemu_ios_ui_touch(int slot, int phase, double nx, double ny)
     t->nx = nx;
     t->ny = ny;
     t->down = (phase != QEMU_IOS_TOUCH_END);
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_touch_bh, t);
+    qemu_ios_ui_input_later(ios_touch_bh, t);
 }
 
 /* --- hardware buttons -------------------------------------------------- */
@@ -646,7 +686,7 @@ void qemu_ios_ui_button(int button, bool down)
     b = g_new0(struct ios_button, 1);
     b->button = button;
     b->down = down;
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_button_bh, b);
+    qemu_ios_ui_input_later(ios_button_bh, b);
 }
 
 /* --- generic host input sequence ---------------------------------------- */
