@@ -55,16 +55,41 @@ static inline bool portable_pke_product(const uint8_t *modulus,
     gcry_mpi_t mod = portable_mpi_le(modulus, size);
     gcry_mpi_t left = portable_mpi_le(a, size);
     gcry_mpi_t right = one ? gcry_mpi_new(0) : portable_mpi_le(b, size);
-    gcry_mpi_t radix = gcry_mpi_new(0), inverse = gcry_mpi_new(0), value = gcry_mpi_new(0);
-    bool ok = mod && left && right && radix && inverse && value;
+    gcry_mpi_t value = gcry_mpi_new(0);
+    /*
+     * The radix inverse depends only on the modulus and the width, but a
+     * modular exponentiation is hundreds of products against one modulus,
+     * and libgcrypt's constant-time invm was ~7% of an n72 boot. Keep the
+     * last one. Single PKE, operated by the vCPU under the BQL.
+     */
+    static uint8_t cached_modulus[256];
+    static size_t cached_size;
+    static unsigned cached_bits;
+    static gcry_mpi_t inverse;
+    bool ok = mod && left && right && value && size <= sizeof(cached_modulus);
     if (ok) {
         if (negative_a) gcry_mpi_neg(left, left);
         if (one) gcry_mpi_set_ui(right, 1);
         else if (negative_b) gcry_mpi_neg(right, right);
-        gcry_mpi_set_ui(radix, 0);
-        gcry_mpi_set_bit(radix, bits);
-        ok = gcry_mpi_test_bit(mod, 0) && gcry_mpi_cmp_ui(mod, 1) > 0 &&
-             gcry_mpi_invm(inverse, radix, mod);
+        ok = gcry_mpi_test_bit(mod, 0) && gcry_mpi_cmp_ui(mod, 1) > 0;
+        if (ok && !(inverse && cached_size == size && cached_bits == bits &&
+                    !memcmp(cached_modulus, modulus, size))) {
+            gcry_mpi_t radix = gcry_mpi_new(0);
+            gcry_mpi_release(inverse);
+            inverse = gcry_mpi_new(0);
+            gcry_mpi_set_ui(radix, 0);
+            gcry_mpi_set_bit(radix, bits);
+            ok = radix && inverse && gcry_mpi_invm(inverse, radix, mod);
+            gcry_mpi_release(radix);
+            if (ok) {
+                memcpy(cached_modulus, modulus, size);
+                cached_size = size;
+                cached_bits = bits;
+            } else {
+                gcry_mpi_release(inverse);
+                inverse = NULL;
+            }
+        }
         if (ok) {
             gcry_mpi_mulm(value, left, right, mod);
             gcry_mpi_mulm(value, value, inverse, mod);
@@ -78,7 +103,7 @@ static inline bool portable_pke_product(const uint8_t *modulus,
         }
     }
     gcry_mpi_release(mod); gcry_mpi_release(left); gcry_mpi_release(right);
-    gcry_mpi_release(radix); gcry_mpi_release(inverse); gcry_mpi_release(value);
+    gcry_mpi_release(value);
     return ok;
 }
 #else
