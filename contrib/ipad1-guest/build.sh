@@ -28,6 +28,12 @@ link6 -execute "$OUT/it_agent" "$OUT/it_agent.o"
 rm -f "$OUT/it_agent.o"
 "${LDID:-ldid}" -S"$HERE/../it-agent/it_agent-entitlements.xml" "$OUT/it_agent"
 file "$OUT/it_agent"
+# it_pbtool: the pasteboard from a command line, for host checks (contrib/it-pasteboard), not baked.
+cc6 "$HERE/../it-pasteboard/it_pbtool.c" "$OUT/it_pbtool.o"
+link6 -execute "$OUT/it_pbtool" "$OUT/it_pbtool.o" -e __start
+rm -f "$OUT/it_pbtool.o"
+"${LDID:-ldid}" -S "$OUT/it_pbtool"
+file "$OUT/it_pbtool"
 # it_heading: the compass probe (contrib/it-heading), not baked by default.
 # -D_FORTIFY_SOURCE=0: 3.2's libSystem has no __vsnprintf_chk.
 cc6 "$HERE/../it-heading/it_heading.c" "$OUT/it_heading.o" -D_FORTIFY_SOURCE=0

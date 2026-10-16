@@ -78,4 +78,10 @@ void guest_pb_set(GuestPasteboard *pb, const char *text);
 bool guest_pb_call(GuestPasteboard *pb, CPUState *cpu, qemu_call_t *q,
                    int32_t *err);
 
+/*
+ * The guest's latest copy, malloc'd (free()), when it is newer than *serial
+ * (0 = none seen), which it then updates; NULL when nothing newer. Any thread.
+ */
+char *guest_pb_guest_text(uint64_t *serial);
+
 #endif

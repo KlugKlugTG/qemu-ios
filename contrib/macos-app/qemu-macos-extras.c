@@ -502,6 +502,13 @@ void qemu_ios_ui_paste(const char *utf8)
     aio_bh_schedule_oneshot(qemu_get_aio_context(), paste_bh, g_strdup(utf8));
 }
 
+/* hw/arm/guest-pasteboard.c; its own lock, so no BQL or ready check needed. */
+extern char *guest_pb_guest_text(uint64_t *serial);
+char *qemu_ios_ui_guest_pasteboard(uint64_t *serial)
+{
+    return serial ? guest_pb_guest_text(serial) : NULL;
+}
+
 /* --- machine controls ---------------------------------------------------- */
 
 typedef void (*qmp_void_fn)(Error **errp);

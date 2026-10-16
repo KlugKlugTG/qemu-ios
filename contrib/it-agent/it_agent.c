@@ -92,13 +92,19 @@ static id_ cls_pool, cls_string, cls_pasteboard;
 /*
  * Both directions share these. QC_PB_MAX_LEN on the host is 256 KiB, but the
  * guest has no reason to move that much text by hand and a fixed buffer keeps
- * this daemon allocation-free.
+ * this daemon allocation-free. Text longer than PB_BUF - 1 bytes is not moved
+ * at all, either way: a clipboard cut short mid-text (or mid-character) pastes
+ * something nobody copied. The host's side holds the same cap.
  */
-#define PB_BUF 8192
+#define PB_BUF 65536
 #define PB_CHUNK 1024
 static char pb_in[PB_BUF];    /* text arriving from the host */
 static char pb_last[PB_BUF];  /* the guest text we last told the host about */
-static long pb_last_len = -1; /* -1 = nothing observed yet */
+/* -1 = nothing observed yet: the first look is the pasteboard as the guest
+ * kept it (pasteboardd persists it across reboots), not a copy, so it is
+ * recorded and not published -- else every boot would put stale guest text
+ * over whatever the host's clipboard holds. -2 = text over the cap. */
+static long pb_last_len = -1;
 
 static int objc_setup(void)
 {
@@ -154,7 +160,8 @@ static int pump_host_to_guest(void)
         return 0;
     }
     if (n > PB_BUF - 1) {
-        n = PB_BUF - 1;
+        qc(QC_PB_ACK, 0, 0, 0);   /* over the cap: retire it unread */
+        return 0;
     }
 
     long off = 0;
@@ -221,9 +228,12 @@ static void pump_guest_to_host(void)
         len = 0;
     }
     if (len > PB_BUF - 1) {
-        len = PB_BUF - 1;
+        pb_last_len = -2;
+        m0(pool, sel_release);
+        return;
     }
 
+    int baseline = (pb_last_len == -1);
     int same = (len == pb_last_len);
     long i;
     if (same) {
@@ -239,7 +249,7 @@ static void pump_guest_to_host(void)
             pb_last[i] = bytes[i];
         }
         pb_last_len = len;
-        if (len > 0) {
+        if (len > 0 && !baseline) {
             long off = 0;
             while (off < len) {
                 uint32_t put = (uint32_t)(len - off);

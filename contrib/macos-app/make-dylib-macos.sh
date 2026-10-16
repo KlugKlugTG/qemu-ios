@@ -90,6 +90,7 @@ _qemu_ios_audio_capture_start
 _qemu_ios_audio_capture_read
 _qemu_ios_audio_capture_stop
 _qemu_ios_ui_paste
+_qemu_ios_ui_guest_pasteboard
 _qemu_ios_agent_request
 _qemu_ios_agent_cancel
 _qemu_ios_agent_result
