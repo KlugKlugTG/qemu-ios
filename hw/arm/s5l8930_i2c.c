@@ -264,6 +264,12 @@ OBJECT_DECLARE_SIMPLE_TYPE(S5L8930D1815State, S5L8930_D1815)
 #define PMU_ADC_START       (1u << 4)
 #define PMU_ADC_MUX_VBAT    4
 #define PMU_ADC_MUX_BRICK   6       /* DT function-brick_id_voltage 'Vcda' 06 */
+#define PMU_ADC_MUX_TJUNC   8       /* the die (d1815_adc_done) */
+#define PMU_ADC_MUX_TCAL    10      /* the calibration resistor */
+#define PMU_ADC_MUX_NTC     0x7884  /* tbat, adc_in7, tdev1-4: 10k NTCs */
+#define PMU_ADC_NTC_25C     0x333
+#define PMU_ADC_TCAL        0x142
+#define PMU_ADC_TJUNC_30C   0x418
 #define PMU_ADC_RES         0x31    /* 12-bit: (r[0] & 0xF) | r[1] << 4 */
 /*
  * 0x46-0x49 and 0x4A bit 6 are the wake alarm, not a counter load: 4.2.1's sleep writes
@@ -395,13 +401,35 @@ static void d1815_adc_done(void *opaque)
      * 2.5 V on both lines: 4.2.1 still said USBHost only because its 1 A
      * window also wants D+ <= 2340 mV; 4.3.x bins each line and called it a
      * 1 A brick (Detached; LightTouchMac smoke #35).
-     * ponytail: every other mux (2 thermistor, 3, 10-14) stays mid-scale;
+     * The temperatures are a device at room temperature (25 C), as the
+     * driver converts them (AppleD1815PMU, 7.0b1 809d5e34; the same in 6.1.3
+     * and 7.1.2): a 50 uA source, V = adc * 2.5 V / 4096, R = V / 50 uA,
+     * looked up in a 10k-at-25 C NTC table. Muxes 2 (tbat), 7 (adc_in7) and
+     * 11-14 (tdev1-4: the DT's SIM proximity, RF power amp, camera and H3P
+     * proximity) are those NTCs: 0x333 is 0.5 V, 10 kOhm, 25 C. Mux 10
+     * (tcal) is a fixed calibration resistor, not a thermistor: iOS 7's
+     * ThermalMonitor expects it to read 51.82 C through the same table (its
+     * N90 default; about 3.93 kOhm, 0x142) and adds the difference between
+     * that and what it reads, filtered over minutes, to every sensor. With
+     * every mux at mid-scale (25 kOhm, about 2 C) that offset climbed past
+     * 35 C, and about a quarter of an hour after boot 7.0's thermal level
+     * rose through 1-14: "iPhone needs to cool down", then a forced sleep
+     * (LightTouchMac issue 83; 7.1.2 got the same readings but its gas gauge
+     * reports no temperature, so it never completed an update). Mux 8 is
+     * tjunc, the PMU's die, T = 26 C + 0.32 C * (cal - adc) with cal from
+     * 0x43/0x44 (0x425 when unprogrammed, as here): 0x418 is 30 C
+     * (mid-scale read -290 C).
+     * Nothing here follows the host: these are fixed readings.
+     * ponytail: every other mux (3, 9) stays mid-scale;
      * S5L8930_ADC="mux:val,..." overrides for experiments.
      */
     unsigned mux = s->regs[PMU_ADC_CTRL] & 0xf;
     unsigned mv = s->vbat_mv ? s->vbat_mv : 3900;
     uint16_t v = mux == PMU_ADC_MUX_VBAT ? MIN((mv - 2500) * 4096 / 2000, 0xfff) :
-                 mux == PMU_ADC_MUX_BRICK && s->usb_host ? 0 : 0x800;
+                 mux == PMU_ADC_MUX_BRICK ? (s->usb_host ? 0 : 0x800) :
+                 mux == PMU_ADC_MUX_TJUNC ? PMU_ADC_TJUNC_30C :
+                 mux == PMU_ADC_MUX_TCAL ? PMU_ADC_TCAL :
+                 (1u << mux) & PMU_ADC_MUX_NTC ? PMU_ADC_NTC_25C : 0x800;
     const char *ov = getenv("S5L8930_ADC");
 
     for (const char *p = ov; p && *p; p = strchr(p, ',') ? strchr(p, ',') + 1 : "") {
