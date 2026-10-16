@@ -112,6 +112,86 @@ static void CGLReleaseContext(CGLContextObj c)
     }
     free(c);
 }
+#ifndef __ANDROID__
+/* The desktop's surfaceless display is an optimization, not a requirement.
+ * Publish only a fully initialized/configured candidate. No contexts exist on
+ * a failed candidate, so terminating it cannot invalidate a shared context. */
+static void gles_egl_discard_display(EGLDisplay display, const char *source)
+{
+    (void)eglGetError();
+    if (!eglTerminate(display)) {
+        fprintf(stderr, "[gles-egl] display=%s terminate failed: 0x%x\n",
+                source, eglGetError());
+    }
+}
+
+static bool gles_egl_configure_display(EGLDisplay display, const char *source,
+                                       EGLint renderable)
+{
+    if (display == EGL_NO_DISPLAY) {
+        fprintf(stderr, "[gles-egl] display=%s acquire failed: 0x%x\n",
+                source, eglGetError());
+        return false;
+    }
+    EGLint major = 0, minor = 0;
+    (void)eglGetError();
+    if (!eglInitialize(display, &major, &minor)) {
+        fprintf(stderr, "[gles-egl] display=%s initialize failed: 0x%x\n",
+                source, eglGetError());
+        gles_egl_discard_display(display, source);
+        return false;
+    }
+    /* Diagnostic queries are not guest GL calls and must not leave an EGL
+     * query error to be mistaken for a later failed selection operation. */
+    const char *vendor = eglQueryString(display, EGL_VENDOR);
+    const char *version = eglQueryString(display, EGL_VERSION);
+    const char *apis = eglQueryString(display, EGL_CLIENT_APIS);
+    fprintf(stderr, "[gles-egl] display=%s EGL=%d.%d vendor=%s version=%s apis=%s\n",
+            source, major, minor, vendor ? vendor : "unavailable",
+            version ? version : "unavailable", apis ? apis : "unavailable");
+    EGLint attributes[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, renderable, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_NONE};
+    EGLConfig config = NULL;
+    EGLint count = 0;
+    (void)eglGetError();
+    if (!eglChooseConfig(display, attributes, &config, 1, &count)) {
+        fprintf(stderr, "[gles-egl] display=%s choose-config failed: 0x%x renderable=0x%x\n",
+                source, eglGetError(), renderable);
+        gles_egl_discard_display(display, source);
+        return false;
+    }
+    if (!count) {
+        fprintf(stderr, "[gles-egl] display=%s choose-config returned zero matches "
+                "(success) renderable=0x%x pbuffer=1 rgba=8/8/8/8\n", source, renderable);
+        gles_egl_discard_display(display, source);
+        return false;
+    }
+    gles_egl_config = config;
+    gles_egl_display = display;
+    fprintf(stderr, "[gles-egl] selected display=%s renderable=0x%x\n", source, renderable);
+    return true;
+}
+
+static bool gles_egl_desktop_display(EGLint renderable)
+{
+    (void)eglGetError();
+    PFNEGLGETPLATFORMDISPLAYEXTPROC get = (void *)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    if (get) {
+        (void)eglGetError();
+        EGLDisplay display = get(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
+        if (gles_egl_configure_display(display, "surfaceless-mesa", renderable)) return true;
+        fprintf(stderr, "[gles-egl] surfaceless candidate failed; trying default display\n");
+    } else {
+        fprintf(stderr, "[gles-egl] surfaceless entry point unavailable: 0x%x; trying default display\n",
+                eglGetError());
+    }
+    (void)eglGetError();
+    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    return gles_egl_configure_display(display, "default", renderable);
+}
+#endif
+
 static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *out)
 {
 #if defined(__ANDROID__) && defined(GLES_HOST_EGL_ES)
@@ -124,16 +204,24 @@ static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *ou
     EGLenum client = EGL_OPENGL_API;
     EGLint renderable = EGL_OPENGL_BIT;
 #endif
-    if (gles_egl_display == EGL_NO_DISPLAY) {
 #ifndef __ANDROID__
-        PFNEGLGETPLATFORMDISPLAYEXTPROC get = (void *)eglGetProcAddress("eglGetPlatformDisplayEXT");
-        if (get) gles_egl_display = get(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
-#endif
-        if (gles_egl_display == EGL_NO_DISPLAY)
-#if defined(__ANDROID__) && defined(GLES_HOST_EGL_ES)
-            gles_egl_display = gles_driver_display();
+    /* Bind the intended desktop client before config selection or pbuffer
+     * creation. EGL's initial per-thread client is OpenGL ES, not OpenGL. */
+    (void)eglGetError();
+    if (!eglBindAPI(client)) {
+        fprintf(stderr, "[gles-egl] bind-api=0x%x failed: 0x%x\n", client, eglGetError());
+        return false;
+    }
+    if (gles_egl_display == EGL_NO_DISPLAY && !gles_egl_desktop_display(renderable)) return false;
 #else
-            gles_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    /* Keep Android's selected provider and original API/config ordering. In
+     * particular, never call unremapped desktop query/termination entry points
+     * on an ANGLE display or fall back to a different Android provider. */
+    if (gles_egl_display == EGL_NO_DISPLAY) {
+#ifdef GLES_HOST_EGL_ES
+        gles_egl_display = gles_driver_display();
+#else
+        gles_egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
 #endif
         EGLint config[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
             EGL_RENDERABLE_TYPE, renderable, EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8,
@@ -148,6 +236,7 @@ static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *ou
         }
     }
     if (!eglBindAPI(client)) return false;
+#endif
 #ifdef GLES_HOST_EGL_ES
     EGLint context[] = {EGL_CONTEXT_CLIENT_VERSION, api == 2 ? 2 : 1, EGL_NONE};
 #else
@@ -163,19 +252,40 @@ static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *ou
     if (!c->textures) { free(c); return false; }
     c->textures->refs++;
     c->api = api == 2 ? 2 : 1;
+#ifndef __ANDROID__
+    (void)eglGetError();
+    c->context = eglCreateContext(gles_egl_display, gles_egl_config,
+                                 share ? share->context : EGL_NO_CONTEXT, context);
+    if (c->context == EGL_NO_CONTEXT) {
+        fprintf(stderr, "[gles-egl] create-context api=%u client=0x%x failed: 0x%x\n",
+                c->api, client, eglGetError());
+        goto create_failed;
+    }
+    (void)eglGetError();
+    c->surface = eglCreatePbufferSurface(gles_egl_display, gles_egl_config, surface);
+    if (c->surface == EGL_NO_SURFACE) {
+        fprintf(stderr, "[gles-egl] create-pbuffer 1x1 failed: 0x%x\n", eglGetError());
+        goto create_failed;
+    }
+    (void)eglGetError();
+    if (CGLSetCurrentContext(c)) goto create_failed;
+#else
     c->context = eglCreateContext(gles_egl_display, gles_egl_config,
                                  share ? share->context : EGL_NO_CONTEXT, context);
     c->surface = eglCreatePbufferSurface(gles_egl_display, gles_egl_config, surface);
     if (c->context == EGL_NO_CONTEXT || c->surface == EGL_NO_SURFACE || CGLSetCurrentContext(c)) {
         fprintf(stderr, "[gles-egl] create api=%u failed: 0x%x\n", c->api, eglGetError());
-        if (c->context != EGL_NO_CONTEXT) eglDestroyContext(gles_egl_display, c->context);
-        if (c->surface != EGL_NO_SURFACE) eglDestroySurface(gles_egl_display, c->surface);
-        if (!--c->textures->refs) free(c->textures);
-        free(c);
-        return false;
+        goto create_failed;
     }
+#endif
     c->next_context=c->textures->contexts;
     c->textures->contexts=c;
     *out = c;
     return true;
+create_failed:
+    if (c->context != EGL_NO_CONTEXT) eglDestroyContext(gles_egl_display, c->context);
+    if (c->surface != EGL_NO_SURFACE) eglDestroySurface(gles_egl_display, c->surface);
+    if (!--c->textures->refs) free(c->textures);
+    free(c);
+    return false;
 }
