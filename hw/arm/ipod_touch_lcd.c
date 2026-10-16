@@ -11,6 +11,14 @@
 #include "trace.h"
 #include "hw/trace-printf.h"
 
+/* Fixed storage and saturating totals; no logging or allocation on scan paths. */
+static void lcd_frame_count(uint64_t *counter)
+{
+    if (*counter != UINT64_MAX) {
+        ++*counter;
+    }
+}
+
 static int lcd_brightness = 255;
 
 bool lcd_backlight_is_off(void)
@@ -876,6 +884,7 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
         }
     }
     dpy_gfx_update(lcd->con, 0, 0, dw, dh);
+    lcd_frame_count(&lcd->frame_counters.rotated_updates);
 }
 
 static void lcd_refresh(void *opaque)
@@ -891,6 +900,10 @@ static void lcd_refresh(void *opaque)
 
     if (!lcd || !lcd->con || !surface_bits_per_pixel(surface))
         return;
+
+    lcd_frame_count(&lcd->frame_counters.scan_attempts);
+    lcd_frame_count(lcd_in_vsync_present ? &lcd->frame_counters.vsync_scans :
+                                         &lcd->frame_counters.poll_scans);
 
     /* "vscan" = pushed by the panel's frame interrupt, "scan" = QEMU's own
      * free-running 30 ms display poll. The distinction is the whole point of
@@ -915,6 +928,7 @@ static void lcd_refresh(void *opaque)
         lcd->last_present_ns &&
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - lcd->last_present_ns <
             2 * LCD_VSYNC_PERIOD_NS) {
+        lcd_frame_count(&lcd->frame_counters.duplicate_poll_skips);
         lcd_ft("scanskip", lcd->scanout_base);
         return;
     }
@@ -1032,6 +1046,10 @@ static void lcd_refresh(void *opaque)
     lcd_line_is_copy = (bri == 255 && lcd->gamma_identity &&
                         surface_format(surface) == PIXMAN_x8r8g8b8);
 
+    lcd_frame_count(&lcd->frame_counters.framebuffer_checks);
+    if (lcd->invalidate) {
+        lcd_frame_count(&lcd->frame_counters.forced_checks);
+    }
     framebuffer_update_display(surface, &lcd->fbsection,
                                width, height,
                                src_width,       /* Length of source line, in bytes.  */
@@ -1041,7 +1059,10 @@ static void lcd_refresh(void *opaque)
                                draw_line, NULL,
                                &first, &last);
     if (first >= 0) {
+        lcd_frame_count(&lcd->frame_counters.updated_regions);
         dpy_gfx_update(lcd->con, 0, first, width, last - first + 1);
+    } else {
+        lcd_frame_count(&lcd->frame_counters.unchanged_checks);
     }
     if (lcd_frametrace()) {
         /* "blit" converted lines, "still" found the scanout buffer untouched:
@@ -1300,6 +1321,7 @@ static void ipod_touch_lcd_reset(DeviceState *dev)
 {
     IPodTouchLCDState *s = IPOD_TOUCH_LCD(dev);
 
+    lcd_frame_count(&s->frame_counters.resets);
     lcd_changebrightness(255);
 
     memset(s->plane_regs, 0, sizeof(s->plane_regs));
@@ -1389,6 +1411,26 @@ static char *ipod_touch_lcd_get_frame_timeline(Object *obj, Error **errp)
     return frame_timeline_dump(&IPOD_TOUCH_LCD(obj)->ftl);
 }
 
+/* QOM queries hold the BQL, like lcd_refresh/reset. Never force a scan. */
+static char *ipod_touch_lcd_get_frame_scan_counters(Object *obj, Error **errp)
+{
+    IPodTouchLCDState *s = IPOD_TOUCH_LCD(obj);
+    const IPodLCDFrameCounters *c = &s->frame_counters;
+
+    return g_strdup_printf("{\"schema\":1,\"resets\":%" PRIu64
+        ",\"scanAttempts\":%" PRIu64 ",\"vsyncScans\":%" PRIu64
+        ",\"pollScans\":%" PRIu64 ",\"duplicatePollSkips\":%" PRIu64
+        ",\"forcedChecks\":%" PRIu64 ",\"framebufferChecks\":%" PRIu64
+        ",\"updatedRegions\":%" PRIu64 ",\"unchangedChecks\":%" PRIu64
+        ",\"rotatedUpdates\":%" PRIu64 ",\"scanoutBase\":%" PRIu32
+        ",\"glesGeneration\":%" PRIu64
+        ",\"updatedRegionsProveGuestWrites\":false}",
+        c->resets, c->scan_attempts, c->vsync_scans, c->poll_scans,
+        c->duplicate_poll_skips, c->forced_checks, c->framebuffer_checks,
+        c->updated_regions, c->unchanged_checks, c->rotated_updates,
+        s->scanout_base, s->gles_gen);
+}
+
 static void ipod_touch_lcd_init(Object *obj)
 {
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
@@ -1398,6 +1440,11 @@ static void ipod_touch_lcd_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &lcd_ops, s, "lcd", 0x10000);
     sysbus_init_mmio(sbd, &s->iomem);
     sysbus_init_irq(sbd, &s->irq);
+    object_property_add_str(obj, "frame-scan-counters",
+                            ipod_touch_lcd_get_frame_scan_counters, NULL);
+    object_property_set_description(obj, "frame-scan-counters",
+        "Read-only process-lifetime saturating scan/update totals, not migrated; "
+        "updated regions include forced repaints and do not prove guest writes");
     object_property_add_str(obj, "frame-timeline",
                             ipod_touch_lcd_get_frame_timeline, NULL);
     object_property_set_description(obj, "frame-timeline",

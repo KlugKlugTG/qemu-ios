@@ -125,6 +125,23 @@ static struct {
 #endif
 } ios;
 
+/* Protected by frame_lock, including getters; not reset or migrated.
+ * Valid copy calls partition into no-frame, metadata-only, buffer-small and
+ * actual copies. Metadata queries never count as copying guest pixels. */
+typedef struct IosFrameCounters {
+    uint64_t capture_attempts, identical_suppressed, publications;
+    uint64_t valid_copy_calls, no_frame, metadata_only, buffer_small, pixel_copies;
+    uint64_t last_copied_serial;
+} IosFrameCounters;
+static IosFrameCounters ios_frame_counters;
+
+static void ios_frame_count(uint64_t *counter)
+{
+    if (*counter != UINT64_MAX) {
+        ++*counter;
+    }
+}
+
 /* Frame polling can begin even when startup fails before attach(). Initialize
  * on every entry path through GLib's once primitive, including concurrent first
  * reads. The lock lives for the process; published buffers outlive VM exit. */
@@ -135,6 +152,44 @@ static void ios_init_frame_lock(void)
         qemu_mutex_init(&ios.frame_lock);
         ios.published = -1;
         g_once_init_leave(&initialized, 1);
+    }
+}
+
+/* Called by QOM under the BQL, then takes frame_lock in that order.
+ * Allocation occurs only for explicit queries, never per frame. */
+static char *ios_get_portable_frame_counters(Object *obj, Error **errp)
+{
+    char *result;
+    const IosFrameCounters *c = &ios_frame_counters;
+
+    ios_init_frame_lock();
+    qemu_mutex_lock(&ios.frame_lock);
+    result = g_strdup_printf("{\"schema\":1,\"captureAttempts\":%" PRIu64
+        ",\"identicalSuppressed\":%" PRIu64 ",\"publications\":%" PRIu64
+        ",\"publishedSerial\":%" PRIu64 ",\"validCopyCalls\":%" PRIu64
+        ",\"noFrame\":%" PRIu64 ",\"metadataOnly\":%" PRIu64
+        ",\"bufferSmall\":%" PRIu64 ",\"pixelCopies\":%" PRIu64
+        ",\"lastCopiedSerial\":%" PRIu64
+        ",\"publishedBuffer\":%d,\"pending\":%s,\"atomicWithLcd\":false}",
+        c->capture_attempts, c->identical_suppressed, c->publications,
+        ios.serial, c->valid_copy_calls, c->no_frame, c->metadata_only,
+        c->buffer_small, c->pixel_copies, c->last_copied_serial,
+        ios.published, ios.pending ? "true" : "false");
+    qemu_mutex_unlock(&ios.frame_lock);
+    return result;
+}
+
+static void ios_add_frame_counter_property(void)
+{
+    /* The normal headless LCD has no dependency on this optional UI bridge. */
+    Object *lcd = object_resolve_path_type("", TYPE_IPOD_TOUCH_LCD, NULL);
+
+    if (lcd && !object_property_find(lcd, "portable-frame-counters")) {
+        object_property_add_str(lcd, "portable-frame-counters",
+                                ios_get_portable_frame_counters, NULL);
+        object_property_set_description(lcd, "portable-frame-counters",
+            "Read-only process-lifetime saturating capture/publication/copy totals; "
+            "validCopyCalls excludes invalid ABI calls; metadata-only is not a pixel copy");
     }
 }
 
@@ -216,6 +271,7 @@ static void ios_capture(DisplaySurface *surface)
 
     ios_init_frame_lock();
     qemu_mutex_lock(&ios.frame_lock);
+    ios_frame_count(&ios_frame_counters.capture_attempts);
 
     if (need > ios.buf_size) {
         /*
@@ -249,6 +305,7 @@ static void ios_capture(DisplaySurface *surface)
             }
         }
         if (y == h) {
+            ios_frame_count(&ios_frame_counters.identical_suppressed);
             qemu_mutex_unlock(&ios.frame_lock);
             return;
         }
@@ -264,6 +321,7 @@ static void ios_capture(DisplaySurface *surface)
     ios.height = h;
     ios.published = next;
     ios.serial++;
+    ios_frame_count(&ios_frame_counters.publications);
     ios.timestamp_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     qemu_mutex_unlock(&ios.frame_lock);
 
@@ -477,6 +535,7 @@ void qemu_ios_ui_vm_started(void)
     qatomic_set(&portable_paused, !runstate_is_running());
     qemu_add_vm_change_state_handler(portable_runstate_changed, NULL);
     ios.attached = true;
+    ios_add_frame_counter_property();
     qemu_register_reset(ios_sequence_reset, NULL);
     portable_has_gyro = object_dynamic_cast(qdev_get_machine(), MACHINE_TYPE_NAME("iPod-Touch-4G")) ||
                         object_dynamic_cast(qdev_get_machine(), MACHINE_TYPE_NAME("iPhone-4"));
@@ -1123,7 +1182,9 @@ int qemu_ios_portable_frame_copy(void *pixels, size_t capacity,
     if (!out || out->size < sizeof(*out) || out->version != 1) return QEMU_IOS_INVALID;
     ios_init_frame_lock();
     qemu_mutex_lock(&ios.frame_lock);
+    ios_frame_count(&ios_frame_counters.valid_copy_calls);
     if (ios.published < 0 || ios.serial == last_serial) {
+        ios_frame_count(&ios_frame_counters.no_frame);
         qemu_mutex_unlock(&ios.frame_lock); return QEMU_IOS_NO_FRAME;
     }
     *out = (QemuIosPortableFrame){ .size = sizeof(*out), .version = 1,
@@ -1133,7 +1194,13 @@ int qemu_ios_portable_frame_copy(void *pixels, size_t capacity,
     int result = QEMU_IOS_BUFFER_SMALL;
     if (pixels && capacity >= out->required_bytes) {
         memcpy(pixels, ios.buf[ios.published], out->required_bytes);
+        ios_frame_count(&ios_frame_counters.pixel_copies);
+        ios_frame_counters.last_copied_serial = ios.serial;
         result = QEMU_IOS_OK;
+    } else if (!pixels) {
+        ios_frame_count(&ios_frame_counters.metadata_only);
+    } else {
+        ios_frame_count(&ios_frame_counters.buffer_small);
     }
     qemu_mutex_unlock(&ios.frame_lock);
     return result;

@@ -23,6 +23,15 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPodTouchLCDState, IPOD_TOUCH_LCD)
  */
 #define LCD_VSYNC_PERIOD_NS (NANOSECONDS_PER_SECOND / 60)
 
+/* Diagnostic process-lifetime totals, BQL-only; not guest or migrated state.
+ * Scans count refreshes with valid surfaces. Updated regions include forced
+ * repaints: it does not prove a guest write. */
+typedef struct IPodLCDFrameCounters {
+    uint64_t resets, scan_attempts, vsync_scans, poll_scans;
+    uint64_t duplicate_poll_skips, forced_checks, framebuffer_checks;
+    uint64_t updated_regions, unchanged_checks, rotated_updates;
+} IPodLCDFrameCounters;
+
 typedef struct IPodTouchLCDState
 {
     SysBusDevice parent_obj;
@@ -129,6 +138,7 @@ typedef struct IPodTouchLCDState
      * scanout base shown last vsync, to flag a new frame from a held one. */
     FrameTimeline ftl;
     uint32_t ftl_last_base;
+    IPodLCDFrameCounters frame_counters;
 
     /*
      * The M2 CLCD's lookup tables, behind the indirect port at +0x408 (bit16 write, bits 12-14 table, bits 0-7
