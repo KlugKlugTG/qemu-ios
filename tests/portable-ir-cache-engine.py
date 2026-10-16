@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Real generated-code ARM1176 cache differential; no iOS assets or speed claim.
 
-Uses one pinned qemu-system-arm binary, machine=none and 16MiB RAM. No stepping
+Uses one pinned qemu-system-arm executable or exact shared library through its
+qemu_ios_main entry, machine=none and16MiB RAM. No compilation required. No stepping
 or breakpoints (those disable caching). QMP stops a normal running guest, then
 GDB observes register/RAM results. Every case starts a fresh process. The owner
 must separately allocate the host/CPU slot; --execute is required for execution.
@@ -16,6 +17,7 @@ import signal
 import socket
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -152,8 +154,40 @@ def run_until_target(qmp, observe, *, clock=time.monotonic, sleep=time.sleep):
                        str(observations))
 
 
+def launch_arguments(qemu, expected_hash, arguments, library_entry=None, entry_hash=None):
+    if digest(qemu) != expected_hash:
+        raise RuntimeError('Engine identity changed')
+    if library_entry is None:
+        return [str(qemu), *arguments]
+    if not entry_hash or digest(library_entry) != entry_hash:
+        raise RuntimeError('Pinned shared-library adapter changed')
+    return [sys.executable, str(library_entry), '--library', str(qemu),
+            '--sha256', expected_hash, '--', *arguments]
+
+
+def shared_mapping(log, qemu, expected_hash, pid):
+    entries = [json.loads(line.split(' ', 1)[1]) for line in log.splitlines()
+               if line.startswith('SHARED_ENGINE_MAPPING ')]
+    if len(entries) != 1:
+        raise RuntimeError('Exactly one actual shared engine mapping witness required')
+    entry = entries[0]
+    info = qemu.stat()
+    device = '%02x:%02x' % (os.major(info.st_dev), os.minor(info.st_dev))
+    if (entry.get('path') != str(qemu) or entry.get('sha256') != expected_hash
+            or entry.get('pid') != pid or entry.get('inode') != info.st_ino
+            or entry.get('device') != device or entry.get('entrypoint') != 'qemu_ios_main'
+            or not entry.get('maps')):
+        raise RuntimeError('Shared engine mapping identity mismatch')
+    for line in entry['maps']:
+        pieces = line.split()
+        if (len(pieces) < 6 or pieces[3] != device or pieces[4] != str(info.st_ino)
+                or not line.endswith(' ' + str(qemu))):
+            raise RuntimeError('Recorded shared engine mapping does not match artifact')
+    return entry
+
+
 def trial(qemu, expected_hash, output, cache, *, enabled, mode=0x13,
-          subtract=False, self_modify=False):
+          subtract=False, self_modify=False, library_entry=None, entry_hash=None):
     if digest(qemu) != expected_hash:
         raise RuntimeError('Engine identity changed')
     output.mkdir(mode=0o700, exist_ok=False)
@@ -165,11 +199,12 @@ def trial(qemu, expected_hash, output, cache, *, enabled, mode=0x13,
     with tempfile.TemporaryDirectory(prefix='ltir-') as temporary, (output / 'engine.log').open('wb') as log:
         root = Path(temporary)
         qpath, gpath = root / 'q', root / 'g'
-        argv = [str(qemu), '-M', 'none', '-cpu', 'arm1176,has_el3=off',
+        arguments = ['-M', 'none', '-cpu', 'arm1176,has_el3=off',
                 '-m', '16M', '-accel', 'tcg,thread=single,tb-size=8', '-nodefaults',
                 '-display', 'none', '-serial', 'none', '-monitor', 'none', '-S',
                 '-qmp', f'unix:{qpath},server=on,wait=off',
                 '-gdb', f'unix:{gpath},server=on,wait=off']
+        argv = launch_arguments(qemu, expected_hash, arguments, library_entry, entry_hash)
         environment = dict(os.environ)
         for key in ('LT_TCG_IR_CACHE_ENABLE', 'LT_TCG_IR_CACHE', 'LT_DYNARMIC_PROBE', 'IT_VCPU_ACCT', 'IT_VCPU_ACCT_LOG'):
             environment.pop(key, None)
@@ -245,6 +280,13 @@ def trial(qemu, expected_hash, output, cache, *, enabled, mode=0x13,
     text = (output / 'engine.log').read_text(errors='replace')
     result['cacheCounters'] = counters(text)
     result['cacheEnabledWitness'] = 'LightTouch TCG IR cache: experimental enabled,' in text
+    if library_entry is not None:
+        result['artifactKind'] = 'shared-library-qemu_ios_main'
+        result['libraryEntrySHA256'] = entry_hash
+        try:
+            result['sharedEngineMappingWitness'] = shared_mapping(text, qemu, expected_hash, result['identity']['pid'])
+        except (RuntimeError, ValueError, KeyError) as error:
+            result.update(status='FAIL', mappingError=str(error))
     (output / 'RESULT.json').write_text(json.dumps(result, indent=2) + '\n')
     if result['status'] != 'PASS':
         raise RuntimeError('Trial failed: ' + str(output))
@@ -283,16 +325,26 @@ def validate_matrix(rows):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--qemu', type=Path, required=True)
+    engine = parser.add_mutually_exclusive_group(required=True)
+    engine.add_argument('--qemu', type=Path)
+    engine.add_argument('--shared-library', type=Path)
+    parser.add_argument('--library-entry', type=Path, default=Path(__file__).with_name('portable-ir-cache-library-entry.py'))
+    parser.add_argument('--library-entry-sha256')
     parser.add_argument('--sha256', required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
+    selected = args.shared_library or args.qemu
+    library_entry = args.library_entry.resolve() if args.shared_library else None
+    if args.shared_library and not re.fullmatch('[a-f0-9]{64}', args.library_entry_sha256 or ''):
+        raise ValueError('Pinned library entry SHA256 required')
     if not args.execute:
-        print(json.dumps({'execution': False, 'scope': 'plan-only', 'qemu': str(args.qemu),
+        print(json.dumps({'execution': False, 'scope': 'plan-only', 'qemu': str(selected),
+                          'artifactKind': 'shared-library-qemu_ios_main' if library_entry else 'executable',
+                          'libraryEntry': str(library_entry) if library_entry else None,
                           'engineSHA256': args.sha256, 'cases': ['off', 'cold', 'reuse', 'different_cpu_mode', 'changed_guest_bytes', 'self_modifying_code']}))
         return
-    qemu, output = args.qemu.resolve(), args.output.resolve()
+    qemu, output = selected.resolve(), args.output.resolve()
     if not re.fullmatch('[a-f0-9]{64}', args.sha256) or digest(qemu) != args.sha256:
         raise ValueError('Exact engine SHA256 required')
     output.mkdir(mode=0o700, exist_ok=False)
@@ -307,7 +359,8 @@ def main():
             raise ValueError('Cold cache directory is not initially empty')
         rows[name] = trial(qemu, args.sha256, output / name, cache,
                            enabled=enabled, mode=mode, subtract=subtract,
-                           self_modify=name == 'self_modifying_code')
+                           self_modify=name == 'self_modifying_code',
+                           library_entry=library_entry, entry_hash=args.library_entry_sha256)
         (output / 'PROGRESS.json').write_text(json.dumps(rows, indent=2) + '\n')
     result = validate_matrix(rows)
     result['trials'] = rows
