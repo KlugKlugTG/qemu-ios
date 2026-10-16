@@ -34,12 +34,10 @@
  */
 #include "hw/arm/ipod_touch_tcp_usb.h"
 
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+#include "qemu/sockets.h"
+#ifndef _WIN32
 #include <sys/un.h>
-#include <netdb.h>
+#endif
 #include "trace.h"
 #include "hw/trace-printf.h"
 
@@ -199,9 +197,7 @@ static void tcp_usb_pump(tcp_usb_state_t *state, int _can_read, int _can_write)
 		/* fall through */
 	case tcp_usb_read_request:
 		if (state->amount_done < sizeof(*state->header)) {
-			ret = read(state->socket,
-					((char *)state->header) + state->amount_done,
-					sizeof(*state->header) - state->amount_done);
+			ret = recv(state->socket, ((char *)state->header) + state->amount_done, sizeof(*state->header) - state->amount_done, 0);
 			switch (tcp_usb_classify(ret, "reading request header")) {
 			case TCP_USB_IO_AGAIN:
 				return;
@@ -229,7 +225,7 @@ static void tcp_usb_pump(tcp_usb_state_t *state, int _can_read, int _can_write)
 			size_t len = tcp_usb_payload_len(state->header);
 			size_t got = state->amount_done - sizeof(*state->header);
 
-			ret = read(state->socket, state->buffer + got, len - got);
+			ret = recv(state->socket, state->buffer + got, len - got, 0);
 			switch (tcp_usb_classify(ret, "reading request data")) {
 			case TCP_USB_IO_AGAIN:
 				return;
@@ -265,9 +261,7 @@ static void tcp_usb_pump(tcp_usb_state_t *state, int _can_read, int _can_write)
 		/* fall through */
 	case tcp_usb_write_response:
 		if (state->amount_done < sizeof(*state->header)) {
-			ret = write(state->socket,
-					((char *)state->header) + state->amount_done,
-					sizeof(*state->header) - state->amount_done);
+			ret = send(state->socket, ((char *)state->header) + state->amount_done, sizeof(*state->header) - state->amount_done, 0);
 			switch (tcp_usb_classify(ret, "writing response header")) {
 			case TCP_USB_IO_AGAIN:
 				return;
@@ -293,7 +287,7 @@ static void tcp_usb_pump(tcp_usb_state_t *state, int _can_read, int _can_write)
 			size_t len = tcp_usb_payload_len(state->header);
 			size_t sent = state->amount_done - sizeof(*state->header);
 
-			ret = write(state->socket, state->buffer + sent, len - sent);
+			ret = send(state->socket, state->buffer + sent, len - sent, 0);
 			switch (tcp_usb_classify(ret, "writing response data")) {
 			case TCP_USB_IO_AGAIN:
 				return;
@@ -320,9 +314,7 @@ static void tcp_usb_pump(tcp_usb_state_t *state, int _can_read, int _can_write)
 
 	case tcp_usb_write_request:
 		if (state->amount_done < sizeof(*state->header)) {
-			ret = write(state->socket,
-					((char *)state->header) + state->amount_done,
-					sizeof(*state->header) - state->amount_done);
+			ret = send(state->socket, ((char *)state->header) + state->amount_done, sizeof(*state->header) - state->amount_done, 0);
 			switch (tcp_usb_classify(ret, "writing request header")) {
 			case TCP_USB_IO_AGAIN:
 				return;
@@ -345,7 +337,7 @@ static void tcp_usb_pump(tcp_usb_state_t *state, int _can_read, int _can_write)
 			size_t len = tcp_usb_payload_len(state->header);
 			size_t sent = state->amount_done - sizeof(*state->header);
 
-			ret = write(state->socket, state->buffer + sent, len - sent);
+			ret = send(state->socket, state->buffer + sent, len - sent, 0);
 			switch (tcp_usb_classify(ret, "writing request data")) {
 			case TCP_USB_IO_AGAIN:
 				return;
@@ -370,9 +362,7 @@ static void tcp_usb_pump(tcp_usb_state_t *state, int _can_read, int _can_write)
 		/* fall through */
 	case tcp_usb_read_response:
 		if (state->amount_done < sizeof(*state->header)) {
-			ret = read(state->socket,
-					((char *)state->header) + state->amount_done,
-					sizeof(*state->header) - state->amount_done);
+			ret = recv(state->socket, ((char *)state->header) + state->amount_done, sizeof(*state->header) - state->amount_done, 0);
 			switch (tcp_usb_classify(ret, "reading response header")) {
 			case TCP_USB_IO_AGAIN:
 				return;
@@ -395,7 +385,7 @@ static void tcp_usb_pump(tcp_usb_state_t *state, int _can_read, int _can_write)
 			size_t len = tcp_usb_payload_len(state->header);
 			size_t got = state->amount_done - sizeof(*state->header);
 
-			ret = read(state->socket, state->buffer + got, len - got);
+			ret = recv(state->socket, state->buffer + got, len - got, 0);
 			switch (tcp_usb_classify(ret, "reading response data")) {
 			case TCP_USB_IO_AGAIN:
 				return;
@@ -467,13 +457,14 @@ int tcp_usb_connect(tcp_usb_state_t *_state, const char *_host, uint32_t _port)
 	char port[16];
 	int fd;
 
+#ifndef _WIN32
 	if (_host[0] == '/') {   /* the bridge's Unix socket */
 		struct sockaddr_un su = { .sun_family = AF_UNIX };
 		if (strlen(_host) >= sizeof(su.sun_path)) {
 			return -ENAMETOOLONG;
 		}
 		strcpy(su.sun_path, _host);
-		fd = socket(AF_UNIX, SOCK_STREAM, 0);
+		fd = qemu_socket(AF_UNIX, SOCK_STREAM, 0);
 		if (fd < 0) {
 			return -EIO;
 		}
@@ -484,12 +475,13 @@ int tcp_usb_connect(tcp_usb_state_t *_state, const char *_host, uint32_t _port)
 		goto connected;
 	}
 
+#endif
 	snprintf(port, sizeof(port), "%u", _port);
 	if (getaddrinfo(_host, port, &hints, &res) != 0 || !res) {
 		return -EIO;
 	}
 
-	fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+	fd = qemu_socket(res->ai_family, res->ai_socktype, res->ai_protocol);
 	if (fd < 0) {
 		freeaddrinfo(res);
 		return -EIO;
@@ -506,15 +498,21 @@ int tcp_usb_connect(tcp_usb_state_t *_state, const char *_host, uint32_t _port)
 	int one = 1;
 	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 
+#ifndef _WIN32
 connected:
+#endif
 
 	_state->socket = fd;
 	_state->closed = 0;
 	_state->state = tcp_usb_idle;
 	_state->amount_done = 0;
 
-	int flags = fcntl(fd, F_GETFL, 0);
-	fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+	if (!qemu_set_blocking(fd, false, NULL)) {
+        close(fd);
+        _state->socket = -1;
+        _state->closed = 1;
+        return -1;
+    }
 	/* Read-only to start; the write handler is armed on demand (see the note on
 	 * tcp_usb_callback) only while a write is pending, or the loop spins. */
 	qemu_set_fd_handler(fd, tcp_usb_read_callback, NULL, _state);

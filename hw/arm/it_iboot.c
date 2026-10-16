@@ -3,6 +3,7 @@
  * themselves. See include/hw/arm/it_iboot.h.
  */
 #include "qemu/osdep.h"
+#include "windows-memory.c.inc"
 #include "hw/arm/it_iboot.h"
 
 static uint16_t iboot_u16(const uint8_t *p)

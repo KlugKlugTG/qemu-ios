@@ -157,5 +157,11 @@ if ipod_avcodec.found() and ipod_avutil.found()
     dependencies: [ipod_avcodec, ipod_avutil], compile_args: ['-DIT_HAVE_AVCODEC']))
 endif
 
+
+# The iOS AES/PKE models call OpenSSL directly, independent of QEMU's cipher backend.
+if host_os == 'windows'
+  arm_ss.add(when: 'CONFIG_IPOD_TOUCH_2G', if_true: dependency('libcrypto'))
+endif
+
 hw_arch += {'arm': arm_ss}
 hw_common_arch += {'arm': arm_common_ss}

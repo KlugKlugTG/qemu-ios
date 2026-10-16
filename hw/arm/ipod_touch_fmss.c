@@ -6,7 +6,6 @@
 #include "qemu/error-report.h"
 #include "system/runstate.h"
 #include "system/address-spaces.h"
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include "trace.h"
 #include "hw/trace-printf.h"
@@ -663,15 +662,16 @@ static void fmss_try_map_packed(IPodTouchFMSSState *s)
     if (fd < 0) {
         return;
     }
-    p = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);                        /* the mapping keeps its own reference */
-    if (p == MAP_FAILED) {
+    GMappedFile *mapping = g_mapped_file_new_from_fd(fd, FALSE, NULL);
+    close(fd);
+    if (!mapping) {
         return;
     }
 
+    p = (const uint8_t *)g_mapped_file_get_contents(mapping);
     if ((size_t)st.st_size < 24 || memcmp(p, magic, sizeof(magic)) != 0) {
         fprintf(stderr, "[fmss] %s is not a packed NAND image\n", s->nand_path);
-        munmap((void *)p, st.st_size);
+        g_mapped_file_unref(mapping);
         return;
     }
 
@@ -681,7 +681,7 @@ static void fmss_try_map_packed(IPodTouchFMSSState *s)
         fprintf(stderr, "[fmss] %s has %u+%u byte pages, expected %u+%u\n",
                 s->nand_path, page_size, spare_size,
                 NAND_BYTES_PER_PAGE, NAND_BYTES_PER_SPARE);
-        munmap((void *)p, st.st_size);
+        g_mapped_file_unref(mapping);
         return;
     }
 
@@ -701,10 +701,11 @@ static void fmss_try_map_packed(IPodTouchFMSSState *s)
         fprintf(stderr, "[fmss] packed NAND %s is truncated (index wants %zu of "
                 "%zu bytes); ignoring it\n", s->nand_path, index_bytes,
                 (size_t)st.st_size - 24);
-        munmap(p, st.st_size);
+        g_mapped_file_unref(mapping);
         return;
     }
 
+    s->packed_mapping = mapping;
     s->packed = p;
     s->packed_size = st.st_size;
     s->packed_index = (const uint32_t *)(p + 24);
@@ -1661,6 +1662,7 @@ static void ipod_touch_fmss_finalize(Object *obj)
 {
     IPodTouchFMSSState *s = IPOD_TOUCH_FMSS(obj);
 
+    g_clear_pointer(&s->packed_mapping, g_mapped_file_unref);
     timer_free(s->completion_timer);
     g_free(s->page_buffer);
     g_free(s->page_spare_buffer);
