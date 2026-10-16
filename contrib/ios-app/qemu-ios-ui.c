@@ -27,7 +27,7 @@
 #include "ui/input.h"
 #include "qapi/error.h"
 #include "hw/arm/ipod_touch_buttons.h"
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
 #include "hw/arm/ipod_touch_multitouch.h"
 #endif
 #include "hw/core/boards.h"
@@ -71,7 +71,9 @@ static void ios_sequence_reset(void *opaque)
 #include "hw/arm/ipod_touch_pcf50633_pmu.h"
 #include "hw/arm/ipod_touch_lcd.h"
 
+#ifndef _WIN32
 #include <sys/resource.h>
+#endif
 
 #include "qapi/qapi-commands-migration.h"
 #include "qapi/qapi-commands-misc.h"
@@ -229,8 +231,7 @@ static void ios_report_first_lit_frame(const uint8_t *bgra, int w, int h)
 
     /* A handful of stray pixels is noise; a drawn screen is nothing like it. */
     if (lit * 64 > pixels / 100) {
-        struct rusage ru;
-        double cpu = 0;
+        double cpu = -1;
 
         reported = true;
 
@@ -241,14 +242,30 @@ static void ios_report_first_lit_frame(const uint8_t *bgra, int w, int h)
          * same moment. CPU seconds for identical guest work is the honest
          * measure of interpreter throughput.
          */
+#ifdef _WIN32
+        FILETIME created, exited, kernel, user;
+        if (GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) {
+            ULARGE_INTEGER system_time, user_time;
+            system_time.LowPart = kernel.dwLowDateTime;
+            system_time.HighPart = kernel.dwHighDateTime;
+            user_time.LowPart = user.dwLowDateTime;
+            user_time.HighPart = user.dwHighDateTime;
+            cpu = (system_time.QuadPart + user_time.QuadPart) / 1e7;
+        }
+#else
+        struct rusage ru;
         if (getrusage(RUSAGE_SELF, &ru) == 0) {
             cpu = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6
                 + ru.ru_stime.tv_sec + ru.ru_stime.tv_usec / 1e6;
         }
+#endif
 
-        fprintf(stderr, "[boot] first lit frame after %.1f s wall, %.1f s cpu\n",
-                (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - first_capture_ns)
-                    / 1e9, cpu);
+        double wall = (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - first_capture_ns) / 1e9;
+        if (cpu >= 0) {
+            fprintf(stderr, "[boot] first lit frame after %.1f s wall, %.1f s cpu\n", wall, cpu);
+        } else {
+            fprintf(stderr, "[boot] first lit frame after %.1f s wall, cpu unavailable\n", wall);
+        }
     }
 }
 
@@ -1277,7 +1294,7 @@ struct portable_touch_request {
 };
 static bool portable_touch_capacity(unsigned begins, unsigned ends, unsigned moves)
 {
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     Object *obj = object_resolve_path_type("", TYPE_IPOD_TOUCH_MULTITOUCH, NULL);
     return !obj || ipod_touch_multitouch_can_queue(IPOD_TOUCH_MULTITOUCH(obj), begins, ends, moves);
 #else

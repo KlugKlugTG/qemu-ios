@@ -22,6 +22,7 @@
  * kept here (8900 engine hook, TV-out workaround); the MBX is the 2G's ipodtouch.mbx.
  */
 #include "qemu/osdep.h"
+#include "windows-memory.c.inc"
 #include "hw/arm/machines-qom.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"

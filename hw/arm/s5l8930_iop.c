@@ -27,6 +27,7 @@
  * Page I/O uses QEMU BlockBackends; ownership is published after data flush.
  */
 #include "qemu/osdep.h"
+#include "windows-memory.c.inc"
 #include "qemu/timer.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -1451,7 +1452,7 @@ static BlockBackend *nand_open_backend(DeviceState *owner, const char *path,
     BlockDriverState *bs;
     uint64_t perm = BLK_PERM_CONSISTENT_READ | (writable ? BLK_PERM_WRITE : 0);
     uint64_t shared = BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE_UNCHANGED;
-    int fd = open(path, writable ? O_RDWR | O_CREAT : O_RDONLY, 0644);
+    int fd = open(path, (writable ? O_RDWR | O_CREAT : O_RDONLY) | O_BINARY, 0644);
 
     if (fd < 0 || fstat(fd, &st) < 0 ||
         (writable && st.st_size == 0 && ftruncate(fd, size) < 0)) {
@@ -1466,6 +1467,15 @@ static BlockBackend *nand_open_backend(DeviceState *owner, const char *path,
         close(fd);
         return NULL;
     }
+#ifdef _WIN32
+    /* Windows lacks directory fsync. Flush newly sized data/ownership files
+     * before any ownership bit can be published. */
+    if (writable && fsync(fd) < 0) {
+        error_setg_errno(errp, errno, "cannot sync NAND file %s", path);
+        close(fd);
+        return NULL;
+    }
+#endif
     close(fd);
     options = qdict_new();
     qdict_put_str(options, "driver", "raw");
@@ -1662,7 +1672,9 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
             if (dir) {
                 g_dir_close(dir);
             }
-            if (!empty || !g_file_set_contents(marker, expected, -1, NULL)) {
+            if (!empty || !g_file_set_contents_full(marker, expected, -1,
+                    G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE,
+                    0644, NULL)) {
                 error_setg(errp, "%s: v2 requires an empty or explicitly v2 overlay", marker);
                 return;
             }
@@ -1708,6 +1720,7 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
     }
     /* Make the fixed filenames/format marker durable before any ownership
      * can reference them. Operations never create new entries afterward. */
+#ifndef _WIN32
     const char *write_dir = s->overlay_dir ? s->overlay_dir : s->nand_dir;
     int dirfd = open(write_dir, O_RDONLY | O_DIRECTORY);
     if (dirfd < 0 || fsync(dirfd) < 0) {
@@ -1718,6 +1731,7 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
         return;
     }
     close(dirfd);
+#endif
     s->vm_state_entry = qemu_add_vm_change_state_handler(iop_vm_state, s);
 }
 

@@ -128,7 +128,24 @@ void sdl2_window_create(struct sdl2_console *scon)
 #endif
     } else {
         /* The SDL renderer is only used by sdl2-2D, when OpenGL is disabled */
+#ifdef _WIN32
+        /* This preview requires hardware GL presentation. Do not let SDL
+         * silently select its CPU renderer when a hardware driver is absent. */
+        SDL_SetHintWithPriority(SDL_HINT_RENDER_DRIVER, "opengl", SDL_HINT_OVERRIDE);
+        scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1,
+                                                 SDL_RENDERER_ACCELERATED);
+        SDL_RendererInfo info;
+        if (!scon->real_renderer ||
+            SDL_GetRendererInfo(scon->real_renderer, &info) < 0 ||
+            !(info.flags & SDL_RENDERER_ACCELERATED) ||
+            (info.flags & SDL_RENDERER_SOFTWARE)) {
+            error_report("Windows hardware OpenGL presentation unavailable: %s", SDL_GetError());
+            exit(1);
+        }
+        fprintf(stderr, "[sdl-win] accelerated renderer=%s flags=0x%x\n", info.name, info.flags);
+#else
         scon->real_renderer = SDL_CreateRenderer(scon->real_window, -1, 0);
+#endif
     }
 
     sdl_update_caption(scon);

@@ -188,7 +188,10 @@ void gles_eagl_iosurface_unlock(void);
 
 #else /* macOS: legacy CGL */
 
-#ifdef GLES_HOST_EGL
+#ifdef GLES_HOST_WGL
+#include <GL/glew.h>
+#include "gles-host-wgl.c.inc"
+#elif defined(GLES_HOST_EGL)
 #define GL_GLEXT_PROTOTYPES 1
 #include <GL/gl.h>
 #include <GL/glext.h>
@@ -203,7 +206,7 @@ void gles_eagl_iosurface_unlock(void);
 
 #endif
 
-#ifdef GLES_HOST_EGL
+#if defined(GLES_HOST_EGL) || defined(GLES_HOST_WGL)
 #include "gles-host-fence.c.inc"
 #endif
 #ifdef GLES_HOST_EGL_ES
@@ -753,6 +756,11 @@ static inline void gles_platform_frame_unlock(void)
 
 static bool gles_platform_context_create(void)
 {
+#ifdef GLES_HOST_WGL
+    if (!gles_wgl_create(gh.group ? gh.group->root : NULL, &gh.cgl)) return false;
+    if (gh.group && !gh.group->root) gh.group->root = CGLRetainContext(gh.cgl);
+    return true;
+#else
     CGLPixelFormatAttribute attrs[] = {
         kCGLPFAAccelerated,
         kCGLPFAColorSize, (CGLPixelFormatAttribute)24,
@@ -780,6 +788,7 @@ static bool gles_platform_context_create(void)
     }
     CGLSetCurrentContext(gh.cgl);
     return true;
+#endif
 }
 
 /*
@@ -4117,7 +4126,7 @@ done:
 }
 #endif
 
-#ifdef GLES_HOST_EGL
+#if defined(GLES_HOST_EGL) || defined(GLES_HOST_WGL)
 /* CoreVideo 420v video-range / 420f full-range BT.601, CPU fallback. */
 static uint8_t gles_yuv_byte(int value) { return MIN(255,MAX(0,value)); }
 static bool gles_surface_nv12(unsigned width, unsigned height, uint32_t format,

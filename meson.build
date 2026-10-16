@@ -1228,6 +1228,12 @@ cocoa = dependency('appleframeworks',
 # guest's GLES HLE probe fails cleanly.
 host_opengl = dependency('appleframeworks', modules: 'OpenGL',
                          required: false)
+# Windows keeps the existing fixed-function executor with hardware WGL.
+if host_os == 'windows'
+  host_opengl = declare_dependency(dependencies: [dependency('glew'),
+    cc.find_library('opengl32'), cc.find_library('gdi32'), cc.find_library('user32')],
+    compile_args: ['-DGLES_HOST_WGL=1'])
+endif
 angle_prefix = get_option('ltm_angle_prefix')
 if angle_prefix != ''
   if host_os != 'darwin'
