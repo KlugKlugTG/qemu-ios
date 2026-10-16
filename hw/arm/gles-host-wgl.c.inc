@@ -57,6 +57,11 @@ static bool gles_wgl_create(CGLContextObj share, CGLContextObj *out)
     if (!DescribePixelFormat(c->dc, format, sizeof(pfd), &pfd)) goto fail;
     if ((pfd.dwFlags & PFD_GENERIC_FORMAT) &&
         !(pfd.dwFlags & PFD_GENERIC_ACCELERATED)) goto fail;
+    const char *renderer = (const char *)glGetString(GL_RENDERER);
+    g_autofree char *lower = g_ascii_strdown(renderer ? renderer : "", -1);
+    if (!renderer || strstr(lower, "llvmpipe") || strstr(lower, "softpipe") ||
+        strstr(lower, "swrast") || strstr(lower, "swiftshader") ||
+        strstr(lower, "gdi generic") || strstr(lower, "microsoft basic render")) goto fail;
     while (glGetError() != GL_NO_ERROR) { }
     fprintf(stderr, "[gles-wgl] %s / %s\n", glGetString(GL_RENDERER), glGetString(GL_VERSION));
     *out = c;
