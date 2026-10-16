@@ -11,6 +11,7 @@
 #include "system/replay.h"
 #include "system/system.h"
 #include "system/runstate.h"
+#include "qapi/qapi-commands-control.h"
 #include "../ios-app/qemu-ios-ui.h"
 #include "engine.h"
 
@@ -38,9 +39,25 @@ static void progress_pc(CPUState *cpu, run_on_cpu_data data)
 
 static void progress(void *unused)
 {
+    bool confirmed = qemu_ios_ui_guest_shutdown_confirmed();
+    bool failed = qemu_ios_ui_storage_failed();
+    int state = failed ? 5 : confirmed || stop_requested ? 4 :
+                runstate_check(RUN_STATE_PAUSED) ? 3 : 2;
+    /* Shared launcher protocol; progress diagnostics alone aren't UI status. */
+    printf("status state=%d confirmed=%d storage_failed=%d\n", state, confirmed, failed);
+    fflush(stdout);
+    if (confirmed && !failed) {
+        /* Finish guest-slider shutdown too. Unlike a bare shutdown request,
+         * qmp_quit changes -no-shutdown's PAUSE action to POWEROFF. */
+        qmp_quit(NULL);
+    }
+    timer_mod(progress_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 1000);
+    /* Detailed diagnostics stay at five seconds, independent of UI status. */
+    if (++progress_id % 5 != 1) {
+        return;
+    }
     QemuIosPortableFrame frame = { .size = sizeof(frame), .version = QEMU_IOS_PORTABLE_VERSION };
     int result = qemu_ios_portable_frame_copy(NULL, 0, 0, &frame);
-    ++progress_id;
     fprintf(stderr, "[windows-progress] sample=%" PRIu64 " realtime_ms=%" PRId64
             " virtual_ms=%" PRId64 " state=%s frame_result=%d serial=%" PRIu64
             " size=%ux%u sleeping=%d confirmed=%d storage_failed=%d pc_pending=%d\n",
@@ -53,12 +70,6 @@ static void progress(void *unused)
         qatomic_set(&pc_pending, 1);
         async_run_on_cpu(first_cpu, progress_pc, RUN_ON_CPU_HOST_ULONG(progress_id));
     }
-    /* Guest -no-shutdown leaves the loop alive after PMU power-off. Quit only
-     * after that actual confirmation; no display heuristic or timer forces it. */
-    if (stop_requested && qemu_ios_ui_guest_shutdown_confirmed()) {
-        qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_QMP_QUIT);
-    }
-    timer_mod(progress_timer, qemu_clock_get_ms(QEMU_CLOCK_REALTIME) + 5000);
 }
 
 static void apply_control(void *unused)
@@ -74,7 +85,7 @@ static void apply_control(void *unused)
         qemu_ios_ui_cancel_input();
         if (qemu_ios_ui_guest_shutdown_confirmed()) {
             stop_requested = true;
-            qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_QMP_QUIT);
+            qmp_quit(NULL);
             return;
         }
         if (!runstate_is_running()) vm_start();
@@ -123,6 +134,8 @@ static void *main_loop(void *unused)
     qemu_bh_delete(control_bh);
     control_bh = NULL;
     qemu_cleanup(loop_exit);
+    /* Include failures latched while cleanup drains writable storage. */
+    storage_failed |= qemu_ios_ui_storage_failed();
     bql_unlock();
     replay_mutex_unlock();
     if (owns_rcu) rcu_unregister_thread();
