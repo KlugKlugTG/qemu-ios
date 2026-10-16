@@ -26,11 +26,11 @@ int main(int argc, char **argv)
 {
     char base[4096], copy[4096], hard[4096], alias[4096], missing[4096];
     assert(argc == 2);
-    assert(snprintf(base, sizeof(base), "%s/base.bin", argv[1]) < sizeof(base));
-    assert(snprintf(copy, sizeof(copy), "%s/copy.bin", argv[1]) < sizeof(copy));
-    assert(snprintf(hard, sizeof(hard), "%s/hard.bin", argv[1]) < sizeof(hard));
-    assert(snprintf(alias, sizeof(alias), "%s/./base.bin", argv[1]) < sizeof(alias));
-    assert(snprintf(missing, sizeof(missing), "%s/absent.bin", argv[1]) < sizeof(missing));
+    assert(snprintf(base, sizeof(base), "%s/base.bin", argv[1]) < (int)sizeof(base));
+    assert(snprintf(copy, sizeof(copy), "%s/copy.bin", argv[1]) < (int)sizeof(copy));
+    assert(snprintf(hard, sizeof(hard), "%s/hard.bin", argv[1]) < (int)sizeof(hard));
+    assert(snprintf(alias, sizeof(alias), "%s/./base.bin", argv[1]) < (int)sizeof(alias));
+    assert(snprintf(missing, sizeof(missing), "%s/absent.bin", argv[1]) < (int)sizeof(missing));
     FILE *f = fopen(base, "wb");
     assert(f);
     assert(fwrite("synthetic immutable NOR", 1, 23, f) == 23);
@@ -59,7 +59,7 @@ int main(int argc, char **argv)
     printf("CRT stat: base inode=%llu copy inode=%llu; identities remain distinct\n",
            (unsigned long long)a.st_ino, (unsigned long long)b.st_ino);
     char case_alias[4096];
-    assert(snprintf(case_alias, sizeof(case_alias), "%s/BASE.BIN", argv[1]) < sizeof(case_alias));
+    assert(snprintf(case_alias, sizeof(case_alias), "%s/BASE.BIN", argv[1]) < (int)sizeof(case_alias));
     if (GetFileAttributesA(case_alias) != INVALID_FILE_ATTRIBUTES) {
         check(base, case_alias, true);
     } else {
@@ -67,7 +67,7 @@ int main(int argc, char **argv)
     }
     /* UTF-8 paths must reach the same actual Unicode Windows filename. */
     char unicode[4096];
-    assert(snprintf(unicode, sizeof(unicode), "%s/\xc3\xa9-NOR.bin", argv[1]) < sizeof(unicode));
+    assert(snprintf(unicode, sizeof(unicode), "%s/\xc3\xa9-NOR.bin", argv[1]) < (int)sizeof(unicode));
     wchar_t wide[4096];
     assert(MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
                               unicode, -1, wide, 4096));
@@ -83,7 +83,7 @@ int main(int argc, char **argv)
 #else
     assert(link(base, hard) == 0);
     char symbolic[4096];
-    assert(snprintf(symbolic, sizeof(symbolic), "%s/symbolic.bin", argv[1]) < sizeof(symbolic));
+    assert(snprintf(symbolic, sizeof(symbolic), "%s/symbolic.bin", argv[1]) < (int)sizeof(symbolic));
     assert(symlink(base, symbolic) == 0);
     check(base, symbolic, true);
     assert(unlink(symbolic) == 0);
