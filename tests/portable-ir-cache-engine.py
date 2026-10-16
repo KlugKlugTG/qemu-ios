@@ -128,6 +128,27 @@ def proc_identity(pid):
             'hostBootId': Path('/proc/sys/kernel/random/boot_id').read_text().strip()}
 
 
+def run_until_target(qmp, observe, *, clock=time.monotonic, sleep=time.sleep):
+    """Observe normal execution completion, allowing first-use initialization.
+
+    A short fixed run can stop during the mapped-engine identity hash before
+    the first instruction executes. Each observation stops ordinary execution;
+    it does not single-step, install breakpoints, or change TB eligibility.
+    """
+    deadline = clock() + 3
+    observations = []
+    while clock() < deadline:
+        qmp.command('cont')
+        sleep(.04)
+        qmp.command('stop')
+        state = observe()
+        observations.append(state)
+        if state['pc'] == 0x2000:
+            return state, observations
+    raise TimeoutError('Normal execution did not reach target loop: ' +
+                       str(observations))
+
+
 def trial(qemu, expected_hash, output, cache, *, enabled, mode=0x13,
           subtract=False):
     if digest(qemu) != expected_hash:
@@ -173,21 +194,21 @@ def trial(qemu, expected_hash, output, cache, *, enabled, mode=0x13,
                 gdb.set(15, 0x1000)
                 gdb.write(0x3000, b'\0' * 4)
                 begin = time.monotonic_ns()
-                qmp.command('cont')
-                time.sleep(.04)
-                qmp.command('stop')
-                stopped = time.monotonic_ns()
                 # Read only after QMP stop; no single-step or breakpoint cflags.
-                state = {'r0': gdb.get(0), 'r1': gdb.get(1), 'r2': gdb.get(2),
-                         'pc': gdb.get(15), 'cpsr': gdb.get(25),
-                         'ram': int.from_bytes(gdb.read(0x3000, 4), 'little')}
+                def observe():
+                    return {'r0': gdb.get(0), 'r1': gdb.get(1), 'r2': gdb.get(2),
+                            'pc': gdb.get(15), 'cpsr': gdb.get(25),
+                            'ram': int.from_bytes(gdb.read(0x3000, 4), 'little')}
+                state, observations = run_until_target(qmp, observe)
+                stopped = time.monotonic_ns()
                 expected = (seed - 7 if subtract else seed + 7) & 0xffffffff
                 if state != {'r0': expected, 'r1': 7, 'r2': 0x3000, 'pc': 0x2000,
                              'cpsr': mode, 'ram': expected}:
                     raise RuntimeError('Actual generated-code state differs: ' + str(state))
                 result['cases'].append({'seed': seed, 'actual': state,
+                    'stoppedObservations': observations,
                     'continueBeginNS': begin, 'stoppedNS': stopped,
-                    'limits': 'Fixed execution window includes deliberate sleep/debug transport; not a speed metric.'})
+                    'limits': 'Completion polling includes startup/sleep/debug transport; not a speed metric.'})
             qmp.command('quit')
             exit_code = process.wait(timeout=3)
             if exit_code:

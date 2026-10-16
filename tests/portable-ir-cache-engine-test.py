@@ -42,5 +42,22 @@ class Tests(unittest.TestCase):
         branch=0x1010+8+((words[4]&0xffffff)<<2)
         self.assertEqual(branch,0x2000)
         self.assertEqual(struct.unpack('<5I',m.words(True))[1],0xe0400001)
+    def test_delayed_first_execution_is_observed_without_stepping(self):
+        class QMP:
+            def __init__(self):self.commands=[]
+            def command(self,name):self.commands.append(name)
+        q=QMP();now=[0];states=iter([{'pc':0x1000},{'pc':0x1000},{'pc':0x2000}])
+        def sleep(delay):now[0]+=delay
+        actual,observed=m.run_until_target(q,lambda:next(states),clock=lambda:now[0],sleep=sleep)
+        self.assertEqual(actual['pc'],0x2000)
+        self.assertEqual(len(observed),3)
+        self.assertEqual(q.commands,['cont','stop']*3)
+    def test_unexecuted_guest_cannot_pass(self):
+        class QMP:
+            def command(self,name):pass
+        now=[0]
+        def sleep(delay):now[0]+=1
+        with self.assertRaisesRegex(TimeoutError,'did not reach target'):
+            m.run_until_target(QMP(),lambda:{'pc':0x1000},clock=lambda:now[0],sleep=sleep)
 
 if __name__=='__main__':unittest.main()
