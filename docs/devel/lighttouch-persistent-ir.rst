@@ -110,8 +110,10 @@ and changed guest instruction bytes, with actual registers and RAM checked.
 Default invocation is plan-only; execution needs ``--execute``. Controller
 contract checks are ``python3 tests/portable-ir-cache-engine-test.py``.
 
-This is an additional real generated-code correctness step. Its fixed execution
-window includes deliberate sleep/debug transport and cannot rank performance.
+This is an additional real generated-code correctness step. Bounded normal
+execution polls for the target loop, allowing first-use engine hashing before
+the first instruction runs. Observations include startup, sleep and debug
+transport and cannot rank performance.
 It does not boot iOS or qualify a frontend, Android, real workload coverage,
 audio/input, persistence or a practical reduction in first-action latency.
 
