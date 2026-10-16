@@ -270,7 +270,8 @@ typedef struct IPodTouchMultitouchState {
     /*
      * next_frame reports a contact starting or ending. The slot holds one frame and a newer one used to replace it
      * unread, so a quick tap (press and release before the guest's next read) reached the guest as a lone
-     * TOUCH_ENDED. Such a frame is kept until the guest takes it; the frame due meanwhile is owed and goes out then.
+     * TOUCH_ENDED. Such a frame is kept until the guest takes it; the frame due meanwhile is owed and goes out a report
+     * period later.
      */
     bool next_frame_changes;
     bool frame_owed;

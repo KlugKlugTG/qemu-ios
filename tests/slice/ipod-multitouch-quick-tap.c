@@ -1,9 +1,11 @@
 /* A tap released before the guest's next read still reaches it as TOUCH_START, then TOUCH_ENDED, then the end of the
  * gesture. The pending-frame slot holds one frame; a newer frame used to replace it unread, so a press and release
  * between two reads (a Mac trackpad's tap to click) arrived as a lone TOUCH_ENDED and iOS 6's status bar never
- * scrolled to the top. Pure motion frames still replace each other.
+ * scrolled to the top. Pure motion frames still replace each other, and a report whose frame is kept back still raises
+ * ATN (qtest ipod-touch-irq-test masked-atn: an edge acked while masked is followed by the next report's).
  *
- * Mutation (named, must fail this test): drop mt_emit_frame's "pending frame starts or ends a contact" early return.
+ * Mutations (named, each must fail this test): drop mt_emit_frame's "pending frame starts or ends a contact" early
+ * return; drop the inform_frame_ready call in it.
  *
  * SLICE:wire include/hw/arm/ipod_touch_multitouch.h range #define MT_INTERFACE_VERSION | typedef struct IPodTouchMultitouchState
  * SLICE hw/arm/ipod_touch_multitouch.c fn mt_frame_period_ns mt_any_down mt_any_active mt_emit_frame mt_cancel_pending_end
@@ -37,7 +39,8 @@ typedef struct {
     int64_t last_motion_ns;
     uint32_t report_hz;
 } IPodTouchMultitouchState;
-static void ipod_touch_multitouch_inform_frame_ready(IPodTouchMultitouchState *s) {}
+static int atn;   /* ATN pulses: one per report, the frame new or kept */
+static void ipod_touch_multitouch_inform_frame_ready(IPodTouchMultitouchState *s) { atn++; }
 /* A frame is the finger events it carries: S start, M moved, E ended, F the gesture's end. */
 static MTFrame *mt_build_frame(IPodTouchMultitouchState *s, MTFingerState *fingers, uint32_t *len)
 {
@@ -81,6 +84,7 @@ static void reset(void)
     s.report_hz = 60;
     touch.at = end.at = -1;
     got[0] = 0;
+    atn = 0;
     now = 1000000000;
 }
 
@@ -92,7 +96,8 @@ int main(void)
     ipod_touch_multitouch_set_finger(&s, 0, .5f, .98f, false);
     assert(!s.touch_down);                         /* the pointer path's next press is a press */
     guest_reads_at(now + 1000000);                 /* the start */
-    guest_reads_at(now + 1000000);                 /* the owed end, out as soon as the start was read */
+    guest_reads_at(now + 1000000);                 /* nothing yet: the owed end waits a report period */
+    guest_reads_at(now + 20000000);                /* the end */
     guest_reads_at(now + 200000000);               /* the gesture's end */
     guest_reads_at(now + 200000000);
     printf("quick tap: %s\n", got);
@@ -121,5 +126,26 @@ int main(void)
     printf("drag: %s\n", got);
     assert(!strcmp(got, "S M "));
     assert(s.fingers[0].y == .3f);
+    /* A guest that misses the end's ATN still gets another: the gesture-end report, kept back, raises it again. */
+    reset();
+    ipod_touch_multitouch_set_finger(&s, 0, .5f, .5f, true);
+    guest_reads_at(now + 1000000);
+    ipod_touch_multitouch_set_finger(&s, 0, .5f, .5f, false);
+    int before = atn;
+    now += 200000000;
+    guest_reads_at(now);                           /* the end, read only after the 100 ms gesture-end report */
+    assert(atn == before + 1);                     /* the kept-back gesture-end report pulsed it again */
+    guest_reads_at(now + 200000000);
+    printf("missed ATN: %s\n", got);
+    assert(!strcmp(got, "S E F "));
+
+    /* A held finger whose start the guest has not read (ATN acked while masked) still raises ATN every report. */
+    reset();
+    ipod_touch_multitouch_set_finger(&s, 0, .5f, .5f, true);
+    before = atn;
+    now += 20000000;
+    touch.at = -1;
+    touch_timer_tick(&s);
+    assert(atn == before + 1);
     puts("PASS: a tap released before the guest's read arrives whole (start, end, gesture end); motion still coalesces");
 }

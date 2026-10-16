@@ -1054,11 +1054,13 @@ static void mt_emit_frame(IPodTouchMultitouchState *s)
      * press and release between two reads arrived as a lone TOUCH_ENDED, which iOS 6's status bar ignores, so a
      * trackpad's tap to click on it never scrolled to the top). Keep it; this frame goes out when the guest takes it.
      * touch_down still follows slot 0 now, as the pointer path's edge detection needs. A second press before that
-     * read still folds the owed lift into it (two taps inside one report period).
+     * read still folds the owed lift into it (two taps inside one report period). The report still raises ATN, as
+     * every report does: a guest that acked an edge while masked must see the next one, or it never reads at all.
      */
     if (s->next_frame && s->next_frame_changes) {
         s->frame_owed = true;
         s->touch_down = (s->fingers[0].phase == MT_FINGER_DOWN);
+        ipod_touch_multitouch_inform_frame_ready(s);
         return;
     }
     s->next_frame_changes = false;
@@ -1278,7 +1280,8 @@ void ipod_touch_multitouch_frame_taken(IPodTouchMultitouchState *s)
     s->next_frame_changes = false;
     if (s->frame_owed) {
         s->frame_owed = false;
-        timer_mod(s->touch_end_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+        /* At the next report, as the panel would: not while the guest is still reading this one. */
+        timer_mod(s->touch_end_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns(s));
     }
 }
 
