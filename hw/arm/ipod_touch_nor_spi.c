@@ -8,6 +8,7 @@
 #include "system/block-backend.h"
 #include "system/runstate.h"
 #include "qobject/qdict.h"
+#include "qemu/file-identity.h"
 
 #include <zlib.h>
 
@@ -113,7 +114,7 @@ static void initialize_nor(IPodTouchNORSPIState *s)
 
 void ipod_touch_nor_spi_open_overlay(IPodTouchNORSPIState *s, const char *path, Error **errp)
 {
-    struct stat base, writable;
+    struct stat writable;
     if (stat(path, &writable) < 0) {
         error_setg_errno(errp, errno, "writable NOR copy must exist");
         return;
@@ -121,11 +122,20 @@ void ipod_touch_nor_spi_open_overlay(IPodTouchNORSPIState *s, const char *path, 
     /* A base nor= is optional (ipad1 ships a blank effaceable NOR); when present
      * the writable copy must be a separate file, never the read-only base. */
     if (s->nor_path) {
-        if (stat(s->nor_path, &base) < 0) {
-            error_setg_errno(errp, errno, "base NOR image must exist");
+        bool same;
+        unsigned long identity_error = qemu_file_paths_equal(s->nor_path, path,
+                                                            &same);
+        if (identity_error) {
+#ifdef _WIN32
+            error_setg_win32(errp, identity_error,
+                             "Could not verify base/writable NOR file identities");
+#else
+            error_setg_errno(errp, identity_error,
+                             "Could not verify base/writable NOR file identities");
+#endif
             return;
         }
-        if (base.st_dev == writable.st_dev && base.st_ino == writable.st_ino) {
+        if (same) {
             error_setg(errp, "nor-rw must be a private copy, not the base NOR image");
             return;
         }
