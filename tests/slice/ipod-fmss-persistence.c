@@ -17,6 +17,10 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef _WIN32
+#include <io.h>
+#define fsync _commit
+#endif
 #define NAND_BYTES_PER_PAGE 4096
 #define NAND_BYTES_PER_SPARE 64
 #define NAND_PAGES_PER_BLOCK 128
@@ -96,7 +100,7 @@ static int test_fflush(FILE *f) { return fail("flush") ? -1 : fflush(f); }
 static int test_fsync(int fd) { return fail("sync") ? -1 : fsync(fd); }
 static int test_fclose(FILE *f) { int r = fclose(f); return fail("close") ? -1 : r; }
 static int test_rename(const char *a, const char *b)
-{ return fail("rename") ? -1 : rename(a, b); }
+{ return fail("rename") ? -1 : g_rename(a, b); }
 static int test_remove(const char *p) { return fail("remove") ? -1 : remove(p); }
 static int test_mkdir(const char *p, int mode)
 { return fail("mkdir") ? -1 : g_mkdir_with_parents(p, mode); }
@@ -105,7 +109,8 @@ static int test_mkdir(const char *p, int mode)
 #define fflush test_fflush
 #define fsync test_fsync
 #define fclose test_fclose
-#define rename test_rename
+#undef g_rename
+#define g_rename test_rename
 #define remove test_remove
 #define g_mkdir_with_parents test_mkdir
 #include "slice.h"
@@ -117,7 +122,7 @@ static void run_case(const char *op, int at, bool erase, bool physical)
     static int count;
     char dir[64], old_path[128];
     snprintf(dir, sizeof(dir), "case%d", count++);
-    assert(mkdir(dir, 0700) == 0);
+    assert(g_mkdir(dir, 0700) == 0);
     IPodTouchFMSSState s = { .nand_overlay = dir, .reg_cs_buf_addr = 16,
         .reg_pages_out_addr = 64, .reg_page_spare_out_addr = 80 };
     s.overlay_pages = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -168,6 +173,17 @@ static void run_case(const char *op, int at, bool erase, bool physical)
         assert(stat(old_path, &st) == 0 && st.st_size == 4160);
         assert(g_hash_table_contains(s.overlay_pages, fmss_block_key(physical ? 0 : 1,
                                                                     physical ? 128 : 2)));
+        /* The same physical NAND page is legitimately programmed again.
+         * On Windows, raw CRT rename would fail EEXIST on this replacement. */
+        uint8_t replacement[4096], spare[64] = { 0 };
+        memset(replacement, 0x5a, sizeof(replacement));
+        assert(fmss_store_page(&s, physical ? 0 : 1,
+                               physical ? 128 : 2, replacement, spare));
+        f = fopen(old_path, "rb");
+        uint8_t readback[4160];
+        assert(f && fread(readback, 1, sizeof(readback), f) == sizeof(readback));
+        assert(fclose(f) == 0 && readback[0] == 0x5a && readback[4095] == 0x5a);
+        assert(!stops && !ipod_touch_fmss_io_failed());
     }
     if (s.phys_pages) g_tree_destroy(s.phys_pages);
     if (s.erased_blocks) g_tree_destroy(s.erased_blocks);
@@ -227,5 +243,5 @@ int main(void)
     run_case(NULL, 1, false, false);
     run_case("rename", 1, false, false);
     run_bulk();
-    puts("FMSS persistence: 18 fault cases, 1024-page bulk write and DMA bounds passed");
+    puts("FMSS persistence: 18 fault cases, repeated page replacement, 1024-page bulk write and DMA bounds passed");
 }
