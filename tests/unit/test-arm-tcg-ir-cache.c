@@ -158,12 +158,12 @@ static void roundtrip_relocation(void)
     TranslationBlock old_tb = new_tb(), new_tb_value = new_tb();
     IRBlock *original = fixture();
     replay_ir(original, &old_tb);
-    IRBlock *captured = capture_ir(&old_tb, code);
+    IRBlock *captured = capture_ir(&old_tb, 0x1000, code);
     g_assert_nonnull(captured);
     GBytes *bytes = encode_ir(captured);
     TCGContext *fresh = new_context();
     g_assert_true(old != fresh);
-    IRBlock *parsed = decode_ir(bytes, fresh->nb_globals, 512, 1024, 0x1000);
+    IRBlock *parsed = decode_ir(bytes, fresh->nb_globals, 512, 1024, 0x1000, 0);
     g_assert_nonnull(parsed);
     replay_ir(parsed, &new_tb_value);
     for (unsigned i = 0; i < 100; i++) {
@@ -188,7 +188,7 @@ static void malformed_ir(void)
 {
     TCGContext *s = new_context();
     IRBlock *b = fixture();
-    for (unsigned mutation = 0; mutation < 18; mutation++) {
+    for (unsigned mutation = 0; mutation < 20; mutation++) {
         IRBlock *bad = g_memdup(b, sizeof(*b));
         switch (mutation) {
         case 0: bad->globals++; break;
@@ -209,6 +209,8 @@ static void malformed_ir(void)
         case 15: bad->op[0].args[2] = UINT64_C(0x7fffffffffffffff); break;
         case 16: bad->op[2].args[0]++; break;
         case 17: bad->op[5].args[0] = 2; break;
+        case 18: bad->pc_relative = 1; break;
+        case 19: bad->pc_relative = 2; break;
         }
         /* Encoder bounds intentionally rely on a locally captured valid
          * object; malformed count fields are patched after valid encoding. */
@@ -219,11 +221,11 @@ static void malformed_ir(void)
             uint64_t v = GUINT64_TO_LE(mutation == 1 ? bad->temps : bad->labels);
             memcpy(copy + (mutation == 1 ? 16 : 24), &v, 8);
             GBytes *bytes = g_bytes_new_take(copy, len);
-            g_assert_null(decode_ir(bytes, 2, 512, 1024, 0x1000));
+            g_assert_null(decode_ir(bytes, 2, 512, 1024, 0x1000, 0));
             g_bytes_unref(bytes); g_bytes_unref(good);
         } else {
             GBytes *bytes = encode_ir(bad);
-            g_assert_null(decode_ir(bytes, 2, 512, 1024, 0x1000));
+            g_assert_null(decode_ir(bytes, 2, 512, 1024, 0x1000, 0));
             g_bytes_unref(bytes);
         }
         g_free(bad);
@@ -234,7 +236,7 @@ static void malformed_ir(void)
     size_t len; const uint8_t *p = g_bytes_get_data(bytes, &len);
     for (size_t cut = 0; cut < len; cut++) {
         GBytes *shortened = g_bytes_new(p, cut);
-        g_assert_null(decode_ir(shortened, 2, 512, 1024, 0x1000));
+        g_assert_null(decode_ir(shortened, 2, 512, 1024, 0x1000, 0));
         g_bytes_unref(shortened);
     }
     g_bytes_unref(bytes); g_free(b); g_free(s);
@@ -259,6 +261,7 @@ static void current_context_key(void)
     DIFFERENT(tb.flags ^= 2, tb.flags ^= 2);
     DIFFERENT(tb.cs_base ^= 1, tb.cs_base ^= 1);
     DIFFERENT(tb.cflags ^= CF_NOIRQ, tb.cflags ^= CF_NOIRQ);
+    DIFFERENT(tb.cflags ^= CF_PCREL, tb.cflags ^= CF_PCREL);
     DIFFERENT(cpu->env.features ^= 1, cpu->env.features ^= 1);
     DIFFERENT(cpu->isar.idregs[0] ^= 1, cpu->isar.idregs[0] ^= 1);
     DIFFERENT(cpu->idle_loop_pc ^= 4, cpu->idle_loop_pc ^= 4);
@@ -281,6 +284,63 @@ static void current_context_key(void)
     g_free(cpu); g_free(s);
 }
 
+static void pc_relative_metadata(void)
+{
+    /* System ARM TCG always selects CF_PCREL and does not initialize tb->pc.
+     * Use a nonzero in-page PC, poison both TB PC fields, retain the actual
+     * page-offset markers, and bind exits/labels to a separate context/TB. */
+    const vaddr pc = 0x1034;
+    TCGContext *old = new_context();
+    TranslationBlock old_tb = new_tb(), fresh_tb = new_tb();
+    old_tb.cflags = fresh_tb.cflags = CF_PCREL;
+    old_tb.pc = fresh_tb.pc = UINT64_MAX;
+    IRBlock *b = fixture();
+    b->pc_relative = 1;
+    b->op[2].args[0] = 0x34;
+    b->op[4].args[0] = 0x38;
+    b->op[6].args[0] = 0x3c;
+    replay_ir(b, &old_tb);
+    IRBlock *captured = capture_ir(&old_tb, pc, code);
+    g_assert_nonnull(captured);
+    GBytes *bytes = encode_ir(captured);
+    TCGContext *fresh = new_context();
+    IRBlock *parsed = decode_ir(bytes, fresh->nb_globals, 512, 1024 - 0x34,
+                                pc, CF_PCREL);
+    g_assert_nonnull(parsed);
+    g_assert_null(decode_ir(bytes, 2, 512, 1024, pc, 0));
+    g_assert_null(decode_ir(bytes, 2, 512, 1024, pc + 4, CF_PCREL));
+    g_assert_null(decode_ir(bytes, 2, 512, 8, pc, CF_PCREL));
+    replay_ir(parsed, &fresh_tb);
+    unsigned starts = 0;
+    TCGOp *op;
+    QTAILQ_FOREACH(op, &fresh->ops, link) {
+        if (op->opc == INDEX_op_insn_start) {
+            g_assert_cmphex(op->args[0], ==, 0x34 + starts * 4);
+            /* The exact marker consumed by arm_restore_state_to_opc works
+             * for the original mapping and for a physical-page alias. */
+            g_assert_cmphex((0x1000 & TARGET_PAGE_MASK) | op->args[0], ==,
+                            pc + starts * 4);
+            g_assert_cmphex((0x80001000 & TARGET_PAGE_MASK) | op->args[0], ==,
+                            0x80001034 + starts * 4);
+            starts++;
+        }
+    }
+    g_assert_cmpuint(starts, ==, 3);
+    uint32_t r0 = 99;
+    g_assert_cmphex(run_fixture(0, &r0), ==, (uintptr_t)&fresh_tb);
+    g_assert_cmpuint(r0, ==, 3);
+    r0 = 99;
+    g_assert_cmphex(run_fixture(-1, &r0), ==,
+                    (uintptr_t)&fresh_tb + TB_EXIT_REQUESTED);
+    g_assert_cmpuint(r0, ==, 99);
+    b->op[2].args[0] = pc; /* Absolute PC is invalid in a PC-relative record. */
+    GBytes *bad = encode_ir(b);
+    g_assert_null(decode_ir(bad, 2, 512, 1024, pc, CF_PCREL));
+    g_bytes_unref(bad);
+    g_bytes_unref(bytes); g_free(parsed); g_free(captured); g_free(b);
+    g_free(fresh); g_free(old);
+}
+
 static void reject_pointer_and_helper(void)
 {
     TCGContext *s = new_context();
@@ -289,11 +349,11 @@ static void reject_pointer_and_helper(void)
     replay_ir(b, &tb);
     s->temps[2].type = s->temps[2].base_type = TCG_TYPE_I64;
     s->temps[2].val = (intptr_t)&tb;
-    g_assert_null(capture_ir(&tb, code));
+    g_assert_null(capture_ir(&tb, 0x1000, code));
     s->temps[2].type = s->temps[2].base_type = TCG_TYPE_I32;
     s->temps[2].val = 1;
     tcg_emit_op(INDEX_op_call, 4);
-    g_assert_null(capture_ir(&tb, code));
+    g_assert_null(capture_ir(&tb, 0x1000, code));
     g_free(b); g_free(s);
     uint8_t cpreg[] = { 0x10, 0x0f, 0x11, 0xee };
     g_assert_false(supported_instructions(cpreg, sizeof(cpreg)));
@@ -310,16 +370,23 @@ int main(int argc, char **argv)
         TCGContext *s = new_context();
         ARMCPU *cpu = g_new0(ARMCPU, 1);
         TranslationBlock tb = new_tb();
+        const vaddr pc = 0x1034;
+        tb.cflags = CF_PCREL;
+        tb.pc = UINT64_MAX; /* Not supplied by tb_gen_code for CF_PCREL. */
         uint8_t page[1024] = { 0 };
         ARMTcgIRCacheKey key;
-        memcpy(page, code, sizeof(code));
-        bool hit = arm_tcg_ir_cache_load(CPU(cpu), &tb, 512, tb.pc, page, &key);
+        memcpy(page + 0x34, code, sizeof(code));
+        bool hit = arm_tcg_ir_cache_load(CPU(cpu), &tb, 512, pc, page + 0x34, &key);
         if (!strcmp(argv[1], "--produce-ir")) {
             g_assert_false(hit);
             g_assert_true(key.eligible);
             IRBlock *b = fixture();
+            b->pc_relative = 1;
+            b->op[2].args[0] = 0x34;
+            b->op[4].args[0] = 0x38;
+            b->op[6].args[0] = 0x3c;
             replay_ir(b, &tb);
-            arm_tcg_ir_cache_save(CPU(cpu), &tb, tb.pc, page, &key);
+            arm_tcg_ir_cache_save(CPU(cpu), &tb, pc, page + 0x34, &key);
             g_assert_cmpuint(stored, ==, 1);
             g_free(b);
         } else {
@@ -346,6 +413,7 @@ int main(int argc, char **argv)
     g_test_add_func("/arm-ir/relocation-and-interrupts", roundtrip_relocation);
     g_test_add_func("/arm-ir/adversarial-and-all-truncations", malformed_ir);
     g_test_add_func("/arm-ir/current-bytes-build-context", current_context_key);
+    g_test_add_func("/arm-ir/pc-relative-offsets-and-current-tb", pc_relative_metadata);
     g_test_add_func("/arm-ir/reject-pointers-helpers", reject_pointer_and_helper);
     int result = g_test_run();
     g_ptr_array_unref(allocations);

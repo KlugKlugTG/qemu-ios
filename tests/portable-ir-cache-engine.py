@@ -20,6 +20,8 @@ import tempfile
 import time
 
 COUNTERS = re.compile(r'^LightTouch TCG IR cache: hits=(\d+) misses=(\d+) rejected=(\d+) stored=(\d+); frontend IR only, fresh native code$', re.M)
+CODE_PC = 0x1034
+TARGET_PC = 0x1200  # Same code page: normal direct TB chaining is exercised.
 
 
 def digest(path):
@@ -40,10 +42,11 @@ def counters(log):
 
 
 def words(subtract=False):
-    # MOV r1,#7; ADD/SUB r0,r0,r1; MOV r2,#0x3000; STR r0,[r2]; B0x2000.
+    # MOV r1,#7; ADD/SUB r0,r0,r1; MOV r2,#0x3000; STR r0,[r2]; B target.
+    branch = 0xea000000 | ((TARGET_PC - (CODE_PC + 16 + 8)) >> 2)
     return struct.pack('<5I', 0xe3a01007,
                        0xe0400001 if subtract else 0xe0800001,
-                       0xe3a02a03, 0xe5820000, 0xea0003fa)
+                       0xe3a02a03, 0xe5820000, branch)
 
 
 class GDB:
@@ -143,20 +146,21 @@ def run_until_target(qmp, observe, *, clock=time.monotonic, sleep=time.sleep):
         qmp.command('stop')
         state = observe()
         observations.append(state)
-        if state['pc'] == 0x2000:
+        if state['pc'] == TARGET_PC:
             return state, observations
     raise TimeoutError('Normal execution did not reach target loop: ' +
                        str(observations))
 
 
 def trial(qemu, expected_hash, output, cache, *, enabled, mode=0x13,
-          subtract=False):
+          subtract=False, self_modify=False):
     if digest(qemu) != expected_hash:
         raise RuntimeError('Engine identity changed')
     output.mkdir(mode=0o700, exist_ok=False)
     started = time.monotonic()
     result = {'scope': 'REAL_TCG_ASSET_FREE_CORRECTNESS_ONLY', 'engineSHA256': expected_hash,
-              'enabled': enabled, 'cpuMode': mode, 'subtract': subtract, 'cases': []}
+              'enabled': enabled, 'cpuMode': mode, 'subtract': subtract,
+              'selfModify': self_modify, 'cases': []}
     process = qmp = gdb = None
     with tempfile.TemporaryDirectory(prefix='ltir-') as temporary, (output / 'engine.log').open('wb') as log:
         root = Path(temporary)
@@ -184,14 +188,19 @@ def trial(qemu, expected_hash, output, cache, *, enabled, mode=0x13,
                     raise TimeoutError('Debug socket deadline')
                 time.sleep(.01)
             qmp, gdb = QMP(qpath), GDB(gpath)
-            gdb.write(0x1000, words(subtract))
-            gdb.write(0x2000, struct.pack('<I', 0xeafffffe))
+            gdb.write(CODE_PC, words(subtract))
+            gdb.write(TARGET_PC, struct.pack('<I', 0xeafffffe))
             for seed in (19, 111):
                 if time.monotonic() - started > 12:
                     raise TimeoutError('Trial deadline')
+                if self_modify and seed == 111:
+                    # The first execution's translated block must be invalidated
+                    # by the ordinary debug-memory write before a cached replay.
+                    subtract = True
+                    gdb.write(CODE_PC, words(subtract))
                 gdb.set(25, mode)
                 gdb.set(0, seed)
-                gdb.set(15, 0x1000)
+                gdb.set(15, CODE_PC)
                 gdb.write(0x3000, b'\0' * 4)
                 begin = time.monotonic_ns()
                 # Read only after QMP stop; no single-step or breakpoint cflags.
@@ -202,10 +211,11 @@ def trial(qemu, expected_hash, output, cache, *, enabled, mode=0x13,
                 state, observations = run_until_target(qmp, observe)
                 stopped = time.monotonic_ns()
                 expected = (seed - 7 if subtract else seed + 7) & 0xffffffff
-                if state != {'r0': expected, 'r1': 7, 'r2': 0x3000, 'pc': 0x2000,
+                if state != {'r0': expected, 'r1': 7, 'r2': 0x3000, 'pc': TARGET_PC,
                              'cpsr': mode, 'ram': expected}:
                     raise RuntimeError('Actual generated-code state differs: ' + str(state))
                 result['cases'].append({'seed': seed, 'actual': state,
+                    'codeSHA256': hashlib.sha256(words(subtract)).hexdigest(),
                     'stoppedObservations': observations,
                     'continueBeginNS': begin, 'stoppedNS': stopped,
                     'limits': 'Completion polling includes startup/sleep/debug transport; not a speed metric.'})
@@ -251,13 +261,13 @@ def validate_matrix(rows):
         raise ValueError('Different engine identities')
     if rows['off']['cacheCounters'] or rows['off']['cacheEnabledWitness']:
         raise ValueError('Default-off unexpectedly enabled')
-    for name in ('cold', 'reuse', 'different_cpu_mode', 'changed_guest_bytes'):
+    for name in ('cold', 'reuse', 'different_cpu_mode', 'changed_guest_bytes', 'self_modifying_code'):
         if not rows[name]['cacheEnabledWitness'] or not rows[name]['cacheCounters']:
             raise ValueError('Missing actual cache witness: ' + name)
-    if not rows['cold']['cacheCounters']['stored']:
-        raise ValueError('Cold process stored no real IR')
-    if not rows['reuse']['cacheCounters']['hits']:
-        raise ValueError('No fresh-process real IR hits')
+    if rows['cold']['cacheCounters']['stored'] < 2:
+        raise ValueError('Cold process must store arithmetic/memory and target-loop IR')
+    if rows['reuse']['cacheCounters']['hits'] < 2:
+        raise ValueError('No fresh-process hits for both arithmetic/memory and target-loop IR')
     # Each process executes two identical seeds; dynamic state must not enter key.
     if rows['different_cpu_mode']['cacheCounters']['hits']:
         raise ValueError('Changed mode unexpectedly reused prior-context IR')
@@ -265,6 +275,8 @@ def validate_matrix(rows):
         raise ValueError('Changed mode did not translate/store')
     if not rows['changed_guest_bytes']['cacheCounters']['stored']:
         raise ValueError('Changed bytes did not translate/store')
+    if not rows['self_modifying_code'].get('selfModify') or rows['self_modifying_code']['cacheCounters']['hits'] < 2:
+        raise ValueError('Missing actual self-modification/invalidation cache replay')
     return {'status': 'PASS', 'scope': 'REAL_GENERATED_CODE_CORRECTNESS_ONLY',
             'iosAcceptance': False, 'performanceQualified': False}
 
@@ -278,7 +290,7 @@ def main():
     args = parser.parse_args()
     if not args.execute:
         print(json.dumps({'execution': False, 'scope': 'plan-only', 'qemu': str(args.qemu),
-                          'engineSHA256': args.sha256, 'cases': ['off', 'cold', 'reuse', 'different_cpu_mode', 'changed_guest_bytes']}))
+                          'engineSHA256': args.sha256, 'cases': ['off', 'cold', 'reuse', 'different_cpu_mode', 'changed_guest_bytes', 'self_modifying_code']}))
         return
     qemu, output = args.qemu.resolve(), args.output.resolve()
     if not re.fullmatch('[a-f0-9]{64}', args.sha256) or digest(qemu) != args.sha256:
@@ -288,12 +300,14 @@ def main():
     rows = {}
     variants = [('off', False, 0x13, False), ('cold', True, 0x13, False),
                 ('reuse', True, 0x13, False), ('different_cpu_mode', True, 0x10, False),
-                ('changed_guest_bytes', True, 0x13, True)]
+                ('changed_guest_bytes', True, 0x13, True),
+                ('self_modifying_code', True, 0x13, False)]
     for name, enabled, mode, subtract in variants:
         if name == 'cold' and any(cache.iterdir()):
             raise ValueError('Cold cache directory is not initially empty')
         rows[name] = trial(qemu, args.sha256, output / name, cache,
-                           enabled=enabled, mode=mode, subtract=subtract)
+                           enabled=enabled, mode=mode, subtract=subtract,
+                           self_modify=name == 'self_modifying_code')
         (output / 'PROGRESS.json').write_text(json.dumps(rows, indent=2) + '\n')
     result = validate_matrix(rows)
     result['trials'] = rows

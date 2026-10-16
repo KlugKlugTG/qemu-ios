@@ -12,7 +12,7 @@
 #include <dlfcn.h>
 #include <sys/sysmacros.h>
 
-#define IR_VERSION 1
+#define IR_VERSION 2
 #define IR_MAX_OPS 2048
 #define IR_MAX_LABELS 256
 #define IR_MAX_ARGS 8
@@ -27,7 +27,7 @@ typedef struct IROp {
 } IROp;
 
 typedef struct IRBlock {
-    unsigned globals, temps, labels, ops, size, icount;
+    unsigned globals, temps, labels, ops, size, icount, pc_relative;
     IRTemp temp[TCG_MAX_TEMPS];
     IROp op[IR_MAX_OPS];
 } IRBlock;
@@ -176,7 +176,7 @@ static bool make_key(CPUState *cs, TranslationBlock *tb, int max_insns,
         EX_TBFLAG_ANY(flags, AARCH64_STATE) ||
         EX_TBFLAG_A32(flags, SCTLR__B) ||
         (tb->cflags & (CF_SINGLE_STEP | CF_BP_PAGE | CF_PARALLEL |
-                       CF_PCREL | CF_USE_ICOUNT | CF_MEMI_ONLY)) ||
+                       CF_USE_ICOUNT | CF_MEMI_ONLY)) ||
         max_insns < 1 || max_insns > TCG_MAX_INSNS) {
         return false;
     }
@@ -302,7 +302,7 @@ static bool supported_instructions(const uint8_t *code, unsigned size)
     return true;
 }
 
-static IRBlock *capture_ir(TranslationBlock *tb, const void *code)
+static IRBlock *capture_ir(TranslationBlock *tb, vaddr pc, const void *code)
 {
     TCGContext *s = tcg_ctx;
     IRBlock *b;
@@ -310,7 +310,7 @@ static IRBlock *capture_ir(TranslationBlock *tb, const void *code)
     unsigned n = 0;
 
     if (tb_page_addr1(tb) != (tb_page_addr_t)-1 ||
-        tb->size > TARGET_PAGE_SIZE - (tb->pc & (TARGET_PAGE_SIZE - 1)) ||
+        tb->size > TARGET_PAGE_SIZE - (pc & (TARGET_PAGE_SIZE - 1)) ||
         !supported_instructions(code, tb->size) ||
         s->nb_temps > TCG_MAX_TEMPS || s->nb_labels > IR_MAX_LABELS) {
         return NULL;
@@ -321,6 +321,9 @@ static IRBlock *capture_ir(TranslationBlock *tb, const void *code)
     b->labels = s->nb_labels;
     b->size = tb->size;
     b->icount = tb->icount;
+    /* CF_PCREL leaves tb->pc unspecified. The translator's actual pc bounds
+     * this page; raw instruction markers remain page offsets for unwind. */
+    b->pc_relative = !!(tb->cflags & CF_PCREL);
     for (int i = s->nb_globals; i < s->nb_temps; i++) {
         TCGTemp *t = &s->temps[i];
         if (t->type != TCG_TYPE_I32 || t->base_type != TCG_TYPE_I32 ||
@@ -396,6 +399,7 @@ static GBytes *encode_ir(const IRBlock *b)
     put_u64(a, IR_VERSION);
     put_u64(a, b->globals); put_u64(a, b->temps); put_u64(a, b->labels);
     put_u64(a, b->ops); put_u64(a, b->size); put_u64(a, b->icount);
+    put_u64(a, b->pc_relative);
     for (unsigned i = b->globals; i < b->temps; i++) {
         const IRTemp *t = &b->temp[i];
         put_u64(a, t->kind); put_u64(a, t->base_type);
@@ -506,7 +510,7 @@ static uint64_t get_u64(IRReader *r)
 
 /* Parse and validate completely before changing any live TCG state. */
 static IRBlock *decode_ir(GBytes *bytes, unsigned globals, unsigned max_insns,
-                          unsigned remaining, vaddr pc)
+                          unsigned remaining, vaddr pc, uint32_t cflags)
 {
     IRReader r;
     IRBlock *b = g_new0(IRBlock, 1);
@@ -518,13 +522,16 @@ static IRBlock *decode_ir(GBytes *bytes, unsigned globals, unsigned max_insns,
     /* Read wide, bound first, only then convert to implementation sizes. */
     uint64_t bg = get_u64(&r), bt = get_u64(&r), bl = get_u64(&r);
     uint64_t bo = get_u64(&r), bs = get_u64(&r), bi = get_u64(&r);
+    uint64_t bp = get_u64(&r);
     if (bg != globals || bt < bg || bt > TCG_MAX_TEMPS ||
         bl > IR_MAX_LABELS || !bo || bo > IR_MAX_OPS || !bs ||
-        bs > remaining || (bs & 3) || !bi || bi > max_insns || bi * 4 != bs) {
+        bs > remaining || (bs & 3) || !bi || bi > max_insns || bi * 4 != bs ||
+        bp > 1 || bp != !!(cflags & CF_PCREL)) {
         goto fail;
     }
     b->globals = bg; b->temps = bt; b->labels = bl;
     b->ops = bo; b->size = bs; b->icount = bi;
+    b->pc_relative = bp;
     for (unsigned i = b->globals; i < b->temps; i++) {
         IRTemp *t = &b->temp[i];
         t->kind = get_u64(&r); t->base_type = get_u64(&r);
@@ -571,7 +578,13 @@ static IRBlock *decode_ir(GBytes *bytes, unsigned globals, unsigned max_insns,
                  !(gotos & (1u << (o->args[0] - 1))))) { goto fail; }
             exits++;
         } else if (o->opc == INDEX_op_insn_start) {
-            if (o->args[0] != pc + starts * 4 || o->args[1] > 255 ||
+            /* arm_tr_insn_start masks the guest PC to its page offset for
+             * CF_PCREL. arm_restore_state_to_opc deposits that offset into
+             * the current dynamic PC's page after a fault. Do not turn these
+             * markers into absolute addresses or derive them from tb->pc. */
+            vaddr expected_pc = pc + starts * 4;
+            if (b->pc_relative) { expected_pc &= ~TARGET_PAGE_MASK; }
+            if (o->args[0] != expected_pc || o->args[1] > 255 ||
                 o->args[2] > UINT32_MAX) { goto fail; }
             starts++;
         }
@@ -657,7 +670,8 @@ bool arm_tcg_ir_cache_load(CPUState *cpu, TranslationBlock *tb, int max_insns,
         return false;
     }
     b = decode_ir(bytes, tcg_ctx->nb_globals, max_insns,
-                   TARGET_PAGE_SIZE - (pc & (TARGET_PAGE_SIZE - 1)), pc);
+                   TARGET_PAGE_SIZE - (pc & (TARGET_PAGE_SIZE - 1)), pc,
+                   tb->cflags);
     g_bytes_unref(bytes);
     if (!b || !supported_instructions(host_pc, b->size)) {
         rejected++;
@@ -687,13 +701,14 @@ void arm_tcg_ir_cache_save(CPUState *cpu, TranslationBlock *tb,
         memcmp(now, key->bytes, sizeof(now))) {
         return;
     }
-    b = capture_ir(tb, host_pc);
+    b = capture_ir(tb, pc, host_pc);
     if (!b) { return; }
     bytes = encode_ir(b);
     g_free(b);
     /* Do not publish records that our closed replay validator cannot accept. */
     b = decode_ir(bytes, tcg_ctx->nb_globals, key->max_insns,
-                   TARGET_PAGE_SIZE - (pc & (TARGET_PAGE_SIZE - 1)), pc);
+                   TARGET_PAGE_SIZE - (pc & (TARGET_PAGE_SIZE - 1)), pc,
+                   tb->cflags);
     if (!b) {
         g_bytes_unref(bytes);
         return;

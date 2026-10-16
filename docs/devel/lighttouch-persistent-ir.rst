@@ -27,6 +27,14 @@ Current supported subset
   are still performed. The supported subset and extra hashing/storage costs can
   limit gains; measure real guest workloads before enabling by default.
 
+System ARM TCG's normal ``CF_PCREL`` optimization remains enabled. Version 2
+records explicitly bind that mode and preserve the translator's page-offset
+instruction markers, dynamic PC updates and branch ordering. Capture bounds use
+the actual translator PC, because ``tb->pc`` is unspecified in this mode. Replay
+does not change ``arm_restore_state_to_opc`` or generated-code publication.
+The cache key still includes the exact translation PC and full flags; it does
+not broaden disk reuse to virtual aliases or change normal physical TB lookup.
+
 Identity and failure behavior
 -----------------------------
 
@@ -106,7 +114,11 @@ asset-free ARM1176 ``none`` machine with 16 MiB RAM, handwritten integer/load/st
 code, and QMP run/stop plus GDB observation. It never single-steps or sets code
 breakpoints, because those deliberately disable cache eligibility. Separate
 processes cover cache-off, cold storage, fresh-process hits, a changed CPU mode,
-and changed guest instruction bytes, with actual registers and RAM checked.
+changed guest instruction bytes and ordinary memory-write invalidation within a
+process, with actual registers and RAM checked. The arithmetic/load-store block
+starts at a nonzero page offset and branches within that same page. Both that
+block and the target loop must produce fresh-process hits; loop-only reuse does
+not qualify the differential.
 Default invocation is plan-only; execution needs ``--execute``. Controller
 contract checks are ``python3 tests/portable-ir-cache-engine-test.py``.
 
