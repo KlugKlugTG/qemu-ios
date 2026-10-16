@@ -174,7 +174,7 @@ int lt_windows_engine_join(void)
     qemu_thread_join(&loop_thread);
     joined = true;
     int clean = shutdown_confirmed && !storage_failed && loop_exit == 0;
-    fprintf(stdout, "FINAL confirmed=%d storage_failed=%d engine_exit=%d clean=%d\n",
+    fprintf(stdout, "ENGINE_FINAL confirmed=%d storage_failed=%d engine_exit=%d clean=%d\n",
             shutdown_confirmed, storage_failed, loop_exit, clean);
     return clean ? 0 : 3;
 }

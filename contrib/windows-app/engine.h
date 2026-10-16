@@ -5,7 +5,7 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-/* Call initialize on the actual process main thread, before SDL/QEMU threads.
+/* Call initialize on the actual process main thread, before starting the main-loop thread.
  * Normal QEMU argv must select -display none and -no-shutdown. The caller owns
  * base/package admission and the same exclusive running.lock as the preview.
  * This module never constructs a boot recipe or removes a dirty marker. */
