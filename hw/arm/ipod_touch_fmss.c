@@ -7,6 +7,7 @@
 #include "system/runstate.h"
 #include "system/address-spaces.h"
 #include <sys/stat.h>
+#include <glib/gstdio.h>
 #include "trace.h"
 #include "hw/trace-printf.h"
 
@@ -550,7 +551,7 @@ static bool fmss_erase_block(IPodTouchFMSSState *s, uint32_t cs, uint32_t block)
         remove(tmp);
         return fmss_io_error(path, err);
     }
-    if (rename(tmp, path) != 0) {
+    if (g_rename(tmp, path) != 0) {
         err = errno;
         remove(tmp);
         return fmss_io_error(path, err);
@@ -1123,7 +1124,10 @@ static bool fmss_store_page(IPodTouchFMSSState *s, uint32_t cs, uint32_t page_nr
         remove(tmp);
         return false;
     }
-    if (rename(tmp, filename) != 0) {
+    /* MSVCRT rename() rejects an existing destination. GLib uses the native
+     * replace operation on Windows and POSIX rename elsewhere; never remove
+     * the old page first, which would expose stale base data on failure. */
+    if (g_rename(tmp, filename) != 0) {
         err = errno;
         remove(tmp);
         return fmss_io_error(filename, err);
