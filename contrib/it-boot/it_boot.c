@@ -1097,7 +1097,12 @@ int it_boot_run(void)
         jobs(cur, "load");
     }
     if (respring_needed) {
-        launchctl("stop", "com.apple.SpringBoard");
+        /* The era's respring: from 6.x backboardd, the window server whose GL the hooks are too (SpringBoard and
+         * the apps go with it); before, SpringBoard. The firmware has the backboardd job or not. */
+        char bb[PATHN];
+        struct stat bs;
+        snprintf(bb, sizeof(bb), "%s/System/Library/LaunchDaemons/com.apple.backboardd.plist", sys_root());
+        launchctl("stop", stat(bb, &bs) == 0 ? "com.apple.backboardd" : "com.apple.SpringBoard");
     }
     if (save_state(&st)) {
         say("it_boot: cannot save state\n", "", 0);
