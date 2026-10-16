@@ -38,7 +38,9 @@ static void put_record(void)
     TCGIRCacheStore *s = tcg_ir_store_open(directory, build);
     GBytes *b = g_bytes_new_static("symbolic guest integers", 23);
     g_assert_nonnull(s);
+    g_assert_true(tcg_ir_store_can_put(s, key));
     g_assert_true(tcg_ir_store_put(s, key, b));
+    g_assert_false(tcg_ir_store_can_put(s, key));
     g_assert_false(tcg_ir_store_put(s, key, b));
     g_bytes_unref(b);
     tcg_ir_store_close(s);
@@ -185,6 +187,75 @@ static void bounded_directory(void)
     cleanup();
 }
 
+static void count_capacity_keeps_reads(void)
+{
+    setup();
+    TCGIRCacheStore *s = tcg_ir_store_open(directory, build);
+    GBytes *data = g_bytes_new_static("x", 1);
+    uint8_t candidate[32] = { 0x56 };
+    uint8_t first[32];
+    memcpy(first, candidate, sizeof(first));
+    g_assert_false(tcg_ir_store_can_put(NULL, candidate));
+    for (uint32_t i = 0; i < TCG_IR_CACHE_MAX_RECORDS; i++) {
+        memcpy(candidate + 1, &i, sizeof(i));
+        g_assert_true(tcg_ir_store_can_put(s, candidate));
+        g_assert_true(tcg_ir_store_put(s, candidate, data));
+    }
+    uint32_t beyond = TCG_IR_CACHE_MAX_RECORDS;
+    memcpy(candidate + 1, &beyond, sizeof(beyond));
+    g_assert_false(tcg_ir_store_can_put(s, candidate));
+    g_assert_false(tcg_ir_store_put(s, candidate, data));
+    GBytes *found = tcg_ir_store_lookup(s, first);
+    g_assert_nonnull(found);
+    g_assert_cmpmem(g_bytes_get_data(found, NULL), 1, "x", 1);
+    g_bytes_unref(found);
+    tcg_ir_store_close(s);
+    /* Persisted saturation must not turn off reading after process restart. */
+    s = tcg_ir_store_open(directory, build);
+    g_assert_nonnull(s);
+    g_assert_false(tcg_ir_store_can_put(s, candidate));
+    found = tcg_ir_store_lookup(s, first);
+    g_assert_nonnull(found);
+    g_bytes_unref(found);
+    tcg_ir_store_close(s);
+    g_bytes_unref(data);
+    cleanup();
+}
+
+static void byte_capacity_keeps_reads(void)
+{
+    setup();
+    TCGIRCacheStore *s = tcg_ir_store_open(directory, build);
+    uint8_t candidate[32] = { 0x78 };
+    g_autofree uint8_t *payload = g_malloc0(TCG_IR_CACHE_MAX_RECORD);
+    size_t remaining = TCG_IR_CACHE_MAX_BYTES;
+    for (uint32_t i = 0; remaining > 104; i++) {
+        size_t length = MIN(TCG_IR_CACHE_MAX_RECORD, remaining - 104);
+        GBytes *data = g_bytes_new_static(payload, length);
+        memcpy(candidate + 1, &i, sizeof(i));
+        g_assert_true(tcg_ir_store_can_put(s, candidate));
+        g_assert_true(tcg_ir_store_put(s, candidate, data));
+        g_bytes_unref(data);
+        remaining -= 104 + length;
+    }
+    g_assert_cmpuint(remaining, ==, 0);
+    candidate[0] ^= 1;
+    g_assert_false(tcg_ir_store_can_put(s, candidate));
+    candidate[0] ^= 1;
+    GBytes *found = tcg_ir_store_lookup(s, candidate);
+    g_assert_nonnull(found);
+    g_bytes_unref(found);
+    tcg_ir_store_close(s);
+    s = tcg_ir_store_open(directory, build);
+    g_assert_nonnull(s);
+    g_assert_false(tcg_ir_store_can_put(s, candidate));
+    found = tcg_ir_store_lookup(s, candidate);
+    g_assert_nonnull(found);
+    g_bytes_unref(found);
+    tcg_ir_store_close(s);
+    cleanup();
+}
+
 int main(int argc, char **argv)
 {
     /* Python driver invokes these modes as different execs, proving the
@@ -213,5 +284,7 @@ int main(int argc, char **argv)
     g_test_add_func("/ir-store/symlink-record", symlink_record);
     g_test_add_func("/ir-store/hardlink-record", hardlink_record);
     g_test_add_func("/ir-store/bounded-directory", bounded_directory);
+    g_test_add_func("/ir-store/count-capacity-keeps-reads", count_capacity_keeps_reads);
+    g_test_add_func("/ir-store/byte-capacity-keeps-reads", byte_capacity_keeps_reads);
     return g_test_run();
 }

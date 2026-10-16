@@ -7,6 +7,7 @@
 
 #if defined(__linux__) && TCG_TARGET_REG_BITS == 64 && \
     !defined(CONFIG_USER_ONLY) && !defined(CONFIG_PLUGIN)
+#include <sys/mman.h>
 
 __thread TCGContext *tcg_ctx;
 TCGv_env tcg_env;
@@ -20,13 +21,18 @@ const size_t tcg_op_defs_max = ARRAY_SIZE(tcg_op_defs);
 static GPtrArray *allocations;
 static const char *cpu_name = "arm1176-arm-cpu";
 static bool optional_supported = true;
+static unsigned cpu_name_lookups;
 
 Object *object_dynamic_cast_assert(Object *obj, const char *typename,
                                    const char *file, int line, const char *func)
 {
     return obj;
 }
-const char *object_get_typename(const Object *obj) { return cpu_name; }
+const char *object_get_typename(const Object *obj)
+{
+    cpu_name_lookups++;
+    return cpu_name;
+}
 bool tcg_op_supported(TCGOpcode opc, TCGType type, unsigned flags)
 {
     return opc != INDEX_op_ctpop || optional_supported;
@@ -360,6 +366,62 @@ static void reject_pointer_and_helper(void)
     g_assert_false(supported_instructions(code, sizeof(code) - 1));
 }
 
+static void full_store_skips_page_hash_and_codec(void)
+{
+    g_autofree char *directory = g_dir_make_tmp("lighttouch-ir-full-XXXXXX", NULL);
+    g_autofree uint8_t *payload = g_malloc0(TCG_IR_CACHE_MAX_RECORD);
+    uint8_t build[32] = { 0x13 }, candidate[32] = { 0x57 };
+    size_t remaining = TCG_IR_CACHE_MAX_BYTES;
+    g_assert_nonnull(directory);
+    store = tcg_ir_store_open(directory, build);
+    g_assert_nonnull(store);
+    for (uint32_t i = 0; remaining > 104; i++) {
+        size_t length = MIN(TCG_IR_CACHE_MAX_RECORD, remaining - 104);
+        GBytes *data = g_bytes_new_static(payload, length);
+        memcpy(candidate + 1, &i, sizeof(i));
+        g_assert_true(tcg_ir_store_put(store, candidate, data));
+        g_bytes_unref(data);
+        remaining -= 104 + length;
+    }
+    ARMTcgIRCacheKey key = { .eligible = true, .max_insns = 512 };
+    memset(key.bytes, 0xff, sizeof(key.bytes));
+    g_assert_false(tcg_ir_store_can_put(store, key.bytes));
+    TCGContext *context = new_context();
+    ARMCPU *cpu = g_new0(ARMCPU, 1);
+    TranslationBlock tb = new_tb();
+    long page_size = sysconf(_SC_PAGESIZE);
+    g_assert_cmpint(page_size, >, 0);
+    void *unreadable = mmap(NULL, page_size, PROT_NONE,
+                            MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    g_assert_true(unreadable != MAP_FAILED);
+    unsigned before = cpu_name_lookups;
+    for (unsigned i = 0; i < 10000; i++) {
+        /* The original path dereferences this protected page in make_key().
+         * Returning without a fault and without even the CPU-name lookup
+         * proves the saturated-store path skipped page/context hashing, not
+         * merely that put() eventually rejected another serialized record.
+         */
+        arm_tcg_ir_cache_save(CPU(cpu), &tb, 0x1000, unreadable, &key);
+    }
+    g_assert_cmpuint(cpu_name_lookups, ==, before);
+    g_assert_cmpint(munmap(unreadable, page_size), ==, 0);
+    GBytes *found = tcg_ir_store_lookup(store, candidate);
+    g_assert_nonnull(found);
+    g_bytes_unref(found);
+    tcg_ir_store_close(store);
+    store = NULL;
+    g_free(cpu);
+    g_free(context);
+    GDir *dir = g_dir_open(directory, 0, NULL);
+    const char *name;
+    while ((name = g_dir_read_name(dir))) {
+        g_autofree char *path = g_build_filename(directory, name, NULL);
+        g_assert_cmpint(unlink(path), ==, 0);
+    }
+    g_dir_close(dir);
+    g_assert_cmpint(rmdir(directory), ==, 0);
+}
+
 int main(int argc, char **argv)
 {
     allocations = g_ptr_array_new_with_free_func(g_free);
@@ -415,6 +477,7 @@ int main(int argc, char **argv)
     g_test_add_func("/arm-ir/current-bytes-build-context", current_context_key);
     g_test_add_func("/arm-ir/pc-relative-offsets-and-current-tb", pc_relative_metadata);
     g_test_add_func("/arm-ir/reject-pointers-helpers", reject_pointer_and_helper);
+    g_test_add_func("/arm-ir/full-store-skips-page-hash-and-codec", full_store_skips_page_hash_and_codec);
     int result = g_test_run();
     g_ptr_array_unref(allocations);
     return result;

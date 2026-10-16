@@ -20,6 +20,11 @@ typedef struct TCGIRCacheStore TCGIRCacheStore;
 TCGIRCacheStore *tcg_ir_store_open(const char *directory,
                                  const uint8_t build[32]);
 GBytes *tcg_ir_store_lookup(TCGIRCacheStore *store, const uint8_t key[32]);
+/* Cheap preflight before building a record. False when the directory is full,
+ * already contains this key, or cannot fit even the smallest nonempty record.
+ * Does not disable reads or relax validation. Caller serializes, as for put().
+ */
+bool tcg_ir_store_can_put(TCGIRCacheStore *store, const uint8_t key[32]);
 bool tcg_ir_store_put(TCGIRCacheStore *store, const uint8_t key[32], GBytes *data);
 void tcg_ir_store_close(TCGIRCacheStore *store);
 

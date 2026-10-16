@@ -696,7 +696,20 @@ void arm_tcg_ir_cache_save(CPUState *cpu, TranslationBlock *tb,
     uint8_t now[32];
     IRBlock *b;
     GBytes *bytes;
-    if (!key->eligible ||
+    bool can_store;
+
+    if (!key->eligible) {
+        return;
+    }
+    /* The bounded store commonly fills during boot. Keep existing-record
+     * lookups enabled, but avoid a second page/context hash and all codec
+     * allocation/validation work for a record put() cannot possibly accept.
+     * put() independently rechecks its bounds after this advisory preflight.
+     */
+    g_mutex_lock(&cache_lock);
+    can_store = tcg_ir_store_can_put(store, key->bytes);
+    g_mutex_unlock(&cache_lock);
+    if (!can_store ||
         !make_key(cpu, tb, key->max_insns, pc, host_pc, now) ||
         memcmp(now, key->bytes, sizeof(now))) {
         return;

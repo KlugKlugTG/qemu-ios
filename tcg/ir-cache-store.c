@@ -197,6 +197,18 @@ GBytes *tcg_ir_store_lookup(TCGIRCacheStore *s, const uint8_t key[32])
     return result ? g_bytes_ref(result) : NULL;
 }
 
+bool tcg_ir_store_can_put(TCGIRCacheStore *s, const uint8_t key[32])
+{
+    g_autofree char *name = NULL;
+
+    if (!s || s->disk_records >= TCG_IR_CACHE_MAX_RECORDS ||
+        s->disk_bytes >= TCG_IR_CACHE_MAX_BYTES - RECORD_HEADER) {
+        return false;
+    }
+    name = key_name(key);
+    return !g_hash_table_contains(s->entries, name);
+}
+
 bool tcg_ir_store_put(TCGIRCacheStore *s, const uint8_t key[32], GBytes *data)
 {
     g_autofree char *name = key_name(key);
@@ -207,11 +219,9 @@ bool tcg_ir_store_put(TCGIRCacheStore *s, const uint8_t key[32], GBytes *data)
     int fd;
     bool ok;
 
-    if (!len || len > TCG_IR_CACHE_MAX_RECORD ||
-        s->disk_records >= TCG_IR_CACHE_MAX_RECORDS ||
-        s->disk_bytes > TCG_IR_CACHE_MAX_BYTES ||
-        len + RECORD_HEADER > TCG_IR_CACHE_MAX_BYTES - s->disk_bytes ||
-        g_hash_table_contains(s->entries, name)) {
+    if (!tcg_ir_store_can_put(s, key) || !len ||
+        len > TCG_IR_CACHE_MAX_RECORD ||
+        len + RECORD_HEADER > TCG_IR_CACHE_MAX_BYTES - s->disk_bytes) {
         return false;
     }
     temporary = g_strdup_printf(".tmp-%ld-%u", (long)getpid(), s->temporary++);
@@ -265,6 +275,10 @@ TCGIRCacheStore *tcg_ir_store_open(const char *directory,
 GBytes *tcg_ir_store_lookup(TCGIRCacheStore *s, const uint8_t key[32])
 {
     return NULL;
+}
+bool tcg_ir_store_can_put(TCGIRCacheStore *s, const uint8_t key[32])
+{
+    return false;
 }
 bool tcg_ir_store_put(TCGIRCacheStore *s, const uint8_t key[32], GBytes *data)
 {
