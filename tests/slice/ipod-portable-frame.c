@@ -1,4 +1,6 @@
 /* Frame ownership: copy must occur before the publisher lock is released.
+ * SLICE:frame-counter-state contrib/ios-app/qemu-ios-ui.c typedef IosFrameCounters
+ * SLICE:frame-counter-state contrib/ios-app/qemu-ios-ui.c fn ios_frame_count
  * SLICE:qemu-ios-ui contrib/ios-app/qemu-ios-ui.h file
  * SLICE contrib/ios-app/qemu-ios-ui.c fn qemu_ios_portable_frame_copy
  * CFLAGS -Wall -Werror -Wno-unused-function -Wno-comment
@@ -17,6 +19,8 @@ static void qemu_mutex_lock(int *lock){assert(!locked);locked=1;}
 /* Immediately overwrite publisher memory at unlock: a borrowed pointer copy
  * performed later would capture 0xee instead of the requested frame. */
 static void qemu_mutex_unlock(int *lock){assert(locked);locked=0;if(ios.published>=0)memset(ios.buf[ios.published],0xee,8);}
+#include "frame-counter-state.h"
+static IosFrameCounters ios_frame_counters;
 #include "slice.h"
 int main(void) {
  uint8_t publisher[8]={0,1,2,3,4,5,6,7},copy[8]={0};

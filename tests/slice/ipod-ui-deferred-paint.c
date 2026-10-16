@@ -1,5 +1,7 @@
 /* Actual frame publication/capture and AIO enqueue/dequeue/cancel/delete.
  * No GL or guest model is substituted for an actual guest qualification.
+ * SLICE:frame-counter-state contrib/ios-app/qemu-ios-ui.c typedef IosFrameCounters
+ * SLICE:frame-counter-state contrib/ios-app/qemu-ios-ui.c fn ios_frame_count
  * SLICE:aio util/async.c range enum { | /* Called concurrently from any thread *
  * SLICE:aio util/async.c fn aio_bh_enqueue aio_bh_dequeue qemu_bh_schedule qemu_bh_cancel qemu_bh_delete
  * SLICE:frame contrib/ios-app/qemu-ios-ui.c fn ios_init_frame_lock ios_capture ios_publish ios_publish_bh ios_cancel_publish ios_gfx_update ios_gfx_switch ios_refresh ios_sequence_reset qemu_ios_ui_vm_stopped
@@ -83,6 +85,8 @@ static void graphic_hw_update(QemuConsole *con) {
     DisplayChangeListener dcl = {con};
     hw_updates++; ios_gfx_update(&dcl, 0, 0, con->surface->w, con->surface->h);
 }
+#include "frame-counter-state.h"
+static IosFrameCounters ios_frame_counters;
 #include "frame.h"
 static void paint(DisplayChangeListener *dcl, uint8_t value) {
     DisplaySurface *s = dcl->con->surface;

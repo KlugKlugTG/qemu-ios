@@ -1,5 +1,7 @@
 /* An unchanged frame is not republished; a changed one is (LightTouchMac #26).
  *
+ * SLICE:frame-counter-state contrib/ios-app/qemu-ios-ui.c typedef IosFrameCounters
+ * SLICE:frame-counter-state contrib/ios-app/qemu-ios-ui.c fn ios_frame_count
  * SLICE contrib/ios-app/qemu-ios-ui.c fn ios_capture
  * PKG glib-2.0
  */
@@ -27,6 +29,8 @@ static int surface_width(DisplaySurface *s) { return s->w; }
 static int surface_height(DisplaySurface *s) { return s->h; }
 static int surface_stride(DisplaySurface *s) { return s->stride; }
 static void *surface_data(DisplaySurface *s) { return s->data; }
+#include "frame-counter-state.h"
+static IosFrameCounters ios_frame_counters;
 #include "slice.h"
 int main(void) {
  enum { W = 4, H = 3, STRIDE = 20 };   /* padded rows: only W*4 bytes count */
