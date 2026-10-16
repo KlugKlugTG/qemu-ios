@@ -64,8 +64,19 @@ static void progress(void *unused)
 static void apply_control(void *unused)
 {
     if (!qemu_ios_ui_ready()) return;
+    if (qemu_ios_ui_storage_failed()) {
+        qatomic_set(&stop_request, 0);
+        qatomic_set(&pause_request, -1);
+        fprintf(stderr, "[windows-control] storage failure latched; resume/Stop refused, writable state retained\n");
+        return;
+    }
     if (qatomic_xchg(&stop_request, 0)) {
         qemu_ios_ui_cancel_input();
+        if (qemu_ios_ui_guest_shutdown_confirmed()) {
+            stop_requested = true;
+            qemu_system_shutdown_request(SHUTDOWN_CAUSE_HOST_QMP_QUIT);
+            return;
+        }
         if (!runstate_is_running()) vm_start();
         if (!stop_requested) {
             stop_requested = true;
@@ -74,7 +85,7 @@ static void apply_control(void *unused)
         }
     }
     int pause = qatomic_xchg(&pause_request, -1);
-    if (pause >= 0 && !stop_requested) {
+    if (pause >= 0 && !stop_requested && !qemu_ios_ui_guest_shutdown_confirmed()) {
         qemu_ios_ui_cancel_input();
         if (pause) vm_stop(RUN_STATE_PAUSED); else vm_start();
     }
@@ -134,7 +145,8 @@ bool lt_windows_engine_pause(bool paused)
 {
     bool accepted = false;
     bql_lock();
-    if (qemu_ios_ui_ready() && !stop_requested && !qatomic_read(&stop_request)) {
+    if (qemu_ios_ui_ready() && !qemu_ios_ui_storage_failed() &&
+        !qemu_ios_ui_guest_shutdown_confirmed() && !stop_requested && !qatomic_read(&stop_request)) {
         qatomic_set(&pause_request, paused ? 1 : 0);
         qemu_bh_schedule(control_bh);
         accepted = true; /* queued, not an execution receipt */
@@ -147,7 +159,7 @@ bool lt_windows_engine_stop(void)
 {
     bool accepted = false;
     bql_lock();
-    if (qemu_ios_ui_ready()) {
+    if (qemu_ios_ui_ready() && !qemu_ios_ui_storage_failed()) {
         qatomic_set(&stop_request, 1);
         qemu_bh_schedule(control_bh);
         accepted = true;
