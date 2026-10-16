@@ -26,6 +26,7 @@ arm_ss.add(files(
   'cpu32.c',
   'gengvec.c',
   'translate.c',
+  'ir-cache.c',
   'translate-m-nocp.c',
   'translate-mve.c',
   'translate-neon.c',

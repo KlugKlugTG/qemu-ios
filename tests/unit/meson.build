@@ -51,6 +51,10 @@ tests = {
   'test-envlist': [],
 }
 
+if host_os != 'windows' and have_tcg
+  tests += {'test-tcg-ir-cache-store': ['../../tcg/ir-cache-store.c']}
+endif
+
 if have_system or have_tools
   tests += {
     'test-qmp-event': [testqapi],

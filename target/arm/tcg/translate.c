@@ -22,6 +22,7 @@
 
 #include "translate.h"
 #include "translate-a32.h"
+#include "ir-cache.h"
 #include "qemu/log.h"
 #include "arm_ldst.h"
 #include "semihosting/semihost.h"
@@ -6886,6 +6887,11 @@ void arm_translate_code(CPUState *cpu, TranslationBlock *tb,
     DisasContext dc = { };
     const TranslatorOps *ops = &arm_translator_ops;
     CPUARMTBFlags tb_flags = arm_tbflags_from_tb(tb);
+    ARMTcgIRCacheKey cache_key;
+
+    if (arm_tcg_ir_cache_load(cpu, tb, *max_insns, pc, host_pc, &cache_key)) {
+        return;
+    }
 
     if (EX_TBFLAG_AM32(tb_flags, THUMB)) {
         ops = &thumb_translator_ops;
@@ -6897,4 +6903,5 @@ void arm_translate_code(CPUState *cpu, TranslationBlock *tb,
 #endif
 
     translator_loop(cpu, tb, max_insns, pc, host_pc, ops, &dc.base);
+    arm_tcg_ir_cache_save(cpu, tb, pc, host_pc, &cache_key);
 }

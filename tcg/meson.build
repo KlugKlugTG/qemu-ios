@@ -8,6 +8,7 @@ tcg_ss.add(files(
   'optimize.c',
   'region.c',
   'tcg.c',
+  'ir-cache-store.c',
   'tcg-common.c',
   'tcg-op.c',
   'tcg-op-ldst.c',
