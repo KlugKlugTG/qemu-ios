@@ -60,7 +60,7 @@ def main():
         return result
 
     for filename in ("target/arm/tcg/ir-cache.c", "target/arm/tcg/translate.c",
-                     "tcg/ir-cache-store.c"):
+                     "tcg/ir-cache-store.c", "contrib/ios-app/qemu-ios-entry.c"):
         run("syntax-" + Path(filename).stem,
             base + ["-fsyntax-only", str(source / filename)])
     libs = shlex.split(subprocess.check_output(
@@ -115,11 +115,41 @@ def main():
                   "frontend IR only, fresh native code")
         if legacy not in result.stderr.splitlines():
             raise RuntimeError("Legacy cache summary changed")
+        terminal = [line for line in result.stderr.splitlines()
+                    if line.startswith("LightTouch TCG IR cache terminal:")]
+        if len(terminal) != 1 or "reason=process-exit;" not in terminal[0]:
+            raise RuntimeError("Missing process-exit fallback identity")
+    for mode in ("--terminal-ir", "--terminal-kill-ir"):
+        with tempfile.TemporaryDirectory(prefix="lighttouch-ir-terminal-") as d:
+            Path(d).chmod(0o700)
+            result = run(mode[2:], [str(output / "codec"), mode, d])
+            lines = result.stderr.splitlines()
+            terminal = [line for line in lines
+                        if line.startswith("LightTouch TCG IR cache terminal:")]
+            if len(terminal) != 1 or "reason=post-qemu-cleanup;" not in terminal[0]:
+                raise RuntimeError("Missing or duplicated post-cleanup totals")
+            # The aggregate fixture deliberately ends between power-of-two
+            # milestones. Full final totals must survive a real _exit as well
+            # as subsequent atexit; the earlier milestone is insufficient.
+            aggregates = [line for line in lines if line.startswith(
+                "LightTouch TCG IR cache diagnostics:")]
+            values = dict((k, int(v)) for k, v in re.findall(
+                r"([a-z0-9_]+)=([0-9]+)", aggregates[-1]))
+            if len(aggregates) != 3 or any(values.get(k) != v
+                                           for k, v in expected.items()):
+                raise RuntimeError("Terminal aggregate totals are incomplete")
+            if lines[-1] != terminal[0] or legacy not in lines:
+                raise RuntimeError("Terminal marker must follow final counters")
     for label in ("disabled-by-default", "diagnostics-only-disabled",
                   "fresh-ir-producer", "fresh-ir-consumer"):
         if "cache diagnostics:" in (output / (label + ".stderr")).read_text():
             raise RuntimeError("Unrequested aggregate diagnostics emitted")
+    for label in ("disabled-by-default", "diagnostics-only-disabled"):
+        if "LightTouch TCG IR cache" in (output / (label + ".stderr")).read_text():
+            raise RuntimeError("Disabled terminal hook emitted cache output")
     files = ("target/arm/tcg/ir-cache.c", "target/arm/tcg/ir-cache.h",
+             "include/tcg/ir-cache-lifecycle.h",
+             "contrib/ios-app/qemu-ios-entry.c",
              "include/tcg/ir-cache-store.h", "tcg/ir-cache-store.c",
              "tests/unit/test-arm-tcg-ir-cache.c",
              "tests/unit/test-tcg-ir-cache-store.c",

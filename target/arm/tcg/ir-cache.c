@@ -4,6 +4,7 @@
 #include "translate.h"
 #include "ir-cache.h"
 #include "tcg/ir-cache-store.h"
+#include "tcg/ir-cache-lifecycle.h"
 #include "exec/target_page.h"
 #include "exec/memopidx.h"
 
@@ -145,11 +146,38 @@ static void report_cache(void)
     report_diagnostics();
 }
 
+static void finalize_cache(const char *reason)
+{
+    /* The embedded caller has completed qemu_cleanup(), so key generation and
+     * vCPU translation have stopped too. cache_lock serializes close/report
+     * with milestones and the atexit fallback. Preserve the existing lock
+     * order: cache_lock, then diagnostics_lock; never acquire them reversed.
+     */
+    g_mutex_lock(&cache_lock);
+    if (store) {
+        report_cache();
+        fprintf(stderr, "LightTouch TCG IR cache terminal: version=1 reason=%s; "
+                "cache totals only, not guest shutdown confirmation\n", reason);
+        /* Android kills even clean terminal workers, without stdio cleanup. */
+        fflush(stderr);
+        tcg_ir_store_close(store);
+        store = NULL;
+    }
+    g_mutex_unlock(&cache_lock);
+}
+
+void arm_tcg_ir_cache_finish(void)
+{
+    finalize_cache("post-qemu-cleanup");
+}
+
 static void finish_cache(void)
 {
-    report_cache();
-    tcg_ir_store_close(store);
-    store = NULL;
+    /* Retain reporting for ordinary process exit, including failures that did
+     * not return through embedded cleanup. This reason is deliberately distinct
+     * from a post-cleanup report and cannot establish a clean guest halt.
+     */
+    finalize_cache("process-exit");
 }
 
 static void initialize_cache(void)
@@ -860,6 +888,8 @@ void arm_tcg_ir_cache_save(CPUState *cpu, TranslationBlock *tb,
     g_bytes_unref(bytes);
 }
 #else
+void arm_tcg_ir_cache_finish(void) { }
+
 bool arm_tcg_ir_cache_load(CPUState *cpu, TranslationBlock *tb, int max_insns,
                            vaddr pc, void *host_pc, ARMTcgIRCacheKey *key)
 {

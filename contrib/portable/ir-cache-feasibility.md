@@ -78,8 +78,8 @@ instrumentation, not a qualified diagnostic engine or a measured guest speedup.
 The engine image digest changes after rebuilding, invalidating older cache keys.
 
 The original cache summary line is unchanged. A separate version=1 diagnostic
-line is emitted only at existing power-of-two hit/store milestones and normal
-exit. There is no per-TB output or unbounded event collection. Fields are:
+line is emitted only at existing power-of-two hit/store milestones and terminal
+finalization. There is no per-TB output or unbounded event collection. Fields are:
 
 - `arm_attempts`, `a32_attempts`, `thumb_attempts`, `a64_attempts`: calls into
   the ARM translation cache hook after an actual store was enabled. The latter
@@ -113,6 +113,31 @@ microsecond calls can report zero. The instrumentation's performance cost is
 unqualified. Missing diagnostics in retained logs remain unmeasured; never infer
 zero. Ordinary unit store tests use real fsync; the separate diagnostic harness
 intercepts clock/fsync for deterministic accounting and failure semantics only.
+
+## Embedded terminal reporting
+
+The ARM embedded entry calls `arm_tcg_ir_cache_finish()` after `qemu_cleanup()`
+has stopped vCPU and device activity, before returning to a host that may kill
+its worker without running `atexit`. It emits the existing final summary and,
+if requested, aggregate costs, then a terminal marker with
+`reason=post-qemu-cleanup`, flushes stderr and releases only the cache lease.
+It does not trigger shutdown, change shutdown deadlines, clear dirty guest
+state or establish guest halt confirmation. All existing shutdown receipts
+remain required. It does not flush or otherwise access guest writable state.
+
+Finalization takes the existing cache lock before the diagnostic lock. The
+caller must have stopped all translation; the lock alone does not make it safe
+to finalize during active key generation. Repeated calls and the later
+`atexit` fallback are silent after the store is closed. Cache-disabled and
+unsupported builds remain silent and do not initialize a store. The process
+cannot start a second VM after finalization.
+
+Ordinary process exit retains a distinct `reason=process-exit` fallback. That
+marker does not prove cleanup or clean guest shutdown. An Android timeout or
+process death before native cleanup returns may retain milestones only; the
+last milestone is not complete final totals. `_exit` unit checks establish log
+retention without stdio/atexit cleanup, final counter accuracy, single reporting
+and cache lease release; they do not establish an Android/iOS target pass.
 
 ## Possible future durability experiment
 

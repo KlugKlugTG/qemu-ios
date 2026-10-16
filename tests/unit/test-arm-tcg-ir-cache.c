@@ -511,9 +511,35 @@ static void aggregate_diagnostics(const char *directory)
 int main(int argc, char **argv)
 {
     allocations = g_ptr_array_new_with_free_func(g_free);
-    if (argc == 3 && !strcmp(argv[1], "--diagnostics-ir")) {
+    if (argc == 3 && (!strcmp(argv[1], "--diagnostics-ir") ||
+                     !strcmp(argv[1], "--terminal-ir") ||
+                     !strcmp(argv[1], "--terminal-kill-ir"))) {
         aggregate_diagnostics(argv[2]);
+        if (strcmp(argv[1], "--diagnostics-ir")) {
+            arm_tcg_ir_cache_finish();
+            g_assert_null(store);
+            /* A repeated hook and later atexit must neither duplicate totals
+             * nor close a new store. Finalization must release its file lease
+             * and preserve the one complete record for a future process.
+             */
+            TCGIRCacheStore *retained = tcg_ir_store_open(argv[2], engine_hash);
+            g_assert_nonnull(retained);
+            tcg_ir_store_enable_diagnostics(retained);
+            TCGIRCacheStoreDiagnostics d;
+            tcg_ir_store_get_diagnostics(retained, &d);
+            g_assert_cmpuint(d.records, ==, 1);
+            arm_tcg_ir_cache_finish();
+            finish_cache();
+            g_assert_null(store);
+            tcg_ir_store_close(retained);
+            ARMTcgIRCacheKey key;
+            g_assert_false(arm_tcg_ir_cache_load(NULL, NULL, 0, 0, NULL, &key));
+            g_assert_false(key.eligible); /* No reinitialization in this worker. */
+        }
         g_ptr_array_unref(allocations);
+        if (!strcmp(argv[1], "--terminal-kill-ir")) {
+            _exit(0); /* Actual exit without atexit or stdio cleanup. */
+        }
         return 0;
     }
     if (argc == 3 && (!strcmp(argv[1], "--produce-ir") ||
@@ -557,6 +583,7 @@ int main(int argc, char **argv)
     }
     if (argc == 3 && (!strcmp(argv[1], "--disabled") ||
                      !strcmp(argv[1], "--diagnostics-only"))) {
+        arm_tcg_ir_cache_finish(); /* No initialization or files before Start. */
         g_unsetenv("LT_TCG_IR_CACHE_ENABLE");
         g_setenv("LT_TCG_IR_CACHE", argv[2], true);
         if (!strcmp(argv[1], "--diagnostics-only")) {
@@ -570,6 +597,7 @@ int main(int argc, char **argv)
         g_assert_null(store);
         g_assert_false(diagnostics_enabled);
         g_assert_cmpint(diagnostic_begin(), ==, 0);
+        arm_tcg_ir_cache_finish();
         g_ptr_array_unref(allocations);
         return 0;
     }

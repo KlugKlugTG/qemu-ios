@@ -16,6 +16,9 @@
 #include "qemu/rcu.h"
 #include "system/replay.h"
 #include "system/system.h"
+#ifdef CONFIG_TCG
+#include "tcg/ir-cache-lifecycle.h"
+#endif
 
 #include "qemu-ios-ui.h"
 
@@ -70,6 +73,13 @@ int qemu_ios_main(int argc, char **argv)
      * queued onto a context nobody services. */
     qemu_ios_ui_vm_stopped();
     qemu_cleanup(status);
+#ifdef CONFIG_TCG
+    /* No vCPU/device activity remains. Retain final experimental cache totals
+     * before the embedding host disposes its worker without running atexit.
+     * This observes cleanup only; it does not change guest-halt confirmation.
+     */
+    arm_tcg_ir_cache_finish();
+#endif
     bql_unlock();
     replay_mutex_unlock();
 
