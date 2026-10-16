@@ -80,14 +80,36 @@ Root must allocate/review an actual engine build and guest run before using::
       LT_TCG_IR_CACHE=/absolute/private/profile/cache/tcg-ir-candidate \
       <existing unchanged frontend invocation>
 
-The proposed shared frontend contract is a separately owned profile cache
-directory, inherited only by the fresh native worker through those two
-environment variables. It is **not yet wired into either frontend or packaged**.
+The shared frontend contract uses a separately owned profile cache directory,
+inherited only by a fresh native worker through those two environment variables.
+Controlled default-off hooks now exist in the canonical App source: the Linux
+helper and ordinary launcher clear inherited opt-ins, and Android exposes
+debug-only ``IEngine.debugSelectTcgIrCache`` admission on a fresh worker (see the
+App repository's ``Android/EXPERIMENTAL_TCG_CACHE.md``). Release/UI enablement
+remains disabled. No qualified persistent cache is shipped: engine/API packaging,
+actual guest reuse and performance benefit still need their own acceptance.
 Do not infer guest-clean shutdown or a performance pass from cache statistics.
 Cache records are disposable, never bundled with firmware or shared publicly.
 The worker emits image identity plus bounded counter milestones into its existing
 native stderr log and final counters on ordinary process exit. Milestones remain
 available even when Android kills the terminal worker without running atexit.
+
+Opt-in source diagnostics
+-------------------------
+
+With an actual experimental store already enabled, exactly
+``LT_TCG_IR_CACHE_DIAGNOSTICS=aggregate-v1`` adds fixed aggregate counters and
+monotonic wall microseconds at the existing report sites. Diagnostics alone does
+not enable caching. The legacy counter line, keys, format, limits, durability and
+fallback behavior stay unchanged. The additional line distinguishes ARM/Thumb
+translation attempts, key eligibility, capture/validation/store rejection, cache
+stage wall spans, first observed hard capacity and actual file/directory fsync
+counts, errors and wall durations. Timing is neither guest CPU utilization nor a
+complete translation CPU profile; ordinary translator, optimizer and emitter
+costs remain outside these spans. ``put_us`` includes its fsync timings, so the
+spans must not be summed as independent CPU shares. Measurement overhead remains
+unqualified. See ``contrib/portable/ir-cache-feasibility.md`` for exact fields,
+denominators, limitations and a separate future durability-policy experiment.
 
 Source tests without an engine build
 ------------------------------------

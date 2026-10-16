@@ -18,7 +18,66 @@ struct TCGIRCacheStore {
     size_t disk_bytes;
     unsigned disk_records;
     unsigned temporary;
+    int64_t diagnostics_origin_us;
+    TCGIRCacheStoreDiagnostics diagnostics;
 };
+
+static void observe_capacity(TCGIRCacheStore *s)
+{
+    if (s->diagnostics.enabled && !s->diagnostics.capacity_observed &&
+        (s->disk_records >= TCG_IR_CACHE_MAX_RECORDS ||
+         s->disk_bytes >= TCG_IR_CACHE_MAX_BYTES - RECORD_HEADER)) {
+        s->diagnostics.capacity_observed = true;
+        s->diagnostics.first_capacity_us =
+            g_get_monotonic_time() - s->diagnostics_origin_us;
+    }
+}
+
+void tcg_ir_store_enable_diagnostics(TCGIRCacheStore *s)
+{
+    if (s && !s->diagnostics.enabled) {
+        s->diagnostics.enabled = true;
+        s->diagnostics_origin_us = g_get_monotonic_time();
+        observe_capacity(s);
+    }
+}
+
+void tcg_ir_store_get_diagnostics(TCGIRCacheStore *s,
+                                TCGIRCacheStoreDiagnostics *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (s && s->diagnostics.enabled) {
+        *out = s->diagnostics;
+        out->records = s->disk_records;
+        out->bytes = s->disk_bytes;
+        out->elapsed_us = g_get_monotonic_time() - s->diagnostics_origin_us;
+    }
+}
+
+static int observed_fsync(TCGIRCacheStore *s, int fd, bool directory)
+{
+    int ret, saved_errno;
+    int64_t begin;
+    uint64_t elapsed;
+    if (!s->diagnostics.enabled) {
+        return fsync(fd);
+    }
+    begin = g_get_monotonic_time();
+    ret = fsync(fd);
+    saved_errno = errno;
+    elapsed = g_get_monotonic_time() - begin;
+    if (directory) {
+        s->diagnostics.directory_fsync_calls++;
+        s->diagnostics.directory_fsync_errors += ret != 0;
+        s->diagnostics.directory_fsync_us += elapsed;
+    } else {
+        s->diagnostics.file_fsync_calls++;
+        s->diagnostics.file_fsync_errors += ret != 0;
+        s->diagnostics.file_fsync_us += elapsed;
+    }
+    errno = saved_errno;
+    return ret;
+}
 
 static bool private_inode(int fd, bool directory)
 {
@@ -201,6 +260,9 @@ bool tcg_ir_store_can_put(TCGIRCacheStore *s, const uint8_t key[32])
 {
     g_autofree char *name = NULL;
 
+    if (s) {
+        observe_capacity(s);
+    }
     if (!s || s->disk_records >= TCG_IR_CACHE_MAX_RECORDS ||
         s->disk_bytes >= TCG_IR_CACHE_MAX_BYTES - RECORD_HEADER) {
         return false;
@@ -219,6 +281,9 @@ bool tcg_ir_store_put(TCGIRCacheStore *s, const uint8_t key[32], GBytes *data)
     int fd;
     bool ok;
 
+    if (s && s->diagnostics.enabled) {
+        s->diagnostics.put_calls++;
+    }
     if (!tcg_ir_store_can_put(s, key) || !len ||
         len > TCG_IR_CACHE_MAX_RECORD ||
         len + RECORD_HEADER > TCG_IR_CACHE_MAX_BYTES - s->disk_bytes) {
@@ -236,7 +301,8 @@ bool tcg_ir_store_put(TCGIRCacheStore *s, const uint8_t key[32], GBytes *data)
     memcpy(record + 40, key, 32);
     digest(payload, len, record + 72);
     memcpy(record + RECORD_HEADER, payload, len);
-    ok = transfer(fd, record, RECORD_HEADER + len, true) && fsync(fd) == 0;
+    ok = transfer(fd, record, RECORD_HEADER + len, true) &&
+         observed_fsync(s, fd, false) == 0;
     ok = close(fd) == 0 && ok;
     if (ok) {
         ok = renameat(s->directory_fd, temporary, s->directory_fd, name) == 0;
@@ -247,9 +313,13 @@ bool tcg_ir_store_put(TCGIRCacheStore *s, const uint8_t key[32], GBytes *data)
     }
     /* A directory fsync failure loses only a disposable cache entry on crash;
      * the published file is complete and checksummed. */
-    fsync(s->directory_fd);
+    observed_fsync(s, s->directory_fd, true);
     s->disk_bytes += RECORD_HEADER + len;
     s->disk_records++;
+    if (s->diagnostics.enabled) {
+        s->diagnostics.put_success++;
+        observe_capacity(s);
+    }
     g_hash_table_insert(s->entries, g_strdup(name), g_bytes_ref(data));
     return true;
 }
@@ -285,4 +355,10 @@ bool tcg_ir_store_put(TCGIRCacheStore *s, const uint8_t key[32], GBytes *data)
     return false;
 }
 void tcg_ir_store_close(TCGIRCacheStore *s) { }
+void tcg_ir_store_enable_diagnostics(TCGIRCacheStore *s) { }
+void tcg_ir_store_get_diagnostics(TCGIRCacheStore *s,
+                                TCGIRCacheStoreDiagnostics *out)
+{
+    memset(out, 0, sizeof(*out));
+}
 #endif

@@ -39,6 +39,80 @@ static uint8_t engine_hash[32];
 static uint64_t hits, misses, rejected, stored;
 static bool supported_op(unsigned opc);
 
+/* Only explicit aggregate-v1 enables clocks/counters. Fixed storage and the
+ * existing power-of-two/final report sites bound output; no per-TB logging.
+ * Attempts are translations, not dynamic instructions or guest CPU usage.
+ */
+#define DIAG_METRICS(X) \
+    X(arm_attempts) X(a32_attempts) X(thumb_attempts) X(a64_attempts) \
+    X(key_eligible) X(key_rejected) X(save_preflight_skips) \
+    X(save_key_changed) X(capture_rejected) X(validation_rejected) \
+    X(store_failed) X(key_us) X(lookup_us) X(load_decode_us) \
+    X(replay_us) X(capture_us) X(encode_us) X(save_validate_us) X(put_us)
+#define DIAG_ENUM(name) D_##name,
+enum { DIAG_METRICS(DIAG_ENUM) D_COUNT };
+#undef DIAG_ENUM
+#define DIAG_NAME(name) #name,
+static const char *const diagnostic_names[] = { DIAG_METRICS(DIAG_NAME) };
+#undef DIAG_NAME
+static bool diagnostics_enabled;
+static GMutex diagnostics_lock;
+static uint64_t diagnostics[D_COUNT];
+
+static void diagnostic_add(unsigned metric, uint64_t amount)
+{
+    if (diagnostics_enabled) {
+        g_mutex_lock(&diagnostics_lock);
+        diagnostics[metric] += amount;
+        g_mutex_unlock(&diagnostics_lock);
+    }
+}
+
+static int64_t diagnostic_begin(void)
+{
+    return diagnostics_enabled ? g_get_monotonic_time() : 0;
+}
+
+static void diagnostic_end(unsigned metric, int64_t begin)
+{
+    if (diagnostics_enabled) {
+        diagnostic_add(metric, g_get_monotonic_time() - begin);
+    }
+}
+
+static void report_diagnostics(void)
+{
+    TCGIRCacheStoreDiagnostics s;
+    uint64_t snapshot[D_COUNT];
+    if (!diagnostics_enabled) {
+        return;
+    }
+    /* Caller holds cache_lock at milestone sites; never hold diagnostics_lock
+     * while acquiring cache_lock. Exit is after the worker's vCPU has stopped.
+     */
+    g_mutex_lock(&diagnostics_lock);
+    memcpy(snapshot, diagnostics, sizeof(snapshot));
+    g_mutex_unlock(&diagnostics_lock);
+    tcg_ir_store_get_diagnostics(store, &s);
+    fprintf(stderr, "LightTouch TCG IR cache diagnostics: version=1");
+    for (unsigned i = 0; i < D_COUNT; i++) {
+        fprintf(stderr, " %s=%" PRIu64, diagnostic_names[i], snapshot[i]);
+    }
+    fprintf(stderr, " records=%" PRIu64 " bytes=%" PRIu64
+            " elapsed_us=%" PRIu64 " capacity_observed=%u"
+            " first_capacity_us=%" PRIu64 " put_calls=%" PRIu64
+            " put_success=%" PRIu64 " file_fsync_calls=%" PRIu64
+            " file_fsync_errors=%" PRIu64 " file_fsync_us=%" PRIu64
+            " directory_fsync_calls=%" PRIu64
+            " directory_fsync_errors=%" PRIu64
+            " directory_fsync_us=%" PRIu64 "; aggregate wall time, not guest CPU\n",
+            s.records, s.bytes, s.elapsed_us, s.capacity_observed,
+            s.first_capacity_us, s.put_calls, s.put_success,
+            s.file_fsync_calls, s.file_fsync_errors, s.file_fsync_us,
+            s.directory_fsync_calls, s.directory_fsync_errors,
+            s.directory_fsync_us);
+}
+
 static bool mapped_image_matches(const struct stat *st)
 {
     FILE *maps = fopen("/proc/self/maps", "re");
@@ -68,6 +142,7 @@ static void report_cache(void)
             " misses=%" PRIu64 " rejected=%" PRIu64 " stored=%" PRIu64
             "; frontend IR only, fresh native code\n",
             hits, misses, rejected, stored);
+    report_diagnostics();
 }
 
 static void finish_cache(void)
@@ -144,6 +219,11 @@ static void initialize_cache(void)
     g_checksum_get_digest(checksum, engine_hash, &digest_len);
     store = tcg_ir_store_open(directory, engine_hash);
     if (store) {
+        diagnostics_enabled = !g_strcmp0(getenv("LT_TCG_IR_CACHE_DIAGNOSTICS"),
+                                        "aggregate-v1");
+        if (diagnostics_enabled) {
+            tcg_ir_store_enable_diagnostics(store);
+        }
         fprintf(stderr, "LightTouch TCG IR cache: experimental enabled, "
                 "mapped-image-sha256=%s; 32MiB/4096 records maximum\n",
                 g_checksum_get_string(checksum));
@@ -652,26 +732,45 @@ bool arm_tcg_ir_cache_load(CPUState *cpu, TranslationBlock *tb, int max_insns,
 {
     GBytes *bytes;
     IRBlock *b;
+    int64_t begin;
     memset(key, 0, sizeof(*key));
     if (g_once_init_enter(&cache_initialized)) {
         initialize_cache();
         g_once_init_leave(&cache_initialized, 1);
     }
-    if (!store || !make_key(cpu, tb, max_insns, pc, host_pc, key->bytes)) {
+    if (!store) {
+        return false;
+    }
+    if (diagnostics_enabled) {
+        CPUARMTBFlags flags = arm_tbflags_from_tb(tb);
+        diagnostic_add(D_arm_attempts, 1);
+        diagnostic_add(EX_TBFLAG_ANY(flags, AARCH64_STATE) ? D_a64_attempts :
+                       EX_TBFLAG_AM32(flags, THUMB) ? D_thumb_attempts :
+                       D_a32_attempts, 1);
+    }
+    begin = diagnostic_begin();
+    bool eligible = make_key(cpu, tb, max_insns, pc, host_pc, key->bytes);
+    diagnostic_end(D_key_us, begin);
+    diagnostic_add(eligible ? D_key_eligible : D_key_rejected, 1);
+    if (!eligible) {
         return false;
     }
     key->eligible = true;
     key->max_insns = max_insns;
     g_mutex_lock(&cache_lock);
+    begin = diagnostic_begin();
     bytes = tcg_ir_store_lookup(store, key->bytes);
+    diagnostic_end(D_lookup_us, begin);
     if (!bytes) {
         misses++;
         g_mutex_unlock(&cache_lock);
         return false;
     }
+    begin = diagnostic_begin();
     b = decode_ir(bytes, tcg_ctx->nb_globals, max_insns,
                    TARGET_PAGE_SIZE - (pc & (TARGET_PAGE_SIZE - 1)), pc,
                    tb->cflags);
+    diagnostic_end(D_load_decode_us, begin);
     g_bytes_unref(bytes);
     if (!b || !supported_instructions(host_pc, b->size)) {
         rejected++;
@@ -679,7 +778,9 @@ bool arm_tcg_ir_cache_load(CPUState *cpu, TranslationBlock *tb, int max_insns,
         g_mutex_unlock(&cache_lock);
         return false;
     }
+    begin = diagnostic_begin();
     replay_ir(b, tb);
+    diagnostic_end(D_replay_us, begin);
     hits++;
     /* Android intentionally kills terminal workers without running atexit.
      * Log bounded milestones into its existing private native log as well. */
@@ -697,6 +798,7 @@ void arm_tcg_ir_cache_save(CPUState *cpu, TranslationBlock *tb,
     IRBlock *b;
     GBytes *bytes;
     bool can_store;
+    int64_t begin;
 
     if (!key->eligible) {
         return;
@@ -709,28 +811,50 @@ void arm_tcg_ir_cache_save(CPUState *cpu, TranslationBlock *tb,
     g_mutex_lock(&cache_lock);
     can_store = tcg_ir_store_can_put(store, key->bytes);
     g_mutex_unlock(&cache_lock);
-    if (!can_store ||
-        !make_key(cpu, tb, key->max_insns, pc, host_pc, now) ||
-        memcmp(now, key->bytes, sizeof(now))) {
+    if (!can_store) {
+        diagnostic_add(D_save_preflight_skips, 1);
         return;
     }
+    begin = diagnostic_begin();
+    bool unchanged = make_key(cpu, tb, key->max_insns, pc, host_pc, now);
+    diagnostic_end(D_key_us, begin);
+    if (!unchanged ||
+        memcmp(now, key->bytes, sizeof(now))) {
+        diagnostic_add(D_save_key_changed, 1);
+        return;
+    }
+    begin = diagnostic_begin();
     b = capture_ir(tb, pc, host_pc);
-    if (!b) { return; }
+    diagnostic_end(D_capture_us, begin);
+    if (!b) {
+        diagnostic_add(D_capture_rejected, 1);
+        return;
+    }
+    begin = diagnostic_begin();
     bytes = encode_ir(b);
+    diagnostic_end(D_encode_us, begin);
     g_free(b);
     /* Do not publish records that our closed replay validator cannot accept. */
+    begin = diagnostic_begin();
     b = decode_ir(bytes, tcg_ctx->nb_globals, key->max_insns,
                    TARGET_PAGE_SIZE - (pc & (TARGET_PAGE_SIZE - 1)), pc,
                    tb->cflags);
+    diagnostic_end(D_save_validate_us, begin);
     if (!b) {
+        diagnostic_add(D_validation_rejected, 1);
         g_bytes_unref(bytes);
         return;
     }
     g_free(b);
     g_mutex_lock(&cache_lock);
-    if (tcg_ir_store_put(store, key->bytes, bytes)) {
+    begin = diagnostic_begin();
+    bool published = tcg_ir_store_put(store, key->bytes, bytes);
+    diagnostic_end(D_put_us, begin);
+    if (published) {
         stored++;
         if ((stored & (stored - 1)) == 0) { report_cache(); }
+    } else {
+        diagnostic_add(D_store_failed, 1);
     }
     g_mutex_unlock(&cache_lock);
     g_bytes_unref(bytes);

@@ -9,6 +9,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import tempfile
@@ -56,6 +57,7 @@ def main():
         (output / "commands.json").write_text(json.dumps(records, indent=2))
         if result.returncode:
             raise RuntimeError(label + " failed; inspect retained stderr")
+        return result
 
     for filename in ("target/arm/tcg/ir-cache.c", "target/arm/tcg/translate.c",
                      "tcg/ir-cache-store.c"):
@@ -64,13 +66,16 @@ def main():
     libs = shlex.split(subprocess.check_output(
         ["pkg-config", "--libs", "glib-2.0"], text=True))
     for name, test in (("store", "test-tcg-ir-cache-store.c"),
-                       ("codec", "test-arm-tcg-ir-cache.c")):
+                       ("codec", "test-arm-tcg-ir-cache.c"),
+                       ("diagnostics", "test-tcg-ir-cache-diagnostics.c")):
         extra = ["-ffunction-sections", "-fdata-sections", "-Wl,--gc-sections"]
         if args.sanitize:
             extra += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer"]
-        run(name + "-compile", base + extra + ["-o", str(output / name),
-            str(source / "tests/unit" / test),
-            str(source / "tcg/ir-cache-store.c")] + libs + ["-ldl"])
+        sources = [str(source / "tests/unit" / test)]
+        if name != "diagnostics":
+            sources.append(str(source / "tcg/ir-cache-store.c"))
+        run(name + "-compile", base + extra + ["-o", str(output / name)] +
+            sources + libs + ["-ldl"])
         run(name + "-tests", [str(output / name)])
     with tempfile.TemporaryDirectory(prefix="lighttouch-ir-process-") as d:
         Path(d).chmod(0o700)
@@ -81,12 +86,45 @@ def main():
         run("disabled-by-default", [str(output / "codec"), "--disabled", d])
         if list(Path(d).iterdir()):
             raise RuntimeError("Disabled cache created files")
+        run("diagnostics-only-disabled", [str(output / "codec"),
+                                          "--diagnostics-only", d])
+        if list(Path(d).iterdir()):
+            raise RuntimeError("Diagnostics alone created cache files")
         run("fresh-ir-producer", [str(output / "codec"), "--produce-ir", d])
         run("fresh-ir-consumer", [str(output / "codec"), "--consume-ir", d])
+    with tempfile.TemporaryDirectory(prefix="lighttouch-ir-diagnostics-") as d:
+        Path(d).chmod(0o700)
+        result = run("aggregate-ir-diagnostics", [str(output / "codec"),
+                                                  "--diagnostics-ir", d])
+        lines = [line for line in result.stderr.splitlines()
+                 if line.startswith("LightTouch TCG IR cache diagnostics:")]
+        if not 1 <= len(lines) <= 3:
+            raise RuntimeError("Missing or unbounded aggregate reports")
+        values = dict((k, int(v)) for k, v in re.findall(
+            r"([a-z0-9_]+)=([0-9]+)", lines[-1]))
+        expected = dict(version=1, arm_attempts=7, a32_attempts=5,
+                        thumb_attempts=1, a64_attempts=1, key_eligible=4,
+                        key_rejected=3, save_preflight_skips=1,
+                        save_key_changed=1, capture_rejected=1,
+                        validation_rejected=0, store_failed=0, records=1,
+                        put_calls=1, put_success=1, file_fsync_calls=1,
+                        directory_fsync_calls=1, capacity_observed=0)
+        if any(values.get(k) != v for k, v in expected.items()):
+            raise RuntimeError("Aggregate report counters do not match calls")
+        legacy = ("LightTouch TCG IR cache: hits=1 misses=3 rejected=0 stored=1; "
+                  "frontend IR only, fresh native code")
+        if legacy not in result.stderr.splitlines():
+            raise RuntimeError("Legacy cache summary changed")
+    for label in ("disabled-by-default", "diagnostics-only-disabled",
+                  "fresh-ir-producer", "fresh-ir-consumer"):
+        if "cache diagnostics:" in (output / (label + ".stderr")).read_text():
+            raise RuntimeError("Unrequested aggregate diagnostics emitted")
     files = ("target/arm/tcg/ir-cache.c", "target/arm/tcg/ir-cache.h",
              "include/tcg/ir-cache-store.h", "tcg/ir-cache-store.c",
              "tests/unit/test-arm-tcg-ir-cache.c",
-             "tests/unit/test-tcg-ir-cache-store.c")
+             "tests/unit/test-tcg-ir-cache-store.c",
+             "tests/unit/test-tcg-ir-cache-diagnostics.c",
+             "tests/unit/run-tcg-ir-cache-tests.py")
     result = {"scope": "source syntax and isolated codec/store units only",
               "guestAcceptance": False, "performanceQualified": False,
               "sanitizers": args.sanitize, "result": "PASS",

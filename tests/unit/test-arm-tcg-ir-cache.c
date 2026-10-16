@@ -375,6 +375,9 @@ static void full_store_skips_page_hash_and_codec(void)
     g_assert_nonnull(directory);
     store = tcg_ir_store_open(directory, build);
     g_assert_nonnull(store);
+    diagnostics_enabled = true;
+    memset(diagnostics, 0, sizeof(diagnostics));
+    tcg_ir_store_enable_diagnostics(store);
     for (uint32_t i = 0; remaining > 104; i++) {
         size_t length = MIN(TCG_IR_CACHE_MAX_RECORD, remaining - 104);
         GBytes *data = g_bytes_new_static(payload, length);
@@ -404,12 +407,17 @@ static void full_store_skips_page_hash_and_codec(void)
         arm_tcg_ir_cache_save(CPU(cpu), &tb, 0x1000, unreadable, &key);
     }
     g_assert_cmpuint(cpu_name_lookups, ==, before);
+    g_assert_cmpuint(diagnostics[D_save_preflight_skips], ==, 10000);
+    g_assert_cmpuint(diagnostics[D_capture_rejected], ==, 0);
+    g_assert_cmpuint(diagnostics[D_key_us], ==, 0);
     g_assert_cmpint(munmap(unreadable, page_size), ==, 0);
     GBytes *found = tcg_ir_store_lookup(store, candidate);
     g_assert_nonnull(found);
     g_bytes_unref(found);
     tcg_ir_store_close(store);
     store = NULL;
+    diagnostics_enabled = false;
+    memset(diagnostics, 0, sizeof(diagnostics));
     g_free(cpu);
     g_free(context);
     GDir *dir = g_dir_open(directory, 0, NULL);
@@ -422,13 +430,98 @@ static void full_store_skips_page_hash_and_codec(void)
     g_assert_cmpint(rmdir(directory), ==, 0);
 }
 
+static void aggregate_diagnostics(const char *directory)
+{
+    g_setenv("LT_TCG_IR_CACHE_ENABLE", "experimental-v1", true);
+    g_setenv("LT_TCG_IR_CACHE", directory, true);
+    g_setenv("LT_TCG_IR_CACHE_DIAGNOSTICS", "aggregate-v1", true);
+    TCGContext *s = new_context();
+    ARMCPU *cpu = g_new0(ARMCPU, 1);
+    TranslationBlock tb = new_tb();
+    uint8_t page[1024] = { 0 };
+    ARMTcgIRCacheKey key;
+    memcpy(page, code, sizeof(code));
+    g_assert_false(arm_tcg_ir_cache_load(CPU(cpu), &tb, 512,
+                                       0x1000, page, &key));
+    g_assert_true(diagnostics_enabled);
+    g_assert_true(key.eligible);
+    IRBlock *b = fixture();
+    replay_ir(b, &tb);
+    arm_tcg_ir_cache_save(CPU(cpu), &tb, 0x1000, page, &key);
+    g_assert_cmpuint(stored, ==, 1);
+    /* Existing-key preflight skip must not be called a capacity rejection. */
+    arm_tcg_ir_cache_save(CPU(cpu), &tb, 0x1000, page, &key);
+    g_free(s);
+    s = new_context();
+    g_assert_true(arm_tcg_ir_cache_load(CPU(cpu), &tb, 512,
+                                      0x1000, page, &key));
+    uint32_t r0 = 99;
+    g_assert_cmphex(run_fixture(0, &r0), ==, (uintptr_t)&tb);
+    g_assert_cmpuint(r0, ==, 3);
+    tb.cs_base = UINT64_C(1) << R_TBFLAG_AM32_THUMB_SHIFT;
+    g_assert_false(arm_tcg_ir_cache_load(CPU(cpu), &tb, 512,
+                                       0x1000, page, &key));
+    g_assert_false(key.eligible);
+    tb.cs_base = 0;
+    tb.flags = 1U << R_TBFLAG_ANY_AARCH64_STATE_SHIFT;
+    g_assert_false(arm_tcg_ir_cache_load(CPU(cpu), &tb, 512,
+                                       0x1000, page, &key));
+    tb.flags = 0;
+    cpu_name = "cortex-a8-arm-cpu";
+    g_assert_false(arm_tcg_ir_cache_load(CPU(cpu), &tb, 512,
+                                       0x1000, page, &key));
+    cpu_name = "arm1176-arm-cpu";
+    page[0x80] ^= 1;
+    g_assert_false(arm_tcg_ir_cache_load(CPU(cpu), &tb, 512,
+                                       0x1000, page, &key));
+    page[0x80] ^= 2;
+    arm_tcg_ir_cache_save(CPU(cpu), &tb, 0x1000, page, &key);
+    g_free(s);
+    s = new_context();
+    tb = new_tb();
+    g_assert_false(arm_tcg_ir_cache_load(CPU(cpu), &tb, 512,
+                                       0x1000, page, &key));
+    /* No translated operations: capture rejects; nothing is published. */
+    arm_tcg_ir_cache_save(CPU(cpu), &tb, 0x1000, page, &key);
+    g_assert_cmpuint(diagnostics[D_arm_attempts], ==, 7);
+    g_assert_cmpuint(diagnostics[D_a32_attempts], ==, 5);
+    g_assert_cmpuint(diagnostics[D_thumb_attempts], ==, 1);
+    g_assert_cmpuint(diagnostics[D_a64_attempts], ==, 1);
+    g_assert_cmpuint(diagnostics[D_key_eligible], ==, 4);
+    g_assert_cmpuint(diagnostics[D_key_rejected], ==, 3);
+    g_assert_cmpuint(diagnostics[D_save_preflight_skips], ==, 1);
+    g_assert_cmpuint(diagnostics[D_save_key_changed], ==, 1);
+    g_assert_cmpuint(diagnostics[D_capture_rejected], ==, 1);
+    g_assert_cmpuint(diagnostics[D_validation_rejected], ==, 0);
+    g_assert_cmpuint(diagnostics[D_store_failed], ==, 0);
+    g_assert_cmpuint(hits, ==, 1);
+    g_assert_cmpuint(misses, ==, 3);
+    TCGIRCacheStoreDiagnostics d;
+    tcg_ir_store_get_diagnostics(store, &d);
+    g_assert_cmpuint(d.put_success, ==, 1);
+    g_assert_cmpuint(d.file_fsync_calls, ==, 1);
+    g_assert_cmpuint(d.directory_fsync_calls, ==, 1);
+    g_assert_false(d.capacity_observed);
+    /* Final report is checked by the Python driver, with all exact counters. */
+    g_free(b);
+    g_free(cpu);
+    g_free(s);
+}
+
 int main(int argc, char **argv)
 {
     allocations = g_ptr_array_new_with_free_func(g_free);
+    if (argc == 3 && !strcmp(argv[1], "--diagnostics-ir")) {
+        aggregate_diagnostics(argv[2]);
+        g_ptr_array_unref(allocations);
+        return 0;
+    }
     if (argc == 3 && (!strcmp(argv[1], "--produce-ir") ||
                      !strcmp(argv[1], "--consume-ir"))) {
         g_setenv("LT_TCG_IR_CACHE_ENABLE", "experimental-v1", true);
         g_setenv("LT_TCG_IR_CACHE", argv[2], true);
+        /* Unrecognized values must not enable diagnostics. */
+        g_setenv("LT_TCG_IR_CACHE_DIAGNOSTICS", "yes", true);
         TCGContext *s = new_context();
         ARMCPU *cpu = g_new0(ARMCPU, 1);
         TranslationBlock tb = new_tb();
@@ -439,6 +532,7 @@ int main(int argc, char **argv)
         ARMTcgIRCacheKey key;
         memcpy(page + 0x34, code, sizeof(code));
         bool hit = arm_tcg_ir_cache_load(CPU(cpu), &tb, 512, pc, page + 0x34, &key);
+        g_assert_false(diagnostics_enabled);
         if (!strcmp(argv[1], "--produce-ir")) {
             g_assert_false(hit);
             g_assert_true(key.eligible);
@@ -461,13 +555,21 @@ int main(int argc, char **argv)
         g_free(cpu); g_free(s); g_ptr_array_unref(allocations);
         return 0;
     }
-    if (argc == 3 && !strcmp(argv[1], "--disabled")) {
+    if (argc == 3 && (!strcmp(argv[1], "--disabled") ||
+                     !strcmp(argv[1], "--diagnostics-only"))) {
         g_unsetenv("LT_TCG_IR_CACHE_ENABLE");
         g_setenv("LT_TCG_IR_CACHE", argv[2], true);
+        if (!strcmp(argv[1], "--diagnostics-only")) {
+            g_setenv("LT_TCG_IR_CACHE_DIAGNOSTICS", "aggregate-v1", true);
+        } else {
+            g_unsetenv("LT_TCG_IR_CACHE_DIAGNOSTICS");
+        }
         ARMTcgIRCacheKey key;
         g_assert_false(arm_tcg_ir_cache_load(NULL, NULL, 0, 0, NULL, &key));
         g_assert_false(key.eligible);
         g_assert_null(store);
+        g_assert_false(diagnostics_enabled);
+        g_assert_cmpint(diagnostic_begin(), ==, 0);
         g_ptr_array_unref(allocations);
         return 0;
     }

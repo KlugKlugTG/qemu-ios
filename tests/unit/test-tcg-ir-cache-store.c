@@ -194,6 +194,8 @@ static void count_capacity_keeps_reads(void)
     GBytes *data = g_bytes_new_static("x", 1);
     uint8_t candidate[32] = { 0x56 };
     uint8_t first[32];
+    TCGIRCacheStoreDiagnostics d, again;
+    tcg_ir_store_enable_diagnostics(s);
     memcpy(first, candidate, sizeof(first));
     g_assert_false(tcg_ir_store_can_put(NULL, candidate));
     for (uint32_t i = 0; i < TCG_IR_CACHE_MAX_RECORDS; i++) {
@@ -205,6 +207,19 @@ static void count_capacity_keeps_reads(void)
     memcpy(candidate + 1, &beyond, sizeof(beyond));
     g_assert_false(tcg_ir_store_can_put(s, candidate));
     g_assert_false(tcg_ir_store_put(s, candidate, data));
+    tcg_ir_store_get_diagnostics(s, &d);
+    g_assert_true(d.capacity_observed);
+    g_assert_cmpuint(d.records, ==, TCG_IR_CACHE_MAX_RECORDS);
+    g_assert_cmpuint(d.bytes, ==, TCG_IR_CACHE_MAX_RECORDS * 105);
+    g_assert_cmpuint(d.put_calls, ==, TCG_IR_CACHE_MAX_RECORDS + 1);
+    g_assert_cmpuint(d.put_success, ==, TCG_IR_CACHE_MAX_RECORDS);
+    g_assert_cmpuint(d.file_fsync_calls, ==, TCG_IR_CACHE_MAX_RECORDS);
+    g_assert_cmpuint(d.directory_fsync_calls, ==, TCG_IR_CACHE_MAX_RECORDS);
+    g_assert_cmpuint(d.file_fsync_errors, ==, 0);
+    g_assert_cmpuint(d.directory_fsync_errors, ==, 0);
+    g_assert_false(tcg_ir_store_can_put(s, candidate));
+    tcg_ir_store_get_diagnostics(s, &again);
+    g_assert_cmpuint(again.first_capacity_us, ==, d.first_capacity_us);
     GBytes *found = tcg_ir_store_lookup(s, first);
     g_assert_nonnull(found);
     g_assert_cmpmem(g_bytes_get_data(found, NULL), 1, "x", 1);
@@ -213,6 +228,11 @@ static void count_capacity_keeps_reads(void)
     /* Persisted saturation must not turn off reading after process restart. */
     s = tcg_ir_store_open(directory, build);
     g_assert_nonnull(s);
+    tcg_ir_store_enable_diagnostics(s);
+    tcg_ir_store_get_diagnostics(s, &d);
+    g_assert_true(d.capacity_observed);
+    g_assert_cmpuint(d.put_calls, ==, 0);
+    g_assert_cmpuint(d.records, ==, TCG_IR_CACHE_MAX_RECORDS);
     g_assert_false(tcg_ir_store_can_put(s, candidate));
     found = tcg_ir_store_lookup(s, first);
     g_assert_nonnull(found);
@@ -229,6 +249,8 @@ static void byte_capacity_keeps_reads(void)
     uint8_t candidate[32] = { 0x78 };
     g_autofree uint8_t *payload = g_malloc0(TCG_IR_CACHE_MAX_RECORD);
     size_t remaining = TCG_IR_CACHE_MAX_BYTES;
+    TCGIRCacheStoreDiagnostics d;
+    tcg_ir_store_enable_diagnostics(s);
     for (uint32_t i = 0; remaining > 104; i++) {
         size_t length = MIN(TCG_IR_CACHE_MAX_RECORD, remaining - 104);
         GBytes *data = g_bytes_new_static(payload, length);
@@ -239,6 +261,11 @@ static void byte_capacity_keeps_reads(void)
         remaining -= 104 + length;
     }
     g_assert_cmpuint(remaining, ==, 0);
+    tcg_ir_store_get_diagnostics(s, &d);
+    g_assert_true(d.capacity_observed);
+    g_assert_cmpuint(d.bytes, ==, TCG_IR_CACHE_MAX_BYTES);
+    g_assert_cmpuint(d.file_fsync_calls, ==, d.records);
+    g_assert_cmpuint(d.directory_fsync_calls, ==, d.records);
     candidate[0] ^= 1;
     g_assert_false(tcg_ir_store_can_put(s, candidate));
     candidate[0] ^= 1;
