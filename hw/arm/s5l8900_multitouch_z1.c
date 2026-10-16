@@ -98,6 +98,7 @@ static void z1_take_frame(S5L8900MultitouchZ1State *s)
     g_free(mt->next_frame);
     mt->next_frame = NULL;
     mt->next_frame_len = 0;
+    ipod_touch_multitouch_frame_taken(mt);
 }
 
 /* The answer to a transaction, once its first bytes are in. */

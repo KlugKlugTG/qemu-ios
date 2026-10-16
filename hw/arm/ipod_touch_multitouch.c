@@ -310,6 +310,7 @@ static void mt_n1_read(IPodTouchMultitouchState *s)
             len = s->next_frame_len;
             s->next_frame = NULL;
             s->next_frame_len = 0;
+            ipod_touch_multitouch_frame_taken(s);
         } else {
             s->n1_frame = (uint8_t *) mt_build_frame(s, NULL, &len);
         }
@@ -525,6 +526,7 @@ static uint32_t ipod_touch_multitouch_transfer(SSIPeripheral *dev, uint32_t valu
                 s->buf_size = s->next_frame_len;
                 s->next_frame = NULL;
                 s->next_frame_len = 0;
+                ipod_touch_multitouch_frame_taken(s);
             } else {
                 /*
                  * No new frame. Handing the guest a block of ZEROS here is not
@@ -1048,6 +1050,27 @@ static void mt_emit_frame(IPodTouchMultitouchState *s)
     s->fingers[0].y = s->touch_y;
 
     /*
+     * The pending frame starts or ends a contact and the guest has not read it: replacing it would lose that (a
+     * press and release between two reads arrived as a lone TOUCH_ENDED, which iOS 6's status bar ignores, so a
+     * trackpad's tap to click on it never scrolled to the top). Keep it; this frame goes out when the guest takes it.
+     * touch_down still follows slot 0 now, as the pointer path's edge detection needs. A second press before that
+     * read still folds the owed lift into it (two taps inside one report period).
+     */
+    if (s->next_frame && s->next_frame_changes) {
+        s->frame_owed = true;
+        s->touch_down = (s->fingers[0].phase == MT_FINGER_DOWN);
+        return;
+    }
+    s->next_frame_changes = false;
+    for (i = 0; i < MT_MAX_FINGERS; i++) {
+        MTFingerState *f = &s->fingers[i];
+        if ((f->phase == MT_FINGER_DOWN && !f->started) || f->phase == MT_FINGER_LIFTED ||
+            f->phase == MT_FINGER_ENDING) {
+            s->next_frame_changes = true;
+        }
+    }
+
+    /*
      * A frame the guest never collected. next_frame is a single slot and the
      * guest polls slower than we can produce, so this used to leak one frame
      * buffer per skipped report. It is never aliased into out_buffer without
@@ -1244,6 +1267,19 @@ static void touch_end_timer_tick(void *opaque)
         return;
     }
     mt_emit_frame(s);
+    /* An owed TOUCH_ENDED just went out: the end of the gesture is still owed. */
+    if (!mt_any_down(s) && mt_any_active(s)) {
+        timer_mod(s->touch_end_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + NANOSECONDS_PER_SECOND / 10);
+    }
+}
+
+void ipod_touch_multitouch_frame_taken(IPodTouchMultitouchState *s)
+{
+    s->next_frame_changes = false;
+    if (s->frame_owed) {
+        s->frame_owed = false;
+        timer_mod(s->touch_end_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    }
 }
 
 static void ipod_touch_multitouch_realize(SSIPeripheral *d, Error **errp)
@@ -1297,6 +1333,8 @@ static void ipod_touch_multitouch_reset(DeviceState *dev)
     g_free(s->next_frame);
     s->next_frame = NULL;
     s->next_frame_len = 0;
+    s->next_frame_changes = false;
+    s->frame_owed = false;
     g_free(s->n1_frame);
     s->n1_frame = NULL;
     s->frame_counter = 0;
