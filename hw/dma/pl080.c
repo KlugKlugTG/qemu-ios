@@ -211,6 +211,8 @@ static void pl080_update(PL080State *s)
     qemu_set_irq(s->irq, errlevel || tclevel);
 }
 
+static unsigned pl080_fifo_run(PL080State *s, pl080_channel *ch, int dest_id, int size);
+
 static void pl080_run(PL080State *s)
 {
     int c;
@@ -313,6 +315,12 @@ again:
             }
             if (!size) {
                 continue;
+            }
+            if (flow == 1 && (s->paced_req & (1u << dest_id))) {
+                unsigned moved = pl080_fifo_run(s, ch, dest_id, size);
+
+                size -= moved;
+                budget -= MIN(budget, moved);
             }
 
             /* Transfer one element.  */
@@ -502,6 +510,66 @@ void pl080_set_dma_last_request(PL080State *s, int id)
         }
     }
     pl080_update(s);
+}
+
+void pl080_attach_paced_fifo(PL080State *s, int id, MemoryRegion *mr, hwaddr offset,
+                             unsigned (*space)(void *opaque),
+                             void (*push)(void *opaque, const uint8_t *buf, unsigned len),
+                             void *opaque)
+{
+    if (id >= 0 && id < 32) {
+        s->fifo[id] = (struct PL080PacedFifo) {
+            .mr = mr, .offset = offset, .space = space, .push = push, .opaque = opaque,
+        };
+    }
+}
+
+/* Is @dest the registered FIFO of request line @id? Cached: a channel feeds one address. */
+static bool pl080_fifo_dest(PL080State *s, int id, hwaddr dest)
+{
+    struct PL080PacedFifo *f = &s->fifo[id];
+
+    if (f->dest != dest || !f->dest_ok) {
+        hwaddr xlat, len = 4;
+        MemoryRegion *mr;
+
+        RCU_READ_LOCK_GUARD();
+        mr = address_space_translate(&s->downstream_as, dest, &xlat, &len, true,
+                                     MEMTXATTRS_UNSPECIFIED);
+        f->dest = dest;
+        f->dest_ok = mr == f->mr && xlat == f->offset;
+    }
+    return f->dest_ok;
+}
+
+/*
+ * Move all but the last element the FIFO on @dest_id will take in one push (see
+ * pl080_attach_paced_fifo). Returns the elements moved; the caller's element
+ * path does the rest.
+ */
+static unsigned pl080_fifo_run(PL080State *s, pl080_channel *ch, int dest_id, int size)
+{
+    struct PL080PacedFifo *f = &s->fifo[dest_id];
+    unsigned sw = (ch->ctrl >> 18) & 7, dw = (ch->ctrl >> 21) & 7;
+    uint8_t buf[1024];
+
+    if (!f->push || sw != dw || sw > 2 || !(ch->ctrl & PL080_CCTRL_SI) ||
+        (ch->ctrl & PL080_CCTRL_DI) || size < 2 || !pl080_fifo_dest(s, dest_id, ch->dest)) {
+        return 0;
+    }
+    unsigned w = 1u << sw;
+    unsigned room = DIV_ROUND_UP(f->space(f->opaque), w);   /* elements before the line drops */
+    unsigned n = MIN(MIN((unsigned)size - 1, room ? room - 1 : 0), sizeof(buf) / w);
+
+    if (!n) {
+        return 0;
+    }
+    address_space_read(&s->downstream_as, ch->src, MEMTXATTRS_UNSPECIFIED, buf, n * w);
+    s->paced_src = ch->src;
+    f->push(f->opaque, buf, n * w);
+    ch->src += n * w;
+    ch->ctrl = (ch->ctrl & 0xfffff000) | (size - n);
+    return n;
 }
 
 void pl080_attach_paced_peripheral(PL080State *s, int id)

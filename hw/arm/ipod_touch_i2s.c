@@ -1345,6 +1345,19 @@ static void ipod_touch_i2s_reset(DeviceState *dev)
     it_i2s_test_tone(s);
 }
 
+/* pl080_attach_paced_fifo: what the TX FIFO takes before the request drops, and a run of it. */
+static unsigned it_i2s_fifo_space(void *opaque)
+{
+    IPodTouchI2SState *s = opaque;
+
+    return s->enable && s->fifo_bytes < s->fifo_depth ? s->fifo_depth - s->fifo_bytes : 0;
+}
+
+static void it_i2s_fifo_push(void *opaque, const uint8_t *buf, unsigned len)
+{
+    it_i2s_push(opaque, buf, len);
+}
+
 static void ipod_touch_i2s_realize(DeviceState *dev, Error **errp)
 {
     IPodTouchI2SState *s = IPOD_TOUCH_I2S(dev);
@@ -1352,6 +1365,10 @@ static void ipod_touch_i2s_realize(DeviceState *dev, Error **errp)
     if (s->ready_group >= GPIO_NUMINTGROUPS || s->ready_bit >= 32) {
         error_setg(errp, "ready-gpio-group/bit out of range");
         return;
+    }
+    if (s->dmac) {
+        pl080_attach_paced_fifo(s->dmac, s->dma_req_id, &s->iomem, IT_I2S_TXFIFO,
+                                it_i2s_fifo_space, it_i2s_fifo_push, s);
     }
     const char *gain_db = getenv("IT_I2S_GAIN_DB");
     s->output_gain = 1.0;

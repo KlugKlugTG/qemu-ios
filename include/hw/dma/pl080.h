@@ -68,6 +68,16 @@ struct PL080State {
      * stall the channel forever.
      */
     uint32_t paced_req;
+    /* Paced FIFOs that take a run of elements at once (pl080_attach_paced_fifo). */
+    struct PL080PacedFifo {
+        MemoryRegion *mr;
+        hwaddr offset;
+        unsigned (*space)(void *opaque);
+        void (*push)(void *opaque, const uint8_t *buf, unsigned len);
+        void *opaque;
+        hwaddr dest;            /* last channel destination checked against mr+offset */
+        bool dest_ok;
+    } fifo[32];
     pl080_channel chan[PL080_MAX_CHANNELS];
     int nchannels;
     /* Flag to avoid recursive DMA invocations.  */
@@ -105,6 +115,21 @@ struct PL080State {
  * audio ring in zero guest time, long before anything had written PCM into it.
  */
 void pl080_attach_paced_peripheral(PL080State *s, int id);
+
+/*
+ * A paced peripheral whose request line guards a FIFO register (@offset in
+ * @mr) can also take a run of elements in one call: @space says how many bytes
+ * it accepts before it drops the request, @push takes them. pl080_run then
+ * moves a memory->FIFO descriptor a run at a time instead of one element per
+ * MMIO dispatch -- the element path cost the iPod touch's audio ~1.5 us per
+ * 4-byte sample under the BQL. The run stops one element short, so the last
+ * element of every burst still takes the ordinary path: that is what lowers
+ * the request line and finishes the descriptor, exactly as before.
+ */
+void pl080_attach_paced_fifo(PL080State *s, int id, MemoryRegion *mr, hwaddr offset,
+                             unsigned (*space)(void *opaque),
+                             void (*push)(void *opaque, const uint8_t *buf, unsigned len),
+                             void *opaque);
 
 /*
  * Drive that request line. Raising it lets the channel run again; the model
