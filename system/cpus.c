@@ -23,6 +23,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "system/memory.h"
 #include "monitor/monitor.h"
 #include "qemu/coroutine-tls.h"
 #include "qapi/error.h"
@@ -570,18 +571,91 @@ void rust_bql_mock_lock(void)
  * The BQL is taken from so many places that it is worth profiling the
  * callers directly, instead of funneling them all through a single function.
  */
+extern bool it_acct_on;
+uint64_t it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow;
+extern void *it_acct_mmio_mr;
+struct it_acct_mr { void *mr; uint64_t n, ns; char *name; } it_acct_mrs[256];
+/* vCPU waits and other threads' holds by duration: <1us, <10us, <100us, <1ms, more. */
+uint64_t it_acct_wait_hist[5][2], it_acct_hold_hist[5][2];
+struct it_acct_holder { const char *file; int line; uint64_t n, ns, long_n, long_ns; } it_acct_holders[64];
+static __thread int64_t it_acct_held_since;
+static __thread const char *it_acct_held_file;
+static __thread int it_acct_held_line;
+
+static int it_acct_bucket(int64_t dt)
+{
+    return dt < 1000 ? 0 : dt < 10000 ? 1 : dt < 100000 ? 2 : dt < 1000000 ? 3 : 4;
+}
+
 void bql_lock_impl(const char *file, int line)
 {
     QemuMutexLockFunc bql_lock_fn = qatomic_read(&bql_mutex_lock_func);
 
     g_assert(!bql_locked());
+    if (unlikely(it_acct_on) && current_cpu) {
+        /* How long a vCPU waits for the BQL, MMIO accesses included. */
+        int64_t t0 = get_clock(), dt;
+
+        bql_lock_fn(&bql, file, line);
+        dt = get_clock() - t0;
+        it_acct_vcpu_bql_n++;
+        it_acct_vcpu_bql_ns += dt;
+        it_acct_vcpu_bql_slow += dt > 100000;
+        it_acct_wait_hist[it_acct_bucket(dt)][0]++;
+        it_acct_wait_hist[it_acct_bucket(dt)][1] += dt;
+        /* Non-MMIO takers are keyed by call site (file is a literal). */
+        void *key = it_acct_mmio_mr ? it_acct_mmio_mr
+                                    : (void *)((uintptr_t)file ^ ((uintptr_t)line << 48));
+        for (int i = 0; i < 256; i++) {
+            if (!it_acct_mrs[i].mr || it_acct_mrs[i].mr == key) {
+                if (!it_acct_mrs[i].mr) {
+                    /* Copy now: some regions are transient and freed later. */
+                    MemoryRegion *r = it_acct_mmio_mr;
+                    it_acct_mrs[i].name = r ? g_strdup_printf("%s@0x%" PRIx64 "+0x%" PRIx64,
+                        memory_region_name(r) ?: "?", (uint64_t)r->addr,
+                        (uint64_t)int128_get64(r->size)) : g_strdup_printf("%s:%d", file, line);
+                }
+                it_acct_mrs[i].mr = key;
+                it_acct_mrs[i].n++;
+                it_acct_mrs[i].ns += dt;
+                break;
+            }
+        }
+        it_acct_mmio_mr = NULL;
+        return;
+    }
     bql_lock_fn(&bql, file, line);
+    if (unlikely(it_acct_on)) {
+        it_acct_held_since = get_clock();
+        it_acct_held_file = file;
+        it_acct_held_line = line;
+    }
 }
 
 void bql_unlock(void)
 {
     g_assert(bql_locked());
     g_assert(!bql_unlock_blocked);
+    if (unlikely(it_acct_held_since)) {
+        /* How long threads other than the vCPU hold the BQL, by taker. */
+        int64_t dt = get_clock() - it_acct_held_since;
+
+        it_acct_held_since = 0;
+        it_acct_hold_hist[it_acct_bucket(dt)][0]++;
+        it_acct_hold_hist[it_acct_bucket(dt)][1] += dt;
+        for (int i = 0; i < 64; i++) {
+            struct it_acct_holder *h = &it_acct_holders[i];
+            if (!h->file || (h->file == it_acct_held_file && h->line == it_acct_held_line)) {
+                h->file = it_acct_held_file;
+                h->line = it_acct_held_line;
+                h->n++;
+                h->ns += dt;
+                h->long_n += dt >= 100000;
+                h->long_ns += dt >= 100000 ? dt : 0;
+                break;
+            }
+        }
+    }
     qemu_mutex_unlock(&bql);
 }
 
