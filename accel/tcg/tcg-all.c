@@ -52,6 +52,7 @@ struct TCGState {
 
     OnOffAuto mttcg_enabled;
     bool one_insn_per_tb;
+    bool cross_page_chain;
     int splitwx_enabled;
     unsigned long tb_size;
 };
@@ -83,6 +84,7 @@ static void tcg_accel_instance_init(Object *obj)
 }
 
 bool one_insn_per_tb;
+bool tcg_cross_page_chain;
 
 #ifndef CONFIG_USER_ONLY
 static void tcg_vm_change_state(void *opaque, bool running, RunState state)
@@ -242,6 +244,19 @@ static void tcg_set_one_insn_per_tb(Object *obj, bool value, Error **errp)
     qatomic_set(&one_insn_per_tb, value);
 }
 
+static bool tcg_get_cross_page_chain(Object *obj, Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+    return s->cross_page_chain;
+}
+
+static void tcg_set_cross_page_chain(Object *obj, bool value, Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+    s->cross_page_chain = value;
+    qatomic_set(&tcg_cross_page_chain, value);
+}
+
 static int tcg_gdbstub_supported_sstep_flags(AccelState *as)
 {
     /*
@@ -288,6 +303,13 @@ static void tcg_accel_class_init(ObjectClass *oc, const void *data)
                                    tcg_set_one_insn_per_tb);
     object_class_property_set_description(oc, "one-insn-per-tb",
         "Only put one guest insn in each translation block");
+
+    object_class_property_add_bool(oc, "cross-page-chain",
+                                   tcg_get_cross_page_chain,
+                                   tcg_set_cross_page_chain);
+    object_class_property_set_description(oc, "cross-page-chain",
+        "Chain direct jumps between guest pages (the guest must not remap "
+        "a code page to different code while the old page is unchanged)");
 }
 
 static const TypeInfo tcg_accel_type = {

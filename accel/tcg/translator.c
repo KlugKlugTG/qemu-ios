@@ -115,8 +115,23 @@ bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
         return false;
     }
 
-    /* Check for the dest on the same page as the start of the TB.  */
-    return translator_is_same_page(db, dest);
+    /*
+     * Check for the dest on the same page as the start of the TB. A jump
+     * to another page is normally not chained in system mode: the guest
+     * could map that virtual page to other code while the TB found there
+     * stays valid (only writes to its physical page invalidate it).
+     *
+     * cross-page-chain=on drops that rule for guests that never do this.
+     * iOS 3 on the iPod touch is one: its kernel text is mapped once and
+     * globally, user code comes from code-signed files at fixed addresses
+     * (no JIT, no ASLR, no aliased code mappings), and a freed code page is
+     * overwritten before reuse, which invalidates its TBs and unlinks jumps
+     * into them. About a third of iOS TB lookups in games are direct jumps
+     * to another page (Flight Control: 0.66M of 2M lookups/s); chaining
+     * them is +18-24% fps.
+     */
+    return translator_is_same_page(db, dest) ||
+           qatomic_read(&tcg_cross_page_chain);
 }
 
 void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
