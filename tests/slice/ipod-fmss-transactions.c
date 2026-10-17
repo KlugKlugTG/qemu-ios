@@ -26,6 +26,7 @@ typedef struct {
  uint32_t reg_script_param_d48, reg_script_param_d4c, reg_script_csgenr15;
  uint32_t reg_script_scratch_d7c, reg_script_scratch_d3c;
 } IPodTouchFMSSState;
+static bool fmss_script_erase(IPodTouchFMSSState *s, unsigned select, uint32_t row) { return true; }
 typedef struct {int unused;} AddressSpace;
 static AddressSpace address_space_memory;
 static uint8_t mem[4096];

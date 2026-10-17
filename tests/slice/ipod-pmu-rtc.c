@@ -5,11 +5,12 @@
  * RTCYR; AppleARMRTC::convertDateTimeToSeconds makes Unix seconds of it. The date must be the host's UTC
  * instant, on every read, whatever the host time is (smoke #22: it jumped days per boot).
  * 2.x/3.x (the D1759 default): a 32-bit LE seconds counter at 0x5c, one coherent snapshot per block.
+ * Both read QEMU's RTC (qemu_get_timedate, so -rtc base= moves them), and rtc-epoch moves that.
  *
  * SLICE include/hw/arm/ipod_touch_pcf50633_pmu.h define PMU_
  * SLICE hw/arm/ipod_touch_pcf50633_pmu.c range static const uint16_t battery_curve | unsigned pcf50633_adc_for_level(
  * SLICE include/hw/arm/ipod_touch_pcf50633_pmu.h typedef Pcf50633State
- * SLICE hw/arm/ipod_touch_pcf50633_pmu.c fn pmu_event_base pmu_event_count pmu_mask_base pmu_set_ap_power pmu_update_irq pmu_latch_event pcf50633_adc_for_level pmu_charge_active pmu_apply_battery_adc pcf50633_update_battery pmu_bcd pmu_bcd_rtc_read pcf50633_recv
+ * SLICE hw/arm/ipod_touch_pcf50633_pmu.c fn pmu_event_base pmu_event_count pmu_mask_base pmu_set_ap_power pmu_update_irq pmu_latch_event pcf50633_adc_for_level pmu_charge_active pmu_apply_battery_adc pcf50633_update_battery pmu_bcd pmu_rtc_base pmu_rtc_now pmu_bcd_rtc_read pcf50633_recv pcf50633_set_rtc_epoch
  */
 #include <assert.h>
 #define trace_event_get_state_backends(id) 0
@@ -27,9 +28,11 @@ typedef int *qemu_irq;
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define PCF50633(s) ((Pcf50633State *)(s))
 #define QEMU_CLOCK_VIRTUAL 0
-static time_t host_now;          /* the host clock the model reads */
+static time_t host_now;          /* the host clock */
+static time_t rtc_base_shift;    /* -rtc base=: QEMU's RTC this far from the host */
 static int tick_after = -1;      /* the host second ticks after this many bytes of the next block */
-#define time(p) (host_now)
+static void qemu_get_timedate(struct tm *tm, int offset) { time_t t = host_now + rtc_base_shift + offset; gmtime_r(&t, tm); }
+#define mktimegm timegm
 static void qemu_set_irq(int *irq, int value) {}
 static int64_t qemu_clock_get_ns(int clock) { return 0; }
 static bool pmu_trace(void) { return false; }
@@ -96,5 +99,16 @@ int main(void)
     uint32_t v = 0;
     for (int i = 0; i < 4; i++) v |= (uint32_t)pcf50633_recv((I2CSlave *)&s) << (8 * i);
     assert(v == 1790553600 && rd(0x59) == 0);
-    puts("PASS: 1.x reads the host's UTC date from the PCF50633 BCD calendar; the D1759 counter is unchanged");
+    /* -rtc base=2010-02-02T00:00:00: QEMU's RTC, not the host's, is the clock */
+    rtc_base_shift = 1265068800 - host_now;
+    s.curreg = 0x5c; v = 0;
+    for (int i = 0; i < 4; i++) v |= (uint32_t)pcf50633_recv((I2CSlave *)&s) << (8 * i);
+    assert(v == 1265068800);
+    /* rtc-epoch on top: reads the epoch at power-on and runs on with QEMU's RTC */
+    pcf50633_set_rtc_epoch(&s, 1300000000);
+    host_now += 5;
+    s.curreg = 0x5c; v = 0;
+    for (int i = 0; i < 4; i++) v |= (uint32_t)pcf50633_recv((I2CSlave *)&s) << (8 * i);
+    assert(v == 1300000005);
+    puts("PASS: 1.x reads QEMU's RTC as a UTC date from the PCF50633 BCD calendar, the D1759 counter as seconds, -rtc base= and rtc-epoch move both");
 }

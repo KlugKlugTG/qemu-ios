@@ -55,3 +55,12 @@ static uint32_t ldl_le_p(const void *p) {
 }
 static void cpu_physical_memory_read(uint32_t a, void *p, size_t n) { assert(a + n <= sizeof(mem)); memcpy(p, mem + a, n); }
 static void cpu_physical_memory_write(uint32_t a, const void *p, size_t n) { assert(a + n <= sizeof(mem)); memcpy(mem + a, p, n); }
+/* BLOCK ERASEs the program issued: chip-select bits and row. */
+static unsigned erases;
+static unsigned erase_select[8];
+static uint32_t erase_row[8];
+static bool fmss_script_erase(IPodTouchFMSSState *s, unsigned select, uint32_t row) {
+    if (erases < 8) { erase_select[erases] = select; erase_row[erases] = row; }
+    erases++;
+    return true;
+}

@@ -35,18 +35,16 @@ uint32_t it_iboot_find_miu_epoch(const uint8_t *image, size_t size,
                                  uint32_t fuse);
 
 /*
- * Guest address of gBootArgs.commandLine, from the literal loads around
- * iBoot's `printf("gBootArgs.commandLine = [%s]\n", ...)`. Only the 2.x
- * iBoots (385.x) load the buffer from a literal; later ones pass it in a
- * register, so this is the NAND-boot (bootrom -> LLB -> iBoot) mechanism.
+ * Where iBoot's `snprintf(gBootArgs.commandLine, 0x100, "%s ", args)` keeps
+ * the format's address: the guest address of that literal-pool slot, with
+ * gBootArgs.commandLine through *command_line. Release iBoots format an empty
+ * string there, so pointing the slot at commandLine, filled with the wanted
+ * arguments ('%' doubled), makes iBoot hand them to the kernel itself. Found
+ * in every iPod touch 2G iBoot, 2.1.1 .. 4.2.1; 0 when absent, ambiguous, or
+ * when another load shares the slot.
  */
-uint32_t it_iboot_find_command_line(const uint8_t *image, size_t size,
-                                    uint32_t base);
-
-/* Portable n72 snprintf format literal and its CommandLine buffer.
- * Returns zero for absent/ambiguous/shared patterns. Upstream 1b451cc86c77. */
 uint32_t it_iboot_find_boot_args_format(const uint8_t *image, size_t size,
-                                      uint32_t base, uint32_t *command_line);
+                                        uint32_t base, uint32_t *command_line);
 
 #ifndef IT_IBOOT_HOST_TEST
 #include "exec/hwaddr.h"

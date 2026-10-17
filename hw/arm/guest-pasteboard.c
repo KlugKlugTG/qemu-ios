@@ -7,6 +7,7 @@
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "qemu/error-report.h"
+#include "qemu/thread.h"
 #include "exec/cpu-common.h"
 #include "hw/core/cpu.h"
 #include "cpu.h"
@@ -29,8 +30,36 @@
  */
 static void guest_pb_notify(Notifier *notifier, void *data)
 {
-    /* We only ever publish; host-side clipboard changes are pushed to the
-     * guest explicitly (menu item / qom-set), never automatically. */
+    /* We only ever publish; host-side clipboard changes come in through the
+     * "pasteboard" property (qom-set, qemu_ios_ui_paste), which a front end
+     * calls whenever its own clipboard changes. */
+}
+
+/*
+ * The guest's latest copy for a front end that polls rather than registering a
+ * clipboard peer (qemu_ios_ui_guest_pasteboard, from the app's helper thread).
+ * One machine per process, so one slot.
+ */
+static QemuMutex guest_text_lock;
+static char *guest_text;
+static uint64_t guest_text_serial;
+
+static void __attribute__((constructor)) guest_text_lock_init(void)
+{
+    qemu_mutex_init(&guest_text_lock);
+}
+
+char *guest_pb_guest_text(uint64_t *serial)
+{
+    char *copy = NULL;
+
+    qemu_mutex_lock(&guest_text_lock);
+    if (guest_text && guest_text_serial != *serial) {
+        *serial = guest_text_serial;
+        copy = strdup(guest_text);
+    }
+    qemu_mutex_unlock(&guest_text_lock);
+    return copy;
 }
 
 static void guest_pb_request(QemuClipboardInfo *info,
@@ -131,6 +160,12 @@ static void guest_pb_guest_commit(GuestPasteboard *pb)
     if (!pb->pb_guest) {
         return;
     }
+
+    qemu_mutex_lock(&guest_text_lock);
+    g_free(guest_text);
+    guest_text = g_strndup(pb->pb_guest, pb->pb_guest_len);
+    guest_text_serial++;
+    qemu_mutex_unlock(&guest_text_lock);
 
     /*
      * Registered on first use rather than at machine init: a headless run has

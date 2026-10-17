@@ -55,9 +55,7 @@ static void portable_runstate_changed(void *opaque, bool running, RunState state
 }
 static void portable_release_all(void);
 static void portable_release_input(bool preserve_buttons);
-#ifndef __APPLE__
 static void ios_cancel_publish(bool stopping);
-#endif
 static void ios_sequence_reset(void *opaque)
 {
     ios_sequence_cancel_current();
@@ -121,10 +119,8 @@ static struct {
 
     /* Set by a partial update, cleared when a whole frame is published. */
     bool pending;
-#ifndef __APPLE__
-    /* Main AioContext/BQL only; never retains a DisplaySurface pointer. */
+    /* Publishes a frame once the update that painted it has returned. */
     QEMUBH *publish_bh;
-#endif
 } ios;
 
 /* Protected by frame_lock, including getters; not reset or migrated.
@@ -350,24 +346,27 @@ static void ios_capture(DisplaySurface *surface)
 }
 
 /*
- * Note what changed; do not publish yet.
+ * Note what changed; publish once the update that painted it has returned.
  *
  * Now that the panel does proper dirty tracking, one guest frame arrives as
  * SEVERAL partial updates. Publishing each one hands the app a frame caught
  * mid-paint, which is visible as the screen wiping top-to-bottom instead of
  * changing at once -- and costs a full-surface copy per fragment rather than
- * per frame. Portable hosts defer publication until the panel paint returns;
- * Apple hosts retain the original display-refresh publication boundary.
+ * per frame. Publication waits until the panel paint returns (below).
  */
 static void ios_gfx_update(DisplayChangeListener *dcl,
                            int x, int y, int w, int h)
 {
     ios.pending = true;
-#ifndef __APPLE__
+    /*
+     * A panel paints each frame in one call (the LCD's vsync push, the iPad's
+     * display_update), so a bottom half publishes it whole, right after it is
+     * painted. Waiting for ios_refresh, on QEMU's 30 ms display timer, showed a
+     * 60 Hz guest at under 33 fps, with frames dropped unevenly.
+     */
     if (ios.publish_bh) {
         qemu_bh_schedule(ios.publish_bh);
     }
-#endif
 }
 
 static void ios_gfx_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
@@ -386,9 +385,7 @@ static void ios_gfx_switch(DisplayChangeListener *dcl, DisplaySurface *surface)
     }
 }
 
-#ifndef __APPLE__
-/* Adapted from upstream 97860b36b0e9fcdd008e95e58efff9609ca44aee.
- * Coalesce dirty rectangles until the whole panel paint has returned, rather
+/* Coalesce dirty rectangles until the whole panel paint has returned, rather
  * than resampling its vsync at QEMU's 30 ms display-refresh interval. */
 static void ios_publish(QemuConsole *con)
 {
@@ -421,31 +418,15 @@ static void ios_cancel_publish(bool stopping)
     }
     ios.pending = false;
 }
-#endif
 
 static void ios_refresh(DisplayChangeListener *dcl)
 {
-#ifndef __APPLE__
     /* Display cleanup can still notify listeners after the main loop ends. */
     if (!ios.attached || !qatomic_read(&ios_vm_alive)) {
         return;
     }
     graphic_hw_update(dcl->con);
     ios_publish(dcl->con);
-#else
-    DisplaySurface *surface;
-
-    graphic_hw_update(dcl->con);
-
-    if (!ios.pending) {
-        return;
-    }
-    surface = qemu_console_surface(dcl->con);
-    if (surface) {
-        ios_capture(surface);
-        ios.pending = false;
-    }
-#endif
 }
 
 static const DisplayChangeListenerOps ios_dcl_ops = {
@@ -544,9 +525,7 @@ void qemu_ios_ui_vm_started(void)
     if (ios.con) {
         ios.dcl.ops = &ios_dcl_ops;
         ios.dcl.con = ios.con;
-#ifndef __APPLE__
         ios.publish_bh = qemu_bh_new(ios_publish_bh, NULL);
-#endif
         register_displaychangelistener(&ios.dcl);
     }
     qatomic_set(&portable_paused, !runstate_is_running());
@@ -646,6 +625,46 @@ void qemu_ios_ui_frame_size(int *width, int *height)
     qemu_mutex_unlock(&ios.frame_lock);
 }
 
+/*
+ * Host input in the order the host sent it. Bottom halves scheduled before one main-loop poll run in reverse:
+ * aio_bh_enqueue pushes onto the head of the list aio_bh_poll walks from the head. A press and release sent together,
+ * as a trackpad's tap to click sends them, ran release first, so the touch went down and stayed down (the next touch
+ * was only its motion) and a button stayed pressed. Every input goes through one FIFO instead; each bottom half
+ * drains it in order, and one that finds it empty does nothing.
+ */
+struct ios_input {
+    void (*fn)(void *);
+    void *opaque;
+};
+static GMutex ios_input_lock;
+static GQueue ios_input_queue = G_QUEUE_INIT;
+
+static void ios_input_bh(void *unused)
+{
+    for (;;) {
+        g_mutex_lock(&ios_input_lock);
+        struct ios_input *e = g_queue_pop_head(&ios_input_queue);
+        g_mutex_unlock(&ios_input_lock);
+        if (!e) {
+            return;
+        }
+        e->fn(e->opaque);
+        g_free(e);
+    }
+}
+
+void qemu_ios_ui_input_later(void (*fn)(void *), void *opaque)
+{
+    struct ios_input *e = g_new(struct ios_input, 1);
+
+    e->fn = fn;
+    e->opaque = opaque;
+    g_mutex_lock(&ios_input_lock);
+    g_queue_push_tail(&ios_input_queue, e);
+    g_mutex_unlock(&ios_input_lock);
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_input_bh, NULL);
+}
+
 struct ios_touch {
     double nx, ny;             /* normalized 0..1 over the panel */
     bool down;
@@ -713,6 +732,8 @@ void qemu_ios_ui_touch(int slot, int phase, double nx, double ny)
     t->nx = nx;
     t->ny = ny;
     t->down = (phase != QEMU_IOS_TOUCH_END);
+    /* Linux: the portable FIFO, shared with portable touches and controls, so
+     * every host input keeps one order. Apple: qemu_ios_ui_input_later. */
     if (!ios_input_enqueue(ios_touch_bh, t, g_free)) {
         g_free(t);
     }
@@ -800,6 +821,8 @@ void qemu_ios_ui_button(int button, bool down)
     b = g_new0(struct ios_button, 1);
     b->button = button;
     b->down = down;
+    /* Linux: the portable FIFO, shared with portable touches and controls, so
+     * every host input keeps one order. Apple: qemu_ios_ui_input_later. */
     if (!ios_input_enqueue(ios_button_bh, b, g_free)) {
         g_free(b);
     }

@@ -21,7 +21,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPodTouchLCDState, IPOD_TOUCH_LCD)
  * NANOSECONDS_PER_SECOND / 60 next to a dead reference to
  * LCD_REFRESH_RATE_FREQUENCY (10 Hz), which is not the rate anything runs at.
  */
-#define LCD_VSYNC_PERIOD_NS (NANOSECONDS_PER_SECOND / 60)
+/* The panel's refresh: 60 Hz, as the hardware's, unless the "refresh-hz" property asks for more. */
+#define LCD_VSYNC_PERIOD_NS(s) (NANOSECONDS_PER_SECOND / (s)->refresh_hz)
 
 /* Diagnostic process-lifetime totals, BQL-only; not guest or migrated state.
  * Scans count refreshes with valid surfaces. Updated regions include forced
@@ -65,6 +66,7 @@ typedef struct IPodTouchLCDState
     uint32_t lcd_con;
     bool planes_enabled;
     bool s5l8900;   /* "s5l8900" property: iPod touch 1G register layout */
+    uint32_t refresh_hz;   /* "refresh-hz": the frame interrupt's rate, 60 as on the device */
     /*
      * "panel-width"/"panel-height": the panel's pixel geometry, 320x480 as
      * shipped. Any other size is an opt-in larger panel (issue #21): the

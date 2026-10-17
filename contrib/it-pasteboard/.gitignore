@@ -3,3 +3,4 @@
 # this tree, and "a successful build does not mean the binary you ran is the one
 # you built" applies to guest binaries too.
 it_pbd
+it_pbtool

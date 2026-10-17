@@ -184,48 +184,6 @@ uint32_t it_iboot_find_miu_epoch(const uint8_t *image, size_t size,
     return found;
 }
 
-uint32_t it_iboot_find_command_line(const uint8_t *image, size_t size,
-                                    uint32_t base)
-{
-    static const char format[] = "gBootArgs.commandLine = [%s]\n";
-    uint32_t found = 0;
-    if (!image || size < sizeof(format) || size > UINT32_MAX - base || (base & 3)) {
-        return 0;
-    }
-    for (size_t i = 0; i + 10 <= size; i += 2) {
-        /* ldr r4, literal; ldr r0, literal; adds r1, r4, #0; bl printf */
-        uint16_t buffer_load = iboot_u16(image + i);
-        uint16_t format_load = iboot_u16(image + i + 2);
-        if ((buffer_load & 0xff00) != 0x4c00 ||
-            (format_load & 0xff00) != 0x4800 ||
-            iboot_u16(image + i + 4) != 0x1c21 ||
-            (iboot_u16(image + i + 6) & 0xf800) != 0xf000 ||
-            (iboot_u16(image + i + 8) & 0xf800) != 0xf800) {
-            continue;
-        }
-        size_t bp = ((i + 4) & ~(size_t)3) + (buffer_load & 255) * 4;
-        size_t fp = ((i + 6) & ~(size_t)3) + (format_load & 255) * 4;
-        if (bp > size - 4 || fp > size - 4) {
-            continue;
-        }
-        uint32_t buffer = iboot_u32(image + bp);
-        uint32_t text = iboot_u32(image + fp);
-        if (text < base || text - base > size - sizeof(format) ||
-            memcmp(image + (text - base), format, sizeof(format)) ||
-            size < 256 || buffer < base || (buffer & 3) ||
-            buffer - base > size - 256) {
-            continue;
-        }
-        if (found) {
-            return 0;
-        }
-        found = buffer;
-    }
-    return found;
-}
-
-/* Portable finder adapted from upstream 1b451cc86c77c153fae1d7be2d4f151e693a9d75.
- * The original Apple command-line finder above remains unchanged. */
 /* The literal-pool slot an armv6 Thumb `ldr rN, [pc, #imm]` at `at` loads. */
 static size_t iboot_ldr_slot(size_t at, uint16_t insn)
 {
@@ -296,7 +254,6 @@ uint32_t it_iboot_find_boot_args_format(const uint8_t *image, size_t size,
     }
     return found;
 }
-
 
 #ifndef IT_IBOOT_HOST_TEST
 uint32_t it_iboot_epoch(AddressSpace *as, uint32_t base, size_t image_size)

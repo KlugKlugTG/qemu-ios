@@ -81,16 +81,8 @@ static void synthetic(void){
 
 
 
-static void original_finder(void) {
- uint8_t image[1024]={0};
- put16(image,0x4c0f);put16(image+2,0x4810);put16(image+4,0x1c21);put16(image+6,0xf000);put16(image+8,0xf800);
- put32(image+64,BASE+0x300);put32(image+68,BASE+128);
- strcpy((char *)image+128,"gBootArgs.commandLine = [%s]\n");
- assert(it_iboot_find_command_line(image,sizeof(image),BASE)==BASE+0x300);
- image[128]='x';assert(!it_iboot_find_command_line(image,sizeof(image),BASE));
-}
 int main(void) {
- synthetic();original_finder();format_fixture(ram,BASE);
+ synthetic();format_fixture(ram,BASE);
  uint32_t expected_slot=BASE+68,expected_command=BASE+0x300;
  const char *fixture=getenv("IT_TEST_IBOOT");
  if(fixture){
@@ -117,5 +109,5 @@ int main(void) {
  memcpy(ram,original,sizeof(ram));memset(s.boot_args,'%',128);s.boot_args[128]=0;s.boot_args_format=0;
  ipod_touch_boot_args_before_nand_read(&s.boot_args_nand_read,NULL);assert(writes==before);
  free(original);
- puts("PASS production early-handoff finder/hook: unique pattern, near-misses, old finder, ordered NAND cache/restage, percent bounds and no post-kernel/empty/absent writes");
+ puts("PASS production early-handoff finder/hook: unique pattern, near-misses, ordered NAND cache/restage, percent bounds and no post-kernel/empty/absent writes");
 }

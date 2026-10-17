@@ -231,7 +231,10 @@ void page_init(void)
     page_table_config_init();
 }
 
-/* A physical address can have TBs with different instruction modes/counts. */
+/*
+ * Remember how many insns a TB starting at phys_pc may hold.  TBs of other
+ * flags can start at the same address, so a limit only ever shrinks.
+ */
 static void tb_remember_io_insn_limit(tb_page_addr_t phys_pc, int limit)
 {
     gpointer key = (gpointer)(uintptr_t)phys_pc;
@@ -251,8 +254,10 @@ static int tb_apply_io_insn_limit(tb_page_addr_t phys_pc, uint32_t cflags,
 {
     int limit;
 
-    /* Explicit-count replay TBs must retain their requested instruction count,
-     * including branch plus delay slot on targets that have delay slots. */
+    /*
+     * A TB asked for by insn count (an I/O or watchpoint replay) keeps it: on
+     * targets with delay slots it must hold the branch and its slot.
+     */
     if (phys_pc == (tb_page_addr_t)-1 || (cflags & CF_COUNT_MASK)) {
         return max_insns;
     }

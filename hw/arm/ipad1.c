@@ -94,6 +94,7 @@ typedef struct A4Board {
     uint64_t dram_size;                  /* also mirrored right above itself (iBoot) */
     uint32_t chipid[2];                  /* ChipID fuse words 0-1 */
     uint8_t board_id;                    /* PMGR POWER_ID[23:16] */
+    const uint8_t *product_id;           /* /product product-id (20 bytes) as iBoot fills it; NULL: left zero */
     /* Panel: scan-out size, the DSI ID read, lanes. */
     uint16_t width, height;
     uint32_t panel_id;
@@ -202,7 +203,7 @@ static const A4Board a4_k48 = {
         { 0, 0x39, TYPE_CD3272MIKEY },
         /* I2C2: LIS331DLH accelerometer and TSL2581 light sensor. */
         { 2, 0x19, TYPE_LIS302DL },
-        { 2, 0x39, TYPE_S5L8930_TSL2581 },
+        { 2, 0x39, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
     },
     /* On the iPad the LIS331 sits turned 180 degrees about X relative to
      * the iPod's mounting: the iPod vectors read with Y (and Z) negated.
@@ -253,7 +254,7 @@ static const A4Board a4_n81 = {
         /* CS42L59 (audio0): the same MAP register file the CS42L61 driver saw. */
         { 0, 0x4a, TYPE_CS42L59 },
         { 2, 0x19, TYPE_LIS302DL },
-        { 2, 0x49, TYPE_S5L8930_TSL2581 },
+        { 2, 0x49, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
         { 2, 0x68, TYPE_S5L8930_L3G4200D, 0x21, 0x05 },   /* gyro,ap3gdl: INT1, INT2 */
     },
     /* DT accelerometer orientation rows (0,-1,0) (-1,0,0) (0,0,1): x reads -y, y reads -x. */
@@ -269,6 +270,12 @@ static const A4Board a4_n81 = {
     .wifi_mac = { 0x02, 0x00, 0x00, 0x81, 0x00, 0x01 },  /* synthetic, locally administered */
 };
 
+/* The iPhone 4's product-id, as iBoot for n90ap carries it (10B329 and 11D257, just ahead of "DEVICEINFOBBT"). */
+static const uint8_t a4_n90_product_id[20] = {
+    0x1e, 0xdd, 0x21, 0x60, 0x59, 0x20, 0x2d, 0x7c, 0xf2, 0x6c,
+    0x0e, 0x50, 0x98, 0x97, 0x7a, 0x6c, 0xf5, 0x44, 0x36, 0xd9,
+};
+
 /*
  * iPhone 4 (N90AP, GSM): 512 MiB, the portrait 640x960 panel and N1 digitizer
  * N81 has, the iPad's CS42L61 + Mikey, HDQ gauge, BT on uart3. No NOR
@@ -281,6 +288,7 @@ static const A4Board a4_n90 = {
     .dram_size = 0x20000000,
     .chipid = { 0x31800387, 0x80758000 },    /* same die as K48 */
     .board_id = 0x00,
+    .product_id = a4_n90_product_id,
     .width = 640, .height = 960,
     .panel_id = 0x0969e5a1,                  /* ponytail: K48's, as N81's */
     .dsi_lanes = 4,
@@ -797,6 +805,40 @@ static void ipad1_cpu_reset(void *opaque)
         a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
                    &(A4DTEdit){ "accelerometer", "accel-sensitivity-calibration", cal, sizeof(cal) });
     }
+    /*
+     * iBoot fills /product product-id too (6.0 on reserves it zeroed): the
+     * device type MobileGestalt's MGIsDeviceOfType compares. Left zero, 7.x
+     * CoreMotion places the device on no platform and so gives it no gyro
+     * (isGyroAvailable 0), and CoreLocation's orientation detector, which on a
+     * gyro device needs one, never starts ("No gyro; not detecting
+     * orientation!"): backboardd's device orientation stops following the
+     * accelerometer and apps never turn.
+     */
+    if (s->board->product_id) {
+        a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
+                   &(A4DTEdit){ "product", "product-id", s->board->product_id, 20 });
+    }
+    /*
+     * The USB keyboard's EHCI, up next to device mode (docs/ipad1/usb-keyboard.md).
+     * 4.3-5.1.1 DTs give usb-ehci publish-criteria 0xc: AppleEmbeddedUSBArbitrator's
+     * updatePublishedNubs publishes a child whose criteria meet its mask, and the
+     * mask has 0x8 while usb-complex has hsic-enabled (which kboot adds), so the
+     * EHCI is up from start. 6.0 dropped that bit (0x4: host mode only, as with a
+     * Camera Connection Kit) and gave the root port a usb-ehci-port1 node with
+     * port-type 2, a dock port left unpowered (PORTSC PP cleared in the middle of
+     * the first reset) unless the cable is a host-side one, so 6.x and 7.x never
+     * enumerated the keyboard. The 5.x criteria and port-type 0 (the port's other
+     * valid type, powered as a built-in port) bring them in line; DTs without the
+     * port node or the property walk past.
+     */
+    {
+        static const uint8_t usb_criteria[4] = { 0xc }, usb_port_type[4] = { 0 };
+
+        a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
+                   &(A4DTEdit){ "usb-ehci", "publish-criteria", usb_criteria, 4 });
+        a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
+                   &(A4DTEdit){ "usb-ehci-port1", "port-type", usb_port_type, 4 });
+    }
     if (address_space_write(&address_space_memory, load_pa,
                             MEMTXATTRS_UNSPECIFIED, data, image_len) != MEMTX_OK) {
         error_report("ipad1: cannot stage kboot bundle at 0x%x", load_pa);
@@ -1137,6 +1179,9 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
             continue;
         }
         slave = i2c_slave_new(d->type, d->addr);
+        if (object_dynamic_cast(OBJECT(slave), TYPE_S5L8930_TSL2581)) {
+            object_property_add_child(OBJECT(s), "lightsensor", OBJECT(slave));   /* qom-set its lux */
+        }
         dev = DEVICE(slave);
         if (!strcmp(d->type, TYPE_LIS302DL)) {
             /*
@@ -1166,7 +1211,7 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
         if (!strcmp(d->type, TYPE_S5L8930_D1815)) {
             /* the PMU's clock and the agent's time sync agree on a pinned date */
             qdev_prop_set_uint64(dev, "rtc-epoch", s->rtc_epoch);
-            ipod_agent_set_clock_offset(s->agent, s->rtc_epoch ? (int64_t)s->rtc_epoch - time(NULL) : 0);
+            ipod_agent_set_clock_offset(s->agent, s->rtc_epoch ? (int64_t)s->rtc_epoch - ipod_agent_rtc_now() : 0);
         }
         i2c_slave_realize_and_unref(slave, bus, &error_fatal);
         if (d->irq2_pin) {

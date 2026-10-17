@@ -1,6 +1,6 @@
 /* CPU compatibility DMA checks using actual FMSS handlers and adversarial transactions.
  *
- * SLICE hw/arm/ipod_touch_fmss.c fn fmss_write_dma_read fmss_read_dma_word fmss_read_dma_write find_bit_index read_nand_pages
+ * SLICE hw/arm/ipod_touch_fmss.c fn fmss_write_dma_read fmss_read_dma_word fmss_read_dma_write find_bit_index fmss_page_erased read_nand_pages
  */
 #include <stdint.h>
 #include <inttypes.h>
@@ -29,7 +29,9 @@ typedef struct {
  uint32_t reg_pages_out_addr,reg_page_spare_out_addr;
  uint8_t page_buffer[4096],page_spare_buffer[64];
  int before_read;
+ bool read_clean;
 } IPodTouchFMSSState;
+static bool fmss_physical(void){return false;}
 static void notifier_list_notify(void*n,void*s){(void)n;(void)s;}
 static unsigned checked_read(uint64_t addr,void*p,size_t n){
  if(addr==read_fault||addr>sizeof(ram)||n>sizeof(ram)-addr){memset(p,0xff,n);read_failures++;return MEMTX_DECODE_ERROR;}

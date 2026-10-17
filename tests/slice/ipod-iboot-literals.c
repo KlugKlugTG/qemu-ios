@@ -67,11 +67,12 @@ static void epoch_fixture(uint8_t *img, size_t acc, size_t call, unsigned floor)
  put16(img+call,0xf000|((off>>12)&0x7ff)); put16(img+call+2,0xf800|((off>>1)&0x7ff));
  put16(img+call+4,0x2800|(floor-1)); put16(img+call+6,0xd800); put16(img+call+8,0x2000|floor); put16(img+call+10,0xbd80);
 }
-static void command_line_fixture(uint8_t *image, uint32_t base){
- memset(image,0,1024);
- put16(image,0x4c0f);put16(image+2,0x4810);put16(image+4,0x1c21);put16(image+6,0xf000);put16(image+8,0xf800);
- put32(image+64,base+512);put32(image+68,base+128);
- memcpy(image+128,"gBootArgs.commandLine = [%s]\n",29);
+/* ldr r3, =commandLine; ldr r2, ="%s "; adds r0, r3, #0; str r3, [sp]; movs r1, #0x80; lsls r1, r1, #1; adds r3, r6, #0; bl
+ * (7E18's form), its two literals at 64 and 68, "%s " at 128 and commandLine at 0x300 */
+static void format_fixture(uint8_t *image, uint32_t base){
+ static const uint16_t code[]={0x4b0f,0x4a10,0x1c18,0x9300,0x2180,0x0049,0x1c33,0xf000,0xf800};
+ memset(image,0,1024); for(size_t i=0;i<9;i++)put16(image+2*i,code[i]);
+ put32(image+64,base+0x300); put32(image+68,base+128); memcpy(image+128,"%s ",4);
 }
 static void synthetic(void){
  static uint8_t img[0x27000];
@@ -90,34 +91,35 @@ static void synthetic(void){
  img[0x1a14a]='X'; assert(!it_iboot_find_epoch(img,sizeof(img))); img[0x1a14a]='E';                 /* not the panic */
  put16(img+0x1fb8,0x0e1a); assert(!it_iboot_find_epoch(img,sizeof(img))); put16(img+0x1fb8,0x0e1b); /* another register */
  memcpy(img+0x3000,img+0x1fb6,10); put32(img+0x3020,0x1801a140); assert(!it_iboot_find_epoch(img,sizeof(img))); /* ambiguous */
- /* the 2.x command-line literal pair */
- uint8_t image[1024];uint32_t base=0x10000000;
- command_line_fixture(image,base); assert(it_iboot_find_command_line(image,sizeof(image),base)==base+512);
- command_line_fixture(image,base+0x1000); assert(it_iboot_find_command_line(image,sizeof(image),base+0x1000)==base+0x1200);
- command_line_fixture(image,base);image[128]='X'; assert(!it_iboot_find_command_line(image,sizeof(image),base));
- command_line_fixture(image,base);put32(image+64,base+900); assert(!it_iboot_find_command_line(image,sizeof(image),base));
- command_line_fixture(image,base);put32(image+68,base-4); assert(!it_iboot_find_command_line(image,sizeof(image),base));
- command_line_fixture(image,base);image[4]^=1; assert(!it_iboot_find_command_line(image,sizeof(image),base));
- command_line_fixture(image,base);memcpy(image+16,image,10);put16(image+16,0x4c0b);put16(image+18,0x480c);
- assert(!it_iboot_find_command_line(image,sizeof(image),base));
- assert(!it_iboot_find_command_line(NULL,1024,base));
- command_line_fixture(image,base); for(size_t n=0;n<768;n++)assert(!it_iboot_find_command_line(image,n,base));
- assert(!it_iboot_find_command_line(image,1024,UINT32_MAX-512));
+ /* the command-line format slot */
+ uint8_t image[1024];uint32_t base=0x10000000,cmd=0;
+ format_fixture(image,base); assert(it_iboot_find_boot_args_format(image,sizeof(image),base,&cmd)==base+68 && cmd==base+0x300);
+ format_fixture(image,base+0x1000); assert(it_iboot_find_boot_args_format(image,sizeof(image),base+0x1000,&cmd)==base+0x1044);
+ format_fixture(image,base);image[129]='d'; assert(!it_iboot_find_boot_args_format(image,sizeof(image),base,&cmd));   /* not "%s " */
+ format_fixture(image,base);put16(image+8,0x2181); assert(!it_iboot_find_boot_args_format(image,sizeof(image),base,&cmd)); /* not 0x100 */
+ format_fixture(image,base);put16(image+2,0x4910); assert(!it_iboot_find_boot_args_format(image,sizeof(image),base,&cmd)); /* not r2 */
+ format_fixture(image,base);put32(image+64,base+0x302); assert(!it_iboot_find_boot_args_format(image,sizeof(image),base,&cmd)); /* unaligned buffer */
+ format_fixture(image,base);put16(image+20,0x480b); assert(!it_iboot_find_boot_args_format(image,sizeof(image),base,&cmd)); /* the slot is shared */
+ format_fixture(image,base);memcpy(image+24,image,18);put16(image+24,0x4b0b);put16(image+26,0x4a0c);put32(image+72,base+0x300);put32(image+76,base+128);
+ assert(!it_iboot_find_boot_args_format(image,sizeof(image),base,&cmd));                                                   /* ambiguous */
+ assert(!it_iboot_find_boot_args_format(NULL,1024,base,&cmd));
+ format_fixture(image,base); for(size_t n=0;n<132;n++)assert(!it_iboot_find_boot_args_format(image,n,base,&cmd));
+ assert(!it_iboot_find_boot_args_format(image,1024,UINT32_MAX-512,&cmd));
 }
 
-/* build, IPSW sha1, iBoot IV, iBoot key, iBoot version, epoch, gBootArgs.commandLine */
-static const struct { const char *build, *sha1, *iv, *key, *version; unsigned epoch; uint32_t cmdline; } BUILDS[] = {
- {"5F138", "c3c700be49ad227d1152188e7c1e46b8958fd1e4", "b3633afbe02e0e9ba4d7366c47abe5a8", "2d916dabb6dfd4594dbe3635b4c71662", "iBoot-385.22", 1, 0x0ff2a584},
- {"5G77a", "34a0a489605f34d6cc6c9954edcaaf9a050deedc", "c9a400fab94cb516953a6e30c7c17662", "a64b02ed6808452f7283bbea5dba2411", "iBoot-385.49", 2, 0x0ff2a584},
- {"5H11a", "9af5625ea34acdd8abeb6fce71a72651d0c815d5", "f7b095d291501e74093416fc2453a910", "ec5aabc0a54a268caf0e5dab337220ee", "iBoot-385.49", 2, 0x0ff2a584},
- {"7A341", "0f7fc76d9b9aa826b5ab14be9821a315d3d9dc42", "c71876986992913eeb8b12b072e00293", "e0476a04b7dfba9531e1c0263f8b0143", "iBoot-596.24", 3, 0},
- {"7C145", "e0d8800a4fc7cc5be6976ddbceb43c2d2a7120d7", "b31c608013ab8980178b79a1d8ba21df", "edebb477d07161edeac17b12c33ba783", "iBoot-636.66", 4, 0},
- {"7D11",  "e7c83d4a5baec0e81816ae1cd1caf9a4dc38ebf0", "5e421f8ce8c811311bbbb8a734ec07ce", "191b6846543d7026b6f0d5247f030588", "iBoot-636.66", 4, 0},
- {"7E18",  "5f4f5c01eda2f811f73167e7d1f82dbeed82367b", "7c090ab8c8a0cbc95db1007b322fe960", "ca3893d43d9446cd2f9f3fd5371d02e9", "iBoot-636.66.33", 4, 0},
- {"8A293", "c026c373bc535496a6f901de2ba37d4a487413bf", "892d0889ac3971254ced87e974fcff54", "cf0ce641bb5d00f703d8265fffb45c59", "iBoot-889.24", 4, 0},
- {"8A400", "06a42297d94461264eb64d7c8640cc5d1c19edeb", "892d0889ac3971254ced87e974fcff54", "cf0ce641bb5d00f703d8265fffb45c59", "iBoot-889.24", 4, 0},
- {"8B117", "97abde6207660bd876fd476275dd526d0dcf3d19", "07751c86d421a18d427ac7f94a74d747", "0359d66dd638e5c87e83b4e4daa941bf", "iBoot-931.18.27", 4, 0},
- {"8C148", "b9efddc7bb4350c237a8d3846af61bbfc8a2f647", "fcd3e0675b376f67e95328a2c691d363", "7a105db73b007a24ef18c9226452d761", "iBoot-931.71.16", 4, 0},
+/* build, IPSW sha1, iBoot IV, iBoot key, iBoot version, epoch, the "%s " format's literal slot, gBootArgs.commandLine */
+static const struct { const char *build, *sha1, *iv, *key, *version; unsigned epoch; uint32_t format, cmdline; } BUILDS[] = {
+ {"5F138", "c3c700be49ad227d1152188e7c1e46b8958fd1e4", "b3633afbe02e0e9ba4d7366c47abe5a8", "2d916dabb6dfd4594dbe3635b4c71662", "iBoot-385.22", 1, 0x0ff10b10, 0x0ff2a584},
+ {"5G77a", "34a0a489605f34d6cc6c9954edcaaf9a050deedc", "c9a400fab94cb516953a6e30c7c17662", "a64b02ed6808452f7283bbea5dba2411", "iBoot-385.49", 2, 0x0ff10b18, 0x0ff2a584},
+ {"5H11a", "9af5625ea34acdd8abeb6fce71a72651d0c815d5", "f7b095d291501e74093416fc2453a910", "ec5aabc0a54a268caf0e5dab337220ee", "iBoot-385.49", 2, 0x0ff10b18, 0x0ff2a584},
+ {"7A341", "0f7fc76d9b9aa826b5ab14be9821a315d3d9dc42", "c71876986992913eeb8b12b072e00293", "e0476a04b7dfba9531e1c0263f8b0143", "iBoot-596.24", 3, 0x0ff10fd8, 0x0ff295a4},
+ {"7C145", "e0d8800a4fc7cc5be6976ddbceb43c2d2a7120d7", "b31c608013ab8980178b79a1d8ba21df", "edebb477d07161edeac17b12c33ba783", "iBoot-636.66", 4, 0x0ff11de0, 0x0ff28404},
+ {"7D11",  "e7c83d4a5baec0e81816ae1cd1caf9a4dc38ebf0", "5e421f8ce8c811311bbbb8a734ec07ce", "191b6846543d7026b6f0d5247f030588", "iBoot-636.66", 4, 0x0ff11de0, 0x0ff28404},
+ {"7E18",  "5f4f5c01eda2f811f73167e7d1f82dbeed82367b", "7c090ab8c8a0cbc95db1007b322fe960", "ca3893d43d9446cd2f9f3fd5371d02e9", "iBoot-636.66.33", 4, 0x0ff11de0, 0x0ff28404},
+ {"8A293", "c026c373bc535496a6f901de2ba37d4a487413bf", "892d0889ac3971254ced87e974fcff54", "cf0ce641bb5d00f703d8265fffb45c59", "iBoot-889.24", 4, 0x0ff0a4bc, 0x0ff27924},
+ {"8A400", "06a42297d94461264eb64d7c8640cc5d1c19edeb", "892d0889ac3971254ced87e974fcff54", "cf0ce641bb5d00f703d8265fffb45c59", "iBoot-889.24", 4, 0x0ff0a4bc, 0x0ff27924},
+ {"8B117", "97abde6207660bd876fd476275dd526d0dcf3d19", "07751c86d421a18d427ac7f94a74d747", "0359d66dd638e5c87e83b4e4daa941bf", "iBoot-931.18.27", 4, 0x0ff0a554, 0x0ff28924},
+ {"8C148", "b9efddc7bb4350c237a8d3846af61bbfc8a2f647", "fcd3e0675b376f67e95328a2c691d363", "7a105db73b007a24ef18c9226452d761", "iBoot-931.71.16", 4, 0x0ff0a46c, 0x0ff28924},
 };
 /* the iPod touch 1G: build, IPSW sha1, iBoot version, epoch */
 static const struct { const char *build, *sha1, *version; unsigned epoch; } N45_BUILDS[] = {
@@ -170,14 +172,14 @@ int main(void) {
   if (!image) { printf("SKIP %s: no cached iBoot.bin and no %s.ipsw\n", BUILDS[i].build, BUILDS[i].sha1); continue; }
   assert(contains(image, len, BUILDS[i].version));
   stage(image, len, &n); free(image);
-  /* the NAND-boot data write scans 0x40000 bytes of RAM (ipod_touch_fmss.c IBOOT_SCAN_LEN): the buffer is BSS past the image */
+  /* the boot-args hook scans 0x40000 bytes of RAM (ipod_touch_2g.c IBOOT_SCAN_LEN): commandLine is BSS past the image */
   size_t scan = n < 0x40000 ? 0x40000 : n;
-  unsigned epoch = it_iboot_find_epoch(img, n); uint32_t cmdline = it_iboot_find_command_line(img, scan, BASE);
-  if (epoch != BUILDS[i].epoch || cmdline != BUILDS[i].cmdline) {
-   fprintf(stderr, "%s %s: got epoch %u command-line %x\n", BUILDS[i].build, BUILDS[i].version, epoch, cmdline); return 1;
+  uint32_t cmdline = 0, format = it_iboot_find_boot_args_format(img, scan, BASE, &cmdline);
+  unsigned epoch = it_iboot_find_epoch(img, n);
+  if (epoch != BUILDS[i].epoch || format != BUILDS[i].format || cmdline != BUILDS[i].cmdline) {
+   fprintf(stderr, "%s %s: got epoch %u format slot 0x%08x command-line 0x%08x\n", BUILDS[i].build, BUILDS[i].version, epoch, format, cmdline); return 1;
   }
-  printf("%-6s %-16s epoch %u command-line ", BUILDS[i].build, BUILDS[i].version, epoch);
-  if (cmdline) printf("0x%08x\n", cmdline); else puts("-");
+  printf("%-6s %-16s epoch %u format slot 0x%08x command-line 0x%08x\n", BUILDS[i].build, BUILDS[i].version, epoch, format, cmdline);
   seen++;
  }
  for (size_t i = 0; i < N(N45_BUILDS); i++) {

@@ -1,6 +1,7 @@
 #include "hw/arm/ipod_touch_lcd.h"
 #include "hw/arm/panel-gamma.h"
 #include "hw/core/qdev-properties.h"
+#include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "ui/pixel_ops.h"
 #include "ui/console.h"
@@ -927,7 +928,7 @@ static void lcd_refresh(void *opaque)
         lcd_bright_effective() == lcd->last_bright &&
         lcd->last_present_ns &&
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - lcd->last_present_ns <
-            2 * LCD_VSYNC_PERIOD_NS) {
+            2 * LCD_VSYNC_PERIOD_NS(lcd)) {
         lcd_frame_count(&lcd->frame_counters.duplicate_poll_skips);
         lcd_ft("scanskip", lcd->scanout_base);
         return;
@@ -1290,12 +1291,12 @@ static void refresh_timer_tick(void *opaque)
     /* IT_LCD_VSYNC_LEGACY restores the old re-arm-from-now behavior, so the
      * two can be A/B'd from one binary. Bisecting only. */
     if (lcd_vsync_legacy()) {
-        s->next_vsync = now + LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
+        s->next_vsync = now + LCD_VSYNC_PERIOD_NS(s) * lcd_vsync_divisor();
         timer_mod(s->refresh_timer, s->next_vsync);
         return;
     }
 
-    s->next_vsync += LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
+    s->next_vsync += LCD_VSYNC_PERIOD_NS(s) * lcd_vsync_divisor();
     if (s->next_vsync <= now) {
         /*
          * More than a whole frame behind -- the host was descheduled, or the
@@ -1303,7 +1304,7 @@ static void refresh_timer_tick(void *opaque)
          * hand the guest a burst of frame interrupts it cannot use, so
          * resynchronize to the current time and carry on.
          */
-        s->next_vsync = now + LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
+        s->next_vsync = now + LCD_VSYNC_PERIOD_NS(s) * lcd_vsync_divisor();
     }
     timer_mod(s->refresh_timer, s->next_vsync);
 }
@@ -1381,7 +1382,7 @@ static void ipod_touch_lcd_reset(DeviceState *dev)
      * state.
      */
     it_display_rotation_req = 0;
-    s->next_vsync = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCD_VSYNC_PERIOD_NS;
+    s->next_vsync = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCD_VSYNC_PERIOD_NS(s);
     if (lcd_trace()) {
         TRACE_PRINTF(trace_ipod_touch_lcd_log, "[LCD] ==== reset ====\n");
     }
@@ -1390,6 +1391,11 @@ static void ipod_touch_lcd_reset(DeviceState *dev)
 static void ipod_touch_lcd_realize(DeviceState *dev, Error **errp)
 {
     IPodTouchLCDState *s = IPOD_TOUCH_LCD(dev);
+
+    if (s->refresh_hz < 1 || s->refresh_hz > 240) {
+        error_setg(errp, "refresh-hz must be 1 to 240, not %u", s->refresh_hz);
+        return;
+    }
     s->con = graphic_console_init(dev, 0, &gfx_ops, s);
     qemu_console_resize(s->con, s->pw, s->ph);
 
@@ -1402,7 +1408,7 @@ static void ipod_touch_lcd_realize(DeviceState *dev, Error **errp)
 
     // initialize the refresh timer
     s->refresh_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, refresh_timer_tick, s);
-    s->next_vsync = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCD_VSYNC_PERIOD_NS;
+    s->next_vsync = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCD_VSYNC_PERIOD_NS(s);
     timer_mod(s->refresh_timer, s->next_vsync);
 }
 
@@ -1553,6 +1559,9 @@ static const Property lcd_properties[] = {
     DEFINE_PROP_BOOL("ctrl-readback", IPodTouchLCDState, ctrl_readback, false),
     DEFINE_PROP_UINT32("panel-width", IPodTouchLCDState, pw, LCD_FB_WIDTH),
     DEFINE_PROP_UINT32("panel-height", IPodTouchLCDState, ph, LCD_FB_HEIGHT),
+    /* Faster than the hardware's 60 Hz on request (Light Touch's experimental 120 Hz): the guest's compositor
+     * draws on the frame interrupt, so it follows the rate, but apps that count frames run fast. */
+    DEFINE_PROP_UINT32("refresh-hz", IPodTouchLCDState, refresh_hz, 60),
 };
 
 static void ipod_touch_lcd_class_init(ObjectClass *klass, const void *data)

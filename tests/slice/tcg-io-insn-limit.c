@@ -31,6 +31,7 @@ static void tb_remove_all(void) {}
 static void tcg_region_reset_all(void) {}
 static void qemu_plugin_flush_cb(void) {}
 #define qatomic_inc(p) (++*(p))
+#define TB_CACHE_CLEAR_NOTE(...) ((void)0) /* the fork's jump-cache stats */
 #include "flush.h"
 
 static int lookup(tb_page_addr_t pc)

@@ -1,5 +1,7 @@
 #include "qemu/osdep.h"
 #include "qemu/thread.h"
+#include "qemu/cutils.h"
+#include "system/rtc.h"
 #include "hw/arm/ipod-agent.h"
 
 typedef struct AgentItem {
@@ -40,6 +42,14 @@ IPodAgent *ipod_agent_new(void)
     a->references = 1;
     qemu_mutex_init(&a->lock);
     return a;
+}
+
+int64_t ipod_agent_rtc_now(void)
+{
+    struct tm tm;
+
+    qemu_get_timedate(&tm, 0);
+    return mktimegm(&tm);
 }
 
 void ipod_agent_set_clock_offset(IPodAgent *a, int64_t offset)
@@ -320,7 +330,7 @@ int64_t ipod_agent_call(IPodAgent *a, unsigned op, uint64_t token,
         }
         result = item && !item->ui_cookie ? item->request->len : 0;
     } else if (op == 0x165) {
-        result = time(NULL) + a->clock_offset;
+        result = ipod_agent_rtc_now() + a->clock_offset;
     } else if (item && op == 0x162 && length <= sizeof(chunk) &&
                offset <= item->request->len) {
         length = MIN(length, item->request->len - offset);

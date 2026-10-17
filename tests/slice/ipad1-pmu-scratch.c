@@ -38,6 +38,8 @@ static void qemu_set_irq(qemu_irq i, int l) {}
 static void timer_del(QEMUTimer *t) {}
 static void timer_mod(QEMUTimer *t, long long ns) {}
 static long long qemu_clock_get_ns(int c) { return 0; }
+static void qemu_get_timedate(struct tm *tm, int offset) { time_t t = time(NULL) + offset; gmtime_r(&t, tm); }
+#define mktimegm timegm
 static uint32_t ldl_le_p(const void *p) { const uint8_t *b = p; return b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24; }
 #include "slice.h"
 

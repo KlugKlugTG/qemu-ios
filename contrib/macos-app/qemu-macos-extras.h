@@ -82,6 +82,10 @@ void qemu_ios_audio_capture_stop(uint64_t generation);
 
 /* Queue UTF-8 text for the guest pasteboard (machine property "pasteboard"). */
 void qemu_ios_ui_paste(const char *utf8);
+/* The text last copied inside the guest (UTF-8, at most 64 KiB - 1 bytes: the guest agent's cap), when the
+ * guest has copied since *serial (0 at first), which it then updates; NULL otherwise. Free it with free().
+ * The agent never reports text the host gave it, nor what the guest held when the agent started. API 2.3. */
+char *qemu_ios_ui_guest_pasteboard(uint64_t *serial);
 
 /* Local bounded RPC. Request is id/op header + newline + base64 body.
  * Result is an owned id/status header + newline + base64 body, or NULL.
@@ -111,7 +115,7 @@ const char *qemu_ios_build_id(void);
 /* This C API's version, major << 16 | minor. A minor bump only adds entry points;
  * a major bump removes or changes one, and a host built for another major refuses
  * the dylib. */
-#define QEMU_IOS_API_VERSION ((2u << 16) | 2u)
+#define QEMU_IOS_API_VERSION ((2u << 16) | 3u)
 uint32_t qemu_ios_api_version(void);
 
 /* Machine controls. */

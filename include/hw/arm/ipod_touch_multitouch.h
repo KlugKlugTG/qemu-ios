@@ -275,6 +275,14 @@ typedef struct IPodTouchMultitouchState {
     uint32_t queued_count;
     bool next_frame_motion;
 #endif
+    /*
+     * next_frame reports a contact starting or ending. The slot holds one frame and a newer one used to replace it
+     * unread, so a quick tap (press and release before the guest's next read) reached the guest as a lone
+     * TOUCH_ENDED. Such a frame is kept until the guest takes it; the frame due meanwhile is owed and goes out a report
+     * period later.
+     */
+    bool next_frame_changes;
+    bool frame_owed;
     uint8_t *n1_frame;              /* the frame an N1 length query announced */
     uint32_t n1_frame_len;
     uint32_t frame_counter;
@@ -310,6 +318,7 @@ typedef struct IPodTouchMultitouchState {
      * mt_frame_period_ns() in ipod_touch_multitouch.c.
      */
     int64_t last_motion_ns;
+    uint32_t report_hz;    /* "report-hz": frames a second while touched; 0, IT_MT_HZ or 60 */
 } IPodTouchMultitouchState;
 
 /*
@@ -332,5 +341,8 @@ void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
 /* Internal admission check; reserves room for cancellation releases. */
 bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
                                    unsigned begins, unsigned ends, unsigned moves);
+
+/* The guest took next_frame (each read path calls this after clearing it): an owed frame goes out now. */
+void ipod_touch_multitouch_frame_taken(IPodTouchMultitouchState *s);
 
 #endif

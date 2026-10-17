@@ -66,7 +66,10 @@ bool ios_input_enqueue(QEMUBHFunc *callback, void *opaque,
                        GDestroyNotify discard)
 {
 #if defined(__APPLE__)
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), callback, opaque);
+    /* One FIFO per platform: Apple input goes through qemu_ios_ui_input_later,
+     * whose drain keeps host order (one-shot BHs alone run newest first). */
+    (void)discard;
+    qemu_ios_ui_input_later(callback, opaque);
     return true;
 #else
     IosQueuedInput *item = g_new(IosQueuedInput, 1);

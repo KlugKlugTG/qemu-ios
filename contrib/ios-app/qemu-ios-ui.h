@@ -137,6 +137,8 @@ void qemu_ios_ui_input_sequence_cancel(uint64_t id);
 /* Internal: QEMU thread under BQL, before reset/quit/semantic powerdown. */
 void qemu_ios_ui_cancel_input(void);
 void qemu_ios_ui_manual_touch2(bool down);
+/* Internal: run fn(opaque) on the QEMU thread, after every host input queued before it (touches, buttons, keys). */
+void qemu_ios_ui_input_later(void (*fn)(void *), void *opaque);
 
 /*
  * Whether the app is foreground. iOS kills a process that issues GL commands

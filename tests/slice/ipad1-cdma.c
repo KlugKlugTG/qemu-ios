@@ -11,6 +11,11 @@
  *     cleared by +0x08/+0x0C), a status word, not a pending-interrupt bitmap.
  *   - A to-device chain that fills a paced device FIFO stays RUNNING until the
  *     device drains it (s5l8930_cdma_sink_done), then goes DONE.
+ *   - A memory-to-memory channel interrupts when done only with control bit 3:
+ *     iOS 7 starts the AES feeder with it (0x188) and turns the feeder's clock
+ *     off only in its interrupt (a feeder left clocked panicked AppleCDMA's
+ *     sleep check, LightTouchMac issue 83); 3.2 polls its AES pair (0x180,
+ *     0x80) and panics on an interrupt ("CDMA M2M unexpected interrupt").
  *
  * Mutation (named, must fail this test): in cdma_run, drop the device-FIFO guard
  *     bool crypt = (flags & DESC_AES) && !dev_fifo;
@@ -54,7 +59,8 @@ typedef struct DeviceState DeviceState;
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #define le32_to_cpu(x) (x)
 #define qemu_log_mask(...) ((void)0)
-static void qemu_set_irq(int irq, int v) { (void)irq; (void)v; }
+static int irq_level[0x26];   /* the test numbers each channel's line by its channel */
+static void qemu_set_irq(int irq, int v) { irq_level[irq] = v; }
 typedef struct S5L8930CDMAState S5L8930CDMAState;
 typedef int Error, GError;
 typedef struct QCryptoCipher QCryptoCipher;
@@ -190,6 +196,36 @@ int main(void) {
     s5l8930_cdma_sink_done((DeviceState *)s2, FIFO_A, sizeof fifo_sink);
     assert((s2->ch[1].ctrl & ST_DONE) && !(s2->ch[1].ctrl & ST_RUNNING) && !s2->sink_pending[1]);
 
-    free(s); free(s2);
-    puts("PASS: CDMA inline-AES bypass symmetric both ways, enabled-channel status regs, FIFO-drained signal");
+    /* ---- memory-to-memory channels interrupt only with control bit 3 ---- */
+    S5L8930CDMAState *s3 = calloc(1, sizeof *s3);
+    for (int i = 0; i < CDMA_CHANNELS; i++) s3->irq[i] = i;
+    cdma_write(s3, 0x00, 3u << 1, 4);                          /* channels 1 and 2 enabled */
+    wr32(DESC + 0, 0);
+    wr32(DESC + 4, DESC_DATA | DESC_LAST);
+    wr32(DESC + 8, SRC);
+    wr32(DESC + 12, 64);
+    setup_chan(s3, 1, 0, 0, DESC);                             /* memory to the engine, context 1 */
+    cdma_write(s3, CHREG(1, CH_CTRL), 0x188 | CTRL_GO, 4);     /* iOS 7's feeder */
+    assert((s3->ch[1].ctrl & ST_DONE) && irq_level[1]);
+    cdma_write(s3, CHREG(1, CH_CTRL), cdma_read(s3, CHREG(1, CH_CTRL), 4), 4);   /* its handler acks */
+    assert(!irq_level[1]);
+    setup_chan(s3, 1, 0, 0, DESC);
+    cdma_write(s3, CHREG(1, CH_CTRL), 0x180 | CTRL_GO, 4);     /* 3.2's feeder: polled */
+    assert((s3->ch[1].ctrl & ST_DONE) && !irq_level[1]);
+    wr32(DESC + 8, DST);
+    setup_chan(s3, 2, 0, 0, DESC);                             /* the engine to memory */
+    cdma_write(s3, CHREG(2, CH_CTRL), 0x80 | CTRL_GO, 4);      /* 3.2's drain: polled */
+    assert((s3->ch[2].ctrl & ST_DONE) && !irq_level[2]);
+    wr32(DESC + 8, SRC);
+    setup_chan(s3, 1, 0, 0, DESC);
+    cdma_write(s3, CHREG(1, CH_CTRL), 0x180 | CTRL_GO, 4);
+    wr32(DESC + 8, DST);
+    setup_chan(s3, 2, 0, 0, DESC);
+    cdma_write(s3, CHREG(2, CH_CTRL), 0x88 | CTRL_GO, 4);      /* iOS 7's drain */
+    assert(irq_level[2] && !(s3->ch[2].ctrl & ST_ERROR));
+    assert(memcmp(DRAM + (DST - S5L8930_DRAM_BASE), DRAM + (SRC - S5L8930_DRAM_BASE), 64) == 0);
+
+    free(s); free(s2); free(s3);
+    puts("PASS: CDMA inline-AES bypass symmetric both ways, enabled-channel status regs, FIFO-drained signal, "
+         "memory-to-memory interrupt enable");
 }

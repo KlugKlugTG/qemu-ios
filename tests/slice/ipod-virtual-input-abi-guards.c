@@ -16,11 +16,14 @@ struct ios_button {int button;bool down;};
 struct mtt_touch {int phase;double nx,ny;};
 static bool ready=true;static int submitted;
 bool qemu_ios_ui_ready(void) {return ready;}
-static void *qemu_get_aio_context(void) {return NULL;}
 static void ios_touch_bh(void*p) {free(p);}
 static void ios_button_bh(void*p) {free(p);}
 static void mtt_bh(void*p) {free(p);}
-static void aio_bh_schedule_oneshot(void *ctx,void(*cb)(void*),void*arg) {submitted++;cb(arg);}
+void qemu_ios_ui_input_later(void(*cb)(void*),void*arg) {submitted++;cb(arg);}
+/* The fork's portable FIFO (qemu-ios-input.c.inc), which touches and buttons use. */
+#define g_free free
+typedef void GDestroyNotifyStub(void*);
+static bool ios_input_enqueue(void(*cb)(void*),void*arg,GDestroyNotifyStub *discard) {(void)discard;submitted++;cb(arg);return true;}
 #include "slice.h"
 int main(void) {
  for(int phase=-1;phase<=3;phase++)if(phase<0 || phase>2) {

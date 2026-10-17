@@ -153,6 +153,11 @@ static bool scaler_rgb(IPodScalerState *s)
      * columns: a 1x iPhone app on the iPad's landscape panel (320x480 -> 480x320 at 1:1,
      * 960x640 at 2x), the way the rest of the portrait UI is turned. */
     bool rot = sx && sy && sw != sh && ((uint64_t)dw * sx) >> 16 == sh && ((uint64_t)dh * sy) >> 16 == sw;
+    /* +0x58 bits 0-1 are the turn (11D257 AppleM2ScalerCSCDriver 0x808457f8): 3 is a quarter turn clockwise,
+     * the source's top row along the destination's right edge. CoreAnimation asks for it to put a landscape-right
+     * app's 960x640 layer on the iPhone 4's portrait panel; turned the other way, the app showed upside down
+     * (issue 47). */
+    bool cw = rot && (r[0x58 / 4] & 3) == 3;
     sx = sx ? sx : ((uint64_t)sw << 16) / dw;
     sy = sy ? sy : ((uint64_t)sh << 16) / dh;
     g_autofree uint8_t *src = g_malloc((size_t)pitch * sh * 4);
@@ -168,7 +173,10 @@ static bool scaler_rgb(IPodScalerState *s)
             (size_t)MIN(((uint64_t)y * sy) >> 16, sh - 1) * pitch;
 
         for (unsigned x = 0; x < dw; x++) {
-            if (rot) {      /* destination (x, y) is source column sw - 1 - y, row x */
+            if (cw) {       /* destination (x, y) is source column y, row sh - 1 - x */
+                unsigned v = sh - 1 - MIN(((uint64_t)x * sx) >> 16, sh - 1);
+                row[x] = ((const uint32_t *)src)[(size_t)v * pitch + MIN(((uint64_t)y * sy) >> 16, sw - 1)];
+            } else if (rot) {   /* destination (x, y) is source column sw - 1 - y, row x */
                 unsigned u = sw - 1 - MIN(((uint64_t)y * sy) >> 16, sw - 1);
                 row[x] = ((const uint32_t *)src)[(size_t)MIN(((uint64_t)x * sx) >> 16, sh - 1) * pitch + u];
             } else {

@@ -122,6 +122,13 @@ eq "$(lc)" "$(unload 10)"$'\n'"$(load 11)"$'\n'"stop com.apple.SpringBoard"
 eq "$(r0)" "11 1"; has "$(r0text)" "prev 10"
 eq "$(stat -f %Lp "$D/root/pkgs/11/bin/it_agent")" 755
 
+# 6.x on: the same change restarts backboardd, the window server that loads the GL hook too (SpringBoard goes with it)
+seeded bb
+put "$(s /System/Library/LaunchDaemons/com.apple.backboardd.plist)" "<plist/>" 644
+std 11 "shim v11"; offer
+boot; eq "$RC" 1; eq "$(lc)" "$(unload 10)"$'\n'"$(load 11)"$'\n'"stop com.apple.backboardd"
+D="$DEV"
+
 # Wall-clock synchronization jumps a billion seconds during payload reads.
 # It cannot expire the monotonic budget, but genuinely elapsed time can.
 seeded timed1

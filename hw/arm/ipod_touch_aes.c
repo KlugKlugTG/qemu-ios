@@ -395,6 +395,22 @@ void ipod_touch_aes_set_uid_engine(bool on)
     it_aes_uid_engine = on;
 }
 
+/*
+ * aes-uid=hardware: the engine path, and the mode register (0x14) reads back.
+ * iBoot sets the mode with read-modify-write -- 7E18 writes 6, then the read
+ * | 1 (encrypt), then the read | 8 -- so with 0x14 reading 0 every request
+ * lost its encrypt bit: iBoot's UID derivation of the SHSH wrapping key (the
+ * 16-byte seed at the start of its first request) ran as a decrypt, and NORs
+ * made for that (LightTouchMac's N72NOR before the change) wrap with that key.
+ * Off for aes-uid=engine and legacy, so those images keep booting.
+ */
+static bool it_aes_mode_readback;
+
+void ipod_touch_aes_set_mode_readback(bool on)
+{
+    it_aes_mode_readback = on;
+}
+
 bool ipod_touch_aes_set_gid_blobs(const uint8_t *data, size_t size)
 {
     if (!size || size % (2 * IT_AES_GID_BLOB_SIZE)) {
@@ -437,6 +453,8 @@ static uint64_t ipod_touch_aes_read(void *opaque, hwaddr offset, unsigned size)
             return aesop->outaddr + aesop->addr_offset;
         case AES_AUXSIZE:
             return aesop->auxsize;
+        case AES_KEYLEN:
+            return it_aes_mode_readback ? aesop->keylen : 0;
       default:
             //fprintf(stderr, "%s: UNMAPPED AES_ADDR @ offset 0x%08x\n", __FUNCTION__, offset);
             break;
@@ -626,6 +644,22 @@ static void aes_s5l8900_compat_go(IPodTouchAESState *aesop)
     aes_update_irq(aesop);
 }
 
+/*
+ * A write of `size` bytes at byte offset `off` ORs into the key or IV words:
+ * the registers accumulate until a finished request clears them. The iPod
+ * touch 1G's iBoot builds each word from four 32-bit writes that carry one
+ * byte each (0x41000000, 0x00700000, ...), and writes the IV before the reset
+ * pulse; replacing on write kept only the last byte of every word and the 1G
+ * stopped booting at the first decrypt. Sub-word writes land in their lane.
+ */
+static void aes_write_word(uint32_t *words, hwaddr off, uint64_t value, unsigned size)
+{
+    unsigned shift = (off & 3) * 8;
+    uint32_t mask = size >= 4 ? 0xffffffffu : ((1u << (size * 8)) - 1) << shift;
+
+    words[off / 4] |= ((uint32_t)value << shift) & mask;
+}
+
 static void ipod_touch_aes_write(void *opaque, hwaddr offset, uint64_t value, unsigned size)
 {
     struct IPodTouchAESState *aesop = (struct IPodTouchAESState *)opaque;
@@ -810,17 +844,11 @@ static void ipod_touch_aes_write(void *opaque, hwaddr offset, uint64_t value, un
             aesop->keytype = value;
             break;
         case AES_KEY_REG ... ((AES_KEY_REG + AES_KEYSIZE) - 1):
-            {
-                uint8_t idx = (offset - AES_KEY_REG) / 4;
-                aesop->custkey[idx] |= value;
-                break;
-            }
+            aes_write_word(aesop->custkey, offset - AES_KEY_REG, value, size);
+            break;
         case AES_IV_REG ... ((AES_IV_REG + AES_IVSIZE) -1 ):
-            {
-                uint8_t idx = (offset - AES_IV_REG) / 4;
-                aesop->ivec[idx] |= value;
-                break;
-            }
+            aes_write_word(aesop->ivec, offset - AES_IV_REG, value, size);
+            break;
         default:
             //fprintf(stderr, "%s: UNMAPPED AES_ADDR @ offset 0x%08x - 0x%08x\n", __FUNCTION__, offset, value);
             break;

@@ -785,8 +785,7 @@ void tb_flush__exclusive_or_serial(void)
     }
 
     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
-    /* Hints describe discarded translations. Bound their lifetime to the code
-     * cache, rather than accumulating physical PCs across full flushes. */
+    /* The I/O insn limits describe translations that are now gone. */
     qemu_mutex_lock(&tb_ctx.io_insn_lock);
     g_hash_table_remove_all(tb_ctx.io_insn_limits);
     qemu_mutex_unlock(&tb_ctx.io_insn_lock);

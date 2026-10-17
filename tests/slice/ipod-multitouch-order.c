@@ -2,7 +2,7 @@
  * SLICE:wire include/hw/arm/ipod_touch_multitouch.h range #define MT_INTERFACE_VERSION | typedef struct IPodTouchMultitouchState
  * SLICE:state include/hw/arm/ipod_touch_multitouch.h typedef IPodTouchMultitouchState
  * SLICE:profile hw/arm/ipod_touch_multitouch.c range const MTSensorProfile mt_profile_ipod = { | const MTSensorProfile mt_profile_k48
- * SLICE hw/arm/ipod_touch_multitouch.c fn ipod_touch_multitouch_can_queue mt_clear_pending mt_take_pending mt_clamp_vel mt_frame_slots mt_const_fingerid mt_build_frame mt_any_down mt_any_active mt_emit_frame mt_cancel_pending_end mt_frame_period_ns ipod_touch_multitouch_set_finger
+ * SLICE hw/arm/ipod_touch_multitouch.c fn ipod_touch_multitouch_can_queue mt_clear_pending mt_take_pending mt_clamp_vel mt_frame_slots mt_const_fingerid mt_build_frame mt_any_down mt_any_active mt_emit_frame mt_cancel_pending_end mt_frame_period_ns ipod_touch_multitouch_set_finger ipod_touch_multitouch_frame_taken
  * SLICE:transfer hw/arm/ipod_touch_multitouch.c fn mt_stamp_frame_cmd ipod_touch_multitouch_transfer
  * SLICE:lifecycle hw/arm/ipod_touch_multitouch.c fn touch_timer_tick touch_end_timer_tick ipod_touch_multitouch_reset
  * SLICE:finalize hw/arm/ipod_touch_multitouch.c fn ipod_touch_multitouch_finalize
@@ -87,9 +87,13 @@ int main(void)
     ipod_touch_multitouch_set_finger(&s, 0, .2f, .5f, false); /* cancel/END */
     ipod_touch_multitouch_set_finger(&s, 0, .8f, .5f, true);  /* no intervening SPI read */
 #if defined(__APPLE__)
+    /* Upstream's single slot keeps the unread END and owes the new START,
+     * which goes out a report period after the END is taken. */
+    assert(read_frame(&s, p) == 1 && p[46] == MT_EVENT_TOUCH_ENDED);
+    touch_end_timer_tick(&s);
     assert(read_frame(&s, p) == 1 && p[46] == MT_EVENT_TOUCH_START);
     mt_clear_pending(&s); free(s.out_buffer); free(s.in_buffer);
-    puts("PASS: original Apple single pending report behavior preserved");
+    puts("PASS: Apple single slot keeps an unread END and owes the next START");
 #else
     assert(read_frame(&s, p) == 1 && p[46] == MT_EVENT_TOUCH_ENDED);
     assert(read_frame(&s, p) == 1 && p[46] == MT_EVENT_TOUCH_START);
