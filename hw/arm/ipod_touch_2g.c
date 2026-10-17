@@ -927,7 +927,8 @@ static const ARMCPRegInfo it2g_cp_reginfo_tcg[] = {
     IT2G_CP_NOP("DCCALL", 7, 10, 0),
     { .cp = 15, .name = "QEMU_CALL", .opc1 = 3, .crn = 15, .crm = 15, .opc2 = 0,
       .access = PL0_RW, .state = ARM_CP_STATE_AA32,
-      .type = ARM_CP_IO | ARM_CP_NO_RAW | ARM_CP_RAISES_EXC, /* gles_guest_rw */
+      /* Not ARM_CP_IO: qemu_call takes the BQL for the calls that need it. */
+      .type = ARM_CP_NO_RAW | ARM_CP_RAISES_EXC, /* gles_guest_rw */
       .readfn = qemu_call_status, .writefn = qemu_call },
     { .cp = 15, .name = "HOST_GMT_SECONDS",
       .opc0 = 0, .opc1 = 3, .crn = 15, .crm = 15, .opc2 = 1,

@@ -39,6 +39,8 @@
 #include "hw/arm/guest-services/general.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
+#include "qemu/lockable.h"
+#include "qemu/main-loop.h"
 
 /*
  * TWO HOSTS, ONE RENDERER.
@@ -1797,12 +1799,15 @@ static int64_t gles_reject(GLenum error)
  * so a screenshot shows it too.
  */
 static GHashTable *gles_rejects;
+/* The vCPU notes refusals without the BQL; the machine's property reads them. */
+static QemuSpin gles_rejects_lock;
 static bool gles_debug;
 
 static bool gles_reject_note(const char *name, uint64_t n, bool at_least)
 {
     uint64_t *count;
 
+    QEMU_LOCK_GUARD(&gles_rejects_lock);
     if (!gles_rejects) {
         gles_rejects = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
     }
@@ -1848,6 +1853,8 @@ static gint gles_strcmp_data(gconstpointer a, gconstpointer b, gpointer d)
 char *gles_host_rejects(void)
 {
     GString *out = g_string_new(NULL);
+
+    QEMU_LOCK_GUARD(&gles_rejects_lock);
     GList *keys = gles_rejects ?
         g_list_sort_with_data(g_hash_table_get_keys(gles_rejects),
                               gles_strcmp_data, NULL) : NULL;
@@ -4183,6 +4190,8 @@ static unsigned gles_surface_bpp(uint32_t fmt)
  */
 static uint64_t *gles_page_gen, gles_gen;
 static size_t gles_page_gen_len;
+/* GL calls run without the BQL, so the LCD's read can race the array growing. */
+static QemuSpin gles_page_gen_lock;              /* zero is unlocked */
 
 /* The RAM offset of the page at `va` as the calling process maps it now. */
 static bool gles_page_ram(CPUState *cpu, vaddr va, ram_addr_t *ram)
@@ -4200,6 +4209,7 @@ static bool gles_page_ram(CPUState *cpu, vaddr va, ram_addr_t *ram)
     if (!memory_region_is_ram(mr) || len < TARGET_PAGE_SIZE) return false;
     for (unsigned j = 0; j < ARRAY_SIZE(logged) && logged[j] != mr; j++) {
         if (!logged[j]) {                       /* DMA marks VGA-dirty only on a logged region */
+            BQL_LOCK_GUARD();                   /* a memory transaction */
             memory_region_set_log(mr, true, DIRTY_MEMORY_VGA);
             logged[j] = mr;
             break;
@@ -4289,9 +4299,10 @@ uint64_t gles_host_ram_gen(uint64_t addr, uint64_t len)
 {
     uint64_t gen = 0;
 
+    QEMU_LOCK_GUARD(&gles_page_gen_lock);
     for (size_t page = addr >> TARGET_PAGE_BITS;
          len && page <= (addr + len - 1) >> TARGET_PAGE_BITS && page < gles_page_gen_len; page++) {
-        gen = MAX(gen, gles_page_gen[page]);
+        gen = MAX(gen, qatomic_read(&gles_page_gen[page]));
     }
     return gen;
 }
@@ -4317,11 +4328,13 @@ static bool gles_surface_changed(GLESSurface *s)
             if (page >= gles_page_gen_len) {
                 size_t len = MAX(page + 1, gles_page_gen_len * 2);
 
+                QEMU_LOCK_GUARD(&gles_page_gen_lock);
                 gles_page_gen = g_renew(uint64_t, gles_page_gen, len);
                 memset(gles_page_gen + gles_page_gen_len, 0, (len - gles_page_gen_len) * sizeof(uint64_t));
                 gles_page_gen_len = len;
             }
-            gles_page_gen[page] = ++gles_gen;
+            /* Before the clear below, so an LCD refresh that misses the dirty bit sees this. */
+            qatomic_set(&gles_page_gen[page], ++gles_gen);
         }
         if (!any) {
             continue;

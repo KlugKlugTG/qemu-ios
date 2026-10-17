@@ -33,6 +33,7 @@
 #include "hw/core/platform-bus.h"
 #include "hw/arm/ipod_touch_2g.h"
 #include "cpu.h"
+#include "qemu/main-loop.h"
 
 int32_t guest_svcs_errno = 0;
 
@@ -100,6 +101,22 @@ void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
     // Read the request
     if (cpu_memory_rw_debug(cpu, value, (uint8_t *)&qcall, sizeof(qcall), 0)) {
         return;
+    }
+
+    /*
+     * GL calls arrive thousands of times a second and touch only the GL
+     * bridge, which the vCPU alone drives, so they skip the BQL (callers
+     * whose register is ARM_CP_IO already hold it). Context setup and
+     * teardown change the migration blockers and every other call reaches
+     * machine state the main loop shares, so those take it.
+     */
+    bool gl = qcall.call_number == QC_GLES &&
+              !(qcall.args.gles.slot >= GLES_OP_NEW_SHAREGROUP &&
+                qcall.args.gles.slot <= GLES_OP_DELETE_CONTEXT);
+    bool bql = !gl && !bql_locked();
+
+    if (bql) {
+        bql_lock();
     }
 
     guest_svcs_errno = 0;
@@ -189,4 +206,7 @@ void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
 
     // Write the response
     cpu_memory_rw_debug(cpu, value, (uint8_t*) &qcall, sizeof(qcall), 1);
+    if (bql) {
+        bql_unlock();
+    }
 }
