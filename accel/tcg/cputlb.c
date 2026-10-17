@@ -446,9 +446,15 @@ void tlb_flush(CPUState *cpu)
     tlb_flush_by_mmuidx(cpu, ALL_MMUIDX_BITS);
 }
 
+extern bool it_acct_on;
+uint64_t it_acct_ctxsw, it_acct_fills[16][2];
+
 void tlb_flush_switch_context(CPUState *cpu, uint64_t key)
 {
     assert_cpu_is_self(cpu);
+    if (unlikely(it_acct_on)) {
+        it_acct_ctxsw++;
+    }
     tcg_switch_jmp_cache(cpu, key);
     tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT(ALL_MMUIDX_BITS |
                                                         TLB_FLUSH_KEEP_JMP_CACHE));
@@ -603,6 +609,28 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
     tb_jmp_cache_clear_page(cpu, addr - TARGET_PAGE_SIZE);
     TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_page_current);
     tb_jmp_cache_clear_page(cpu, addr);
+}
+
+void tlb_flush_switch_context_keep(CPUState *cpu, uint64_t key, int keep_idx,
+                                   const vaddr *pages, unsigned n)
+{
+    if (keep_idx < 0) {
+        tlb_flush_switch_context(cpu, key);
+        return;
+    }
+    assert_cpu_is_self(cpu);
+    if (unlikely(it_acct_on)) {
+        it_acct_ctxsw++;
+    }
+    tcg_switch_jmp_cache(cpu, key);
+    tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT((ALL_MMUIDX_BITS & ~(1 << keep_idx)) |
+                                                        TLB_FLUSH_KEEP_JMP_CACHE));
+    /* TLB entries only: the jump cache is already the new context's. */
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    for (unsigned i = 0; i < n; i++) {
+        tlb_flush_page_locked(cpu, keep_idx, pages[i]);
+    }
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 }
 
 /**
@@ -1092,6 +1120,10 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
     bool is_ram, is_romd;
 
     assert_cpu_is_self(cpu);
+
+    if (unlikely(it_acct_on)) {
+        it_acct_fills[mmu_idx & 15][addr >= 0x80000000]++;   /* by mmu_idx, low/high half */
+    }
 
     if (full->lg_page_size <= TARGET_PAGE_BITS) {
         sz = TARGET_PAGE_SIZE;

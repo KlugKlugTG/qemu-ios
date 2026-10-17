@@ -9,6 +9,7 @@
 #include "cpu.h"
 #include "helper.h"
 #include "internals.h"
+#include "exec/target_page.h"
 #include "cpu-features.h"
 
 /*
@@ -367,6 +368,15 @@ bool arm_cpu_tlb_fill_align(CPUState *cs, CPUTLBEntryFull *out, vaddr address,
         res.f.extra.arm.pte_attrs = res.cacheattrs.attrs;
         res.f.extra.arm.shareability = res.cacheattrs.shareability;
         *out = res.f;
+        if (mmu_idx == arm_to_core_mmu_idx(ARMMMUIdx_E10_1) && !res.global &&
+            cpu->ng_el1_count <= ARRAY_SIZE(cpu->ng_el1_pages)) {
+            if (res.f.lg_page_size == TARGET_PAGE_BITS &&
+                cpu->ng_el1_count < ARRAY_SIZE(cpu->ng_el1_pages)) {
+                cpu->ng_el1_pages[cpu->ng_el1_count++] = address & TARGET_PAGE_MASK;
+            } else {
+                cpu->ng_el1_count = ARRAY_SIZE(cpu->ng_el1_pages) + 1;
+            }
+        }
         return true;
     }
     if (probe) {

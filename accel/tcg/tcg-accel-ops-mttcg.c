@@ -126,6 +126,7 @@ extern uint64_t it_acct_pcrel_invals, it_acct_jc_flushes;
 extern uint64_t it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow;
 extern struct it_acct_mr { void *mr; uint64_t n, ns; char *name; } it_acct_mrs[256];
 extern uint64_t it_acct_wait_hist[5][2], it_acct_hold_hist[5][2];
+extern uint64_t it_acct_ctxsw, it_acct_fills[16][2];
 extern struct it_acct_holder { const char *file; int line; uint64_t n, ns, long_n, long_ns; } it_acct_holders[64];
 
 static int64_t acct_run_ns, acct_halt_ns, acct_io_ns, acct_bql_ns;
@@ -196,6 +197,13 @@ static void mttcg_acct_dump(int64_t now)
             it_acct_jc_other_pc, it_acct_pcrel_invals, it_acct_jc_flushes);
     fprintf(stderr, "[acct]   vcpu-bql n %" PRIu64 " wait-ns %" PRIu64 " slow %" PRIu64 "\n",
             it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow);
+    fprintf(stderr, "[acct]   ctxsw %" PRIu64 " tlb-fills", it_acct_ctxsw);
+    for (int i = 0; i < 16; i++) {
+        if (it_acct_fills[i][0] || it_acct_fills[i][1]) {
+            fprintf(stderr, " idx%d %" PRIu64 "/%" PRIu64, i, it_acct_fills[i][0], it_acct_fills[i][1]);
+        }
+    }
+    fprintf(stderr, "\n");
     for (int k = 0; k < 2; k++) {
         uint64_t (*hst)[2] = k ? it_acct_hold_hist : it_acct_wait_hist;
         fprintf(stderr, "[acct]   bql-%s-hist", k ? "hold" : "wait");

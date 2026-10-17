@@ -947,6 +947,13 @@ struct ArchCPU {
      * has nothing to do until an interrupt makes a task runnable. 0 = none.
      */
     uint32_t idle_loop_pc;
+    /*
+     * Pages the EL1 TLB index holds from non-global mappings (user pages the
+     * kernel touched), which an ASID switch must drop; the rest of that index
+     * is global kernel memory and is kept. More than fit: drop the index.
+     */
+    vaddr ng_el1_pages[32];
+    unsigned ng_el1_count;
     uint32_t irqs_taken, idle_irqs_seen;
 
     /* Coprocessor information */
