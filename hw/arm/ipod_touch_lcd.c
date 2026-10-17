@@ -1,4 +1,5 @@
 #include "hw/arm/ipod_touch_lcd.h"
+#include "qemu/main-loop.h"
 #include "hw/arm/panel-gamma.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
@@ -780,8 +781,16 @@ static bool lcd_compose_planes(const IPodTouchLCDState *s, const uint32_t *r, ui
                 const uint8_t *src = pixels + ((size_t)sy * w + sx) * 4;
                 uint8_t *dst = out + ((dy + y0) * pw + dx + x0) * 4;
                 unsigned alpha = plane ? src[3] : 255;
-                for (unsigned c = 0; c < 3; c++)
-                    dst[c] = MIN(255, src[c] + (dst[c] * (255 - alpha) + 127) / 255);
+                /* Opaque (all of plane 0, most of an overlay): the blend below
+                 * is exactly a copy, without its three divisions. */
+                if (alpha == 255) {
+                    dst[0] = src[0];
+                    dst[1] = src[1];
+                    dst[2] = src[2];
+                } else {
+                    for (unsigned c = 0; c < 3; c++)
+                        dst[c] = MIN(255, src[c] + (dst[c] * (255 - alpha) + 127) / 255);
+                }
                 dst[3] = 255;
             }
         }
@@ -809,6 +818,77 @@ static bool lcd_needs_plane_composition(const uint32_t *r, unsigned pw, unsigned
  * blit -- and with it, no dirty tracking: the whole frame is redrawn every
  * time. Rotation is a rare, deliberate state, so that is left alone.
  */
+/*
+ * The pixel work of a vsync push runs without the BQL. Converting a frame
+ * takes about a millisecond on a phone, sixty times a second, and the vCPU
+ * takes the BQL thousands of times a second (timer, VIC, interrupts), so it
+ * kept landing behind it: on a Poco F3 in Flight Control the refresh held the
+ * BQL 5.7% of the time and the vCPU's waits over 1 ms were 13% of it.
+ *
+ * Only the copy is unlocked. It reads guest RAM through the section the
+ * refresh owns (or cpu_physical_memory_read, which is RCU-safe), writes the
+ * console surface, which only this refresh resizes or draws, and uses the
+ * scanout base and plane registers latched at vblank, not the live ones the
+ * vCPU may now write. dpy_gfx_update and every register access stay under
+ * the lock. Other callers of the refresh (QEMU's display poll, a screendump)
+ * keep it throughout, as does a scanout behind an IOMMU, whose translate hook
+ * belongs to another device.
+ */
+static bool lcd_blit_unlock(IPodTouchLCDState *lcd)
+{
+    if (!lcd_in_vsync_present || lcd->xlate || !bql_locked()) {
+        return false;
+    }
+    bql_unlock();
+    return true;
+}
+
+/*
+ * framebuffer_update_display() for a top-to-bottom, left-to-right scanout,
+ * with the conversion unlocked (lcd_blit_unlock). Taking the dirty snapshot
+ * syncs the dirty log, which runs work on the vCPU and so needs the BQL; the
+ * snapshot it returns is a private copy, and reading it does not.
+ */
+static void lcd_update_display(IPodTouchLCDState *lcd, DisplaySurface *ds,
+                               int cols, int rows, int src_width, int dest_row_pitch,
+                               int invalidate, drawfn fn, int *first_row, int *last_row)
+{
+    MemoryRegion *mem = lcd->fbsection.mr;
+    ram_addr_t addr = lcd->fbsection.offset_within_region;
+    int first = -1, last = 0;
+
+    *first_row = -1;
+    if (!mem) {
+        return;
+    }
+    uint8_t *src = (uint8_t *)memory_region_get_ram_ptr(mem) + addr;
+    uint8_t *dest = surface_data(ds);
+    g_autofree DirtyBitmapSnapshot *snap =
+        memory_region_snapshot_and_clear_dirty(mem, addr, (hwaddr)src_width * rows,
+                                               DIRTY_MEMORY_VGA);
+    bool unlocked = lcd_blit_unlock(lcd);
+
+    for (int i = 0; i < rows; i++) {
+        if (invalidate || memory_region_snapshot_get_dirty(mem, snap, addr, src_width)) {
+            fn(NULL, dest, src, cols, 4);
+            if (first == -1) {
+                first = i;
+            }
+            last = i;
+        }
+        addr += src_width;
+        src += src_width;
+        dest += dest_row_pitch;
+    }
+    if (unlocked) {
+        bql_lock();
+    }
+    if (first >= 0) {
+        *first_row = first;
+        *last_row = last;
+    }
+}
+
 static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
                                 int rot, bool composed)
 {
@@ -840,6 +920,7 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
     if (!lcd->rotbuf) {
         lcd->rotbuf = g_malloc(sw * sh * 4);
     }
+    bool unlocked = lcd_blit_unlock(lcd);
     if (!composed) cpu_physical_memory_read(lcd->scanout_base, lcd->rotbuf, sw * sh * 4);
 
     /*
@@ -883,6 +964,9 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
             }
         }
     }
+    if (unlocked) {
+        bql_lock();
+    }
     dpy_gfx_update(lcd->con, 0, 0, dw, dh);
     lcd_frame_count(&lcd->frame_counters.rotated_updates);
 }
@@ -894,7 +978,7 @@ static void lcd_refresh(void *opaque)
     IPodTouchLCDState *lcd = (IPodTouchLCDState *) opaque;
     DisplaySurface *surface = qemu_console_surface(lcd->con);
     drawfn draw_line;
-    int src_width, dest_width;
+    int src_width;
     int height, first, last;
     int width, linesize;
 
@@ -967,7 +1051,12 @@ static void lcd_refresh(void *opaque)
      * window 2); the S5L8720 plane test would misread them as a composition. */
     if (!lcd->s5l8900 && lcd_needs_plane_composition(planes, lcd->pw, lcd->ph)) {
         if (!lcd->rotbuf) lcd->rotbuf = g_malloc(lcd->pw * lcd->ph * 4);
+        /* Reads guest memory and the planes latched at vblank: see lcd_blit_unlock(). */
+        bool unlocked = lcd_blit_unlock(lcd);
         composed = lcd_compose_planes(lcd, planes, lcd->rotbuf);
+        if (unlocked) {
+            bql_lock();
+        }
         if (!composed) {
             static bool warned;
             if (!warned) { warned = true; fprintf(stderr, "[LCD] unsupported plane configuration\n"); }
@@ -995,7 +1084,6 @@ static void lcd_refresh(void *opaque)
     int64_t t_blit = lcd_frametrace() ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
     int bri = lcd_bright_effective();
 
-    dest_width = 4;
     draw_line = draw_line32_32;
 
     /* Resolution */
@@ -1050,14 +1138,8 @@ static void lcd_refresh(void *opaque)
     if (lcd->invalidate) {
         lcd_frame_count(&lcd->frame_counters.forced_checks);
     }
-    framebuffer_update_display(surface, &lcd->fbsection,
-                               width, height,
-                               src_width,       /* Length of source line, in bytes.  */
-                               linesize,        /* Bytes between adjacent horizontal output pixels.  */
-                               dest_width,      /* Bytes between adjacent vertical output pixels.  */
-                               lcd->invalidate,
-                               draw_line, NULL,
-                               &first, &last);
+    lcd_update_display(lcd, surface, width, height, src_width, linesize,
+                       lcd->invalidate, draw_line, &first, &last);
     if (first >= 0) {
         lcd_frame_count(&lcd->frame_counters.updated_regions);
         dpy_gfx_update(lcd->con, 0, first, width, last - first + 1);
