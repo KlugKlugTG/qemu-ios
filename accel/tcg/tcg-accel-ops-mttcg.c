@@ -119,6 +119,9 @@ static void mttcg_request_performance_core(void)
  */
 extern bool it_acct_on;
 extern uint64_t it_acct_insns, it_acct_blocks, it_acct_irqs, it_acct_exits;
+extern uint64_t it_acct_lookups, it_acct_jc_misses, it_acct_jc_empty, it_acct_jc_other_pc;
+extern uint64_t it_acct_flagbit[3][32];
+extern uint64_t it_acct_pcrel_invals, it_acct_jc_flushes;
 
 static int64_t acct_run_ns, acct_halt_ns, acct_io_ns, acct_bql_ns;
 static int64_t acct_io_cpu_ns, acct_io_cpu_mark;
@@ -167,7 +170,9 @@ static void mttcg_acct_dump(int64_t now)
     fprintf(stderr, "[acct] %6.1fs  run %5.1f%%  halt %5.1f%%  io %5.1f%% "
             "(bql %4.1f%% cpu %4.1f%%)  |  "
             "%.2f Minsn/s  %.0f blk/s (%.1f insn/blk)  %.0f irq/s  "
-            "%.0f halt/s  %.0f exit/s  |  long %lu (halted %lu stopped %lu other %lu)\n",
+            "%.0f halt/s  %.0f exit/s  |  long %lu (halted %lu stopped %lu other %lu)"
+            "  |  lookups %" PRIu64 " jc-miss %" PRIu64 " (empty %" PRIu64
+            " other-pc %" PRIu64 ")  pcrel-inval %" PRIu64 " jc-flush %" PRIu64 "\n",
             wall,
             100.0 * acct_run_ns / (now - acct_t0),
             100.0 * acct_halt_ns / (now - acct_t0),
@@ -181,7 +186,18 @@ static void mttcg_acct_dump(int64_t now)
             acct_halts / wall,
             it_acct_exits / wall,
             (unsigned long)acct_long, (unsigned long)acct_why_halted,
-            (unsigned long)acct_why_stopped, (unsigned long)acct_why_other);
+            (unsigned long)acct_why_stopped, (unsigned long)acct_why_other,
+            it_acct_lookups, it_acct_jc_misses, it_acct_jc_empty,
+            it_acct_jc_other_pc, it_acct_pcrel_invals, it_acct_jc_flushes);
+    for (int k = 0; k < 3; k++) {
+        for (int b = 0; b < 32; b++) {
+            if (it_acct_flagbit[k][b]) {
+                fprintf(stderr, "[acct]   same-pc miss: %s bit %d x%" PRIu64 "\n",
+                        k == 0 ? "cs_base" : k == 1 ? "flags" : "cflags", b,
+                        it_acct_flagbit[k][b]);
+            }
+        }
+    }
 }
 
 static void *mttcg_cpu_thread_fn(void *arg)

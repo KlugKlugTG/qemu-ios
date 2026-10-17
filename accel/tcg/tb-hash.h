@@ -45,10 +45,18 @@ static inline unsigned int tb_jmp_cache_hash_page(vaddr pc)
     return (tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK;
 }
 
-static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
+static inline unsigned int tb_jmp_cache_hash_func(vaddr pc, uint64_t cs_base)
 {
     vaddr tmp;
     tmp = pc ^ (pc >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS));
+    /*
+     * One PC can run under several cs_base values: an ARM guest with lazy VFP
+     * (iOS) runs the same code with FPEXC.EN clear and set, two TBs that
+     * otherwise evict each other from one slot. Mixing cs_base into the
+     * in-page bits gives each its own slot; the page bits are unchanged, so
+     * tb_jmp_cache_clear_page still covers them.
+     */
+    tmp ^= (uint32_t)(cs_base * 0x9e3779b1u) >> (32 - TB_JMP_PAGE_BITS);
     return (((tmp >> (TARGET_PAGE_BITS - TB_JMP_PAGE_BITS)) & TB_JMP_PAGE_MASK)
            | (tmp & TB_JMP_ADDR_MASK));
 }
@@ -56,7 +64,7 @@ static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
 #else
 
 /* In user-mode we can get better hashing because we do not have a TLB */
-static inline unsigned int tb_jmp_cache_hash_func(vaddr pc)
+static inline unsigned int tb_jmp_cache_hash_func(vaddr pc, uint64_t cs_base)
 {
     return (pc ^ (pc >> TB_JMP_CACHE_BITS)) & (TB_JMP_CACHE_SIZE - 1);
 }

@@ -144,6 +144,18 @@ void tlb_flush(CPUState *cpu);
 void tlb_flush_switch_context(CPUState *cpu, uint64_t key);
 
 /**
+ * tlb_flush_context:
+ * @cpu: CPU whose TLB should be flushed, which must be the current CPU
+ * @key: the address space to invalidate, as given to tlb_flush_switch_context
+ *
+ * Invalidate one address space's non-global translations (e.g. TLBIASID).
+ * The softmmu TLB only ever holds the current address space, so it is
+ * flushed only when @key is current; of the TB jump caches, only @key's is
+ * emptied, keeping the other address spaces' and the global (kernel) entries.
+ */
+void tlb_flush_context(CPUState *cpu, uint64_t key);
+
+/**
  * tlb_flush_all_cpus_synced:
  * @cpu: src CPU of the flush
  *
@@ -254,6 +266,9 @@ static inline void tlb_flush(CPUState *cpu)
 {
 }
 static inline void tlb_flush_switch_context(CPUState *cpu, uint64_t key)
+{
+}
+static inline void tlb_flush_context(CPUState *cpu, uint64_t key)
 {
 }
 static inline void tlb_flush_all_cpus_synced(CPUState *src_cpu)
