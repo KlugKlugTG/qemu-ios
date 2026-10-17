@@ -1228,9 +1228,25 @@ static struct { bool active; uint32_t id; double x, y; } portable_contacts[5];
 static uint64_t portable_touch_timestamp, portable_motion_timestamp[2];
 static uint64_t portable_status_id;
 static int portable_status, portable_pending;
+/*
+ * Board devices outlive every input event, so each is looked up once (after
+ * ui-ready, when the machine exists). object_resolve_path_type walks the whole
+ * QOM tree: per 100 Hz motion sample it was a quarter of the main loop's time,
+ * all under the BQL.
+ */
+static Object *portable_device(Object **cache, bool *resolved, const char *type)
+{
+    if (!*resolved) {
+        *cache = object_resolve_path_type("", type, NULL);
+        *resolved = true;
+    }
+    return *cache;
+}
 static LIS302DLState *portable_accel(void)
 {
-    Object *obj = object_resolve_path_type("", TYPE_LIS302DL, NULL);
+    static Object *obj;
+    static bool resolved;
+    portable_device(&obj, &resolved, TYPE_LIS302DL);
     return obj ? LIS302DL(obj) : NULL;
 }
 static void portable_emit(int slot, int phase, double x, double y)
@@ -1295,7 +1311,9 @@ struct portable_touch_request {
 static bool portable_touch_capacity(unsigned begins, unsigned ends, unsigned moves)
 {
 #if !defined(__APPLE__)
-    Object *obj = object_resolve_path_type("", TYPE_IPOD_TOUCH_MULTITOUCH, NULL);
+    static Object *obj;
+    static bool resolved;
+    portable_device(&obj, &resolved, TYPE_IPOD_TOUCH_MULTITOUCH);
     return !obj || ipod_touch_multitouch_can_queue(IPOD_TOUCH_MULTITOUCH(obj), begins, ends, moves);
 #else
     return true;
