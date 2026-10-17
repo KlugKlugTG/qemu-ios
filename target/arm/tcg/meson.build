@@ -35,6 +35,9 @@ arm_ss.add(files(
   'mve_helper.c',
   'op_helper.c',
 ))
+# ir-cache.c finds its own image with dladdr(), which glibc before 2.34 (the
+# Linux AppImage's 2.31 floor) keeps in libdl.
+arm_ss.add(cc.find_library('dl', required: false))
 
 arm_ss.add(when: 'TARGET_AARCH64', if_true: files(
   'cpu64.c',
