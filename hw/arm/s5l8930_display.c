@@ -45,6 +45,7 @@
 #define DP_UI_FORMAT        0x40
 #define DP_UI_ADDR          0x44
 #define DP_UI_STRIDE        0x48
+#define DP_UI_UNSCALED      0x4c      /* bit0: placed at 0,0 at its source size; DST_ORIGIN and DST_END unused */
 #define DP_UI_DST_ORIGIN    0x54      /* x << 16 | y on the panel */
 #define DP_UI_SRC_SIZE      0x60      /* w << 16 | h of the source buffer */
 #define DP_UI_DST_END       0x64      /* x1 << 16 | y1, the destination's far corner */
@@ -581,6 +582,17 @@ static bool scanout_layer(S5L8930DisplayState *s, int layer, unsigned w, unsigne
     uint32_t *r = s->pipe[0].regs, *ui = r + DP_UI_BASE(layer) / 4;
     uint32_t org = ui[DP_UI_DST_ORIGIN / 4], sz = ui[DP_UI_SRC_SIZE / 4];
     uint32_t end = ui[DP_UI_DST_END / 4];
+
+    /*
+     * 3.2's AppleDisplayPipe (7B500 0xc058d4de) programs DST_ORIGIN and DST_END only for a layer placed off 0,0 and
+     * otherwise sets UNSCALED and leaves them as they were: after an iPhone app's compatibility window (its
+     * destination 2x or 1x, centered), SpringBoard's full-screen layer arrives with the window's corners still in
+     * them, and honoring those drew the whole Home screen into the window (LightTouchMac issue 87). 4.x writes 0 to
+     * UNSCALED and both corners on every swap (8C148 0x806cf468).
+     */
+    if (ui[DP_UI_UNSCALED / 4] & 1) {
+        org = end = 0;
+    }
 
     if (!(r[DP_LAYERS / 4] & (0x100 << layer))) {
         return false;
