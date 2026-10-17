@@ -3730,6 +3730,12 @@ void qemu_init(int argc, char **argv)
      */
     loc_set_none();
 
+#if defined(CONFIG_TCG) && defined(CONFIG_LINUX)
+    /* Embedders that pass no -perfmap (the Android app) can ask by environment. */
+    if (getenv("QEMU_PERFMAP_DIR")) {
+        perf_enable_perfmap();
+    }
+#endif
     qemu_validate_options(machine_opts_dict);
     qemu_process_sugar_options();
 

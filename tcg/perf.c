@@ -48,9 +48,12 @@ static FILE *perfmap;
 
 void perf_enable_perfmap(void)
 {
-    char map_file[32];
+    /* QEMU_PERFMAP_DIR: hosts without a writable /tmp (an Android app). */
+    const char *dir = getenv("QEMU_PERFMAP_DIR");
+    char map_file[PATH_MAX];
 
-    snprintf(map_file, sizeof(map_file), "/tmp/perf-%d.map", getpid());
+    snprintf(map_file, sizeof(map_file), "%s/perf-%d.map", dir ? dir : "/tmp",
+             getpid());
     perfmap = safe_fopen_w(map_file);
     if (perfmap == NULL) {
         warn_report("Could not open %s: %s, proceeding without perfmap",
