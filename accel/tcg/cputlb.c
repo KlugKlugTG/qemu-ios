@@ -2023,6 +2023,15 @@ static uint64_t int_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
     return ret_be;
 }
 
+/*
+ * As on the physmem path, a region that opted in with
+ * memory_region_enable_lockless_io is dispatched without the BQL; its
+ * callbacks take it where they need it.
+ */
+#define MMIO_BQL_LOCK_GUARD(mr) \
+    g_autoptr(BQLLockAuto) _bql_lock_auto __attribute__((unused)) \
+        = (mr)->lockless_io ? NULL : bql_auto_lock(__FILE__, __LINE__)
+
 static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
                                uint64_t ret_be, vaddr addr, int size,
                                int mmu_idx, MMUAccessType type, uintptr_t ra)
@@ -2037,7 +2046,7 @@ static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
     mr = section->mr;
 
     it_acct_mmio_mr = mr;
-    BQL_LOCK_GUARD();
+    MMIO_BQL_LOCK_GUARD(mr);
     return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
                            type, ra, mr, mr_offset);
 }
@@ -2057,7 +2066,7 @@ static Int128 do_ld16_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
     mr = section->mr;
 
     it_acct_mmio_mr = mr;
-    BQL_LOCK_GUARD();
+    MMIO_BQL_LOCK_GUARD(mr);
     a = int_ld_mmio_beN(cpu, full, ret_be, addr, size - 8, mmu_idx,
                         MMU_DATA_LOAD, ra, mr, mr_offset);
     b = int_ld_mmio_beN(cpu, full, ret_be, addr + size - 8, 8, mmu_idx,
@@ -2553,7 +2562,7 @@ static uint64_t do_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
     mr = section->mr;
 
     it_acct_mmio_mr = mr;
-    BQL_LOCK_GUARD();
+    MMIO_BQL_LOCK_GUARD(mr);
     return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
                            ra, mr, mr_offset);
 }
@@ -2572,7 +2581,7 @@ static uint64_t do_st16_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
     mr = section->mr;
 
     it_acct_mmio_mr = mr;
-    BQL_LOCK_GUARD();
+    MMIO_BQL_LOCK_GUARD(mr);
     int_st_mmio_leN(cpu, full, int128_getlo(val_le), addr, 8,
                     mmu_idx, ra, mr, mr_offset);
     return int_st_mmio_leN(cpu, full, int128_gethi(val_le), addr + 8,

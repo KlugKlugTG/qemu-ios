@@ -1,6 +1,7 @@
 #include "hw/arm/ipod_touch_timer.h"
 #include "migration/vmstate.h"
 #include "hw/core/qdev-properties.h"
+#include "qemu/main-loop.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
 
@@ -158,6 +159,7 @@ static void s5l8900_timer1_write(void *opaque, hwaddr addr, uint64_t value, unsi
 {
     //fprintf(stderr, "%s: writing 0x%08x to 0x%08x\n", __func__, value, addr);
     IPodTouchTimerState *s = (struct IPodTouchTimerState *) opaque;
+    BQL_LOCK_GUARD();
 
     if (timer_trace() && addr != s->irqlatch) {
         TRACE_PRINTF(trace_ipod_touch_timer_log, "[TIMER] W 0x%03x <- 0x%08x at %" PRId64 " ns\n",
@@ -258,6 +260,8 @@ static void timer_count_order(bool high)
     }
 }
 
+static uint64_t s5l8900_timer1_read_locked(IPodTouchTimerState *s, hwaddr addr);
+
 static uint64_t s5l8900_timer1_read(void *opaque, hwaddr addr, unsigned size)
 {
     //fprintf(stderr, "%s: read from location 0x%08x\n", __func__, addr);
@@ -269,6 +273,15 @@ static uint64_t s5l8900_timer1_read(void *opaque, hwaddr addr, unsigned size)
         timer_count_order(addr == TIMER_TICKSHIGH);
     }
 
+    /*
+     * Only the tick counter is read without the BQL (see s5l8900_timer_init):
+     * the virtual clock is safe to read from any thread and ticks_high/low
+     * are written only here, by the one vCPU.
+     */
+    if (addr != TIMER_TICKSHIGH && addr != TIMER_TICKSLOW) {
+        BQL_LOCK_GUARD();
+        return s5l8900_timer1_read_locked(s, addr);
+    }
     switch (addr) {
         case TIMER_TICKSHIGH:    // needs to be fixed so that read from low first works as well
 
@@ -282,6 +295,13 @@ static uint64_t s5l8900_timer1_read(void *opaque, hwaddr addr, unsigned size)
             return s->ticks_high;
         case TIMER_TICKSLOW:
             return s->ticks_low;
+    }
+    return 0;
+}
+
+static uint64_t s5l8900_timer1_read_locked(IPodTouchTimerState *s, hwaddr addr)
+{
+    switch (addr) {
         case TIMER_IRQSTAT:
             return s->irqstat; // ~0; // s->irqstat;
       default:
@@ -309,6 +329,12 @@ static void s5l8900_timer_init(Object *obj)
     IPodTouchTimerState *s = IPOD_TOUCH_TIMER(dev);
 
     memory_region_init_io(&s->iomem, obj, &timer1_ops, s, "timer1", 0x10001);
+    /*
+     * The guest reads the tick counter ~18K times a second while animating,
+     * and waiting for the BQL there cost the vCPU 6% of its time; every other
+     * register takes the BQL in the callbacks.
+     */
+    memory_region_enable_lockless_io(&s->iomem);
     sysbus_init_irq(sbd, &s->irq);
 
     s->base_time = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
