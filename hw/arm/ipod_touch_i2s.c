@@ -951,7 +951,11 @@ static void it_i2s_push(IPodTouchI2SState *s, const uint8_t *buf, unsigned len)
      * request line we lower here is what ends the burst. */
     s->fifo_bytes += len;
     s->pushed_since_tick = true;
-    s->last_push_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    /* Only the stall log reads it, and this runs for every 4-byte element:
+     * the clock read was a fifth of the main loop's time under the BQL. */
+    if (trace_event_get_state_backends(TRACE_IPOD_TOUCH_I2S_STALL_LOG)) {
+        s->last_push_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    }
     /* Stall debt is repaid only by it_i2s_pace_drain(), rate-limited. Repaying
      * it here, instantly, turned a recovered stall into a zero-time burst that
      * outran the guest's own recovery -- see the note in the drain. */
