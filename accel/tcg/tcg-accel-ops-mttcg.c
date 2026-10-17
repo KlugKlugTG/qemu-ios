@@ -24,6 +24,7 @@
  */
 
 #include "qemu/osdep.h"
+#include <dlfcn.h>
 #include "system/memory.h"
 #include "exec/cpu-common.h"
 #include "system/tcg.h"
@@ -128,11 +129,16 @@ extern struct it_acct_mr { void *mr; uint64_t n, ns; char *name; } it_acct_mrs[2
 extern uint64_t it_acct_wait_hist[5][2], it_acct_hold_hist[5][2];
 extern uint64_t it_acct_ctxsw, it_acct_fills[16][2];
 extern struct it_acct_holder { const char *file; int line; uint64_t n, ns, long_n, long_ns; } it_acct_holders[64];
+extern struct it_acct_cb { void *fn; uint64_t n, ns, long_n, long_ns, max; } it_acct_cbs[64];
+void it_acct_cb_enable(void);
 
 static int64_t acct_run_ns, acct_halt_ns, acct_io_ns, acct_bql_ns;
 static int64_t acct_io_cpu_ns, acct_io_cpu_mark;
 static int64_t acct_t0, acct_next_dump, acct_interval_ns, acct_io_mark;
 static uint64_t acct_halts;
+static int64_t acct_run_since;          /* start of the exec in progress, 0 outside one */
+static clockid_t acct_cpu_clock;
+static bool acct_cpu_clock_ok;
 static uint64_t acct_why_halted, acct_why_stopped, acct_why_other, acct_long;
 static bool acct_halted;
 
@@ -164,6 +170,34 @@ static void mttcg_acct_init(void)
     acct_interval_ns = (int64_t)(atof(v) > 0 ? atof(v) : 5.0) * 1000000000LL;
     acct_t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     acct_next_dump = acct_t0 + acct_interval_ns;
+    acct_cpu_clock_ok = !pthread_getcpuclockid(pthread_self(), &acct_cpu_clock);
+    it_acct_cb_enable();
+}
+
+/*
+ * Cumulative vCPU time for qemu-ios-ui.c's per-frame trace (IT_FRAME_TRACE),
+ * so a slow frame can be put down to guest work, guest idle, the BQL or the
+ * host taking the CPU away: v[0] run (in cpu_exec, including GL calls and
+ * the BQL waits of MMIO inside it), v[1] outside cpu_exec (halted, idle or
+ * running queued work, including v[2]), v[2] BQL waits outside cpu_exec,
+ * v[3] BQL waits inside it, v[4] vCPU thread CPU time, v[5] guest
+ * instructions. Read from another thread without locks: diagnostics only, a
+ * figure can be one exec stale. Zeros unless IT_VCPU_ACCT is on.
+ */
+void it_acct_frame_snapshot(int64_t v[6])
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int64_t since = qatomic_read(&acct_run_since), mark = qatomic_read(&acct_io_mark);
+    struct timespec ts;
+
+    v[0] = qatomic_read(&acct_run_ns) + (since ? now - since : 0);
+    v[1] = qatomic_read(&acct_halt_ns) + qatomic_read(&acct_io_ns) +
+           (!since && mark ? now - mark : 0);
+    v[2] = qatomic_read(&acct_bql_ns);
+    v[3] = (int64_t)qatomic_read(&it_acct_vcpu_bql_ns);
+    v[4] = acct_cpu_clock_ok && !clock_gettime(acct_cpu_clock, &ts) ?
+           ts.tv_sec * 1000000000LL + ts.tv_nsec : 0;
+    v[5] = (int64_t)qatomic_read(&it_acct_insns);
 }
 
 static void mttcg_acct_dump(int64_t now)
@@ -197,6 +231,18 @@ static void mttcg_acct_dump(int64_t now)
             it_acct_jc_other_pc, it_acct_pcrel_invals, it_acct_jc_flushes);
     fprintf(stderr, "[acct]   vcpu-bql n %" PRIu64 " wait-ns %" PRIu64 " slow %" PRIu64 "\n",
             it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow);
+    for (int i = 0; i < 64 && it_acct_cbs[i].fn; i++) {
+        struct it_acct_cb *c = &it_acct_cbs[i];
+        Dl_info di = { 0 };
+
+        /* Symbolize offline from the library's offset (static functions have no dynamic name). */
+        dladdr(c->fn, &di);
+        fprintf(stderr, "[acct]   main-cb %s+0x%" PRIxPTR " %s n %" PRIu64 " ns %" PRIu64
+                " long %" PRIu64 " long-ns %" PRIu64 " max %" PRIu64 "\n",
+                di.dli_fname ? strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname : "?",
+                (uintptr_t)c->fn - (uintptr_t)di.dli_fbase, di.dli_sname ? di.dli_sname : "-",
+                c->n, c->ns, c->long_n, c->long_ns, c->max);
+    }
     fprintf(stderr, "[acct]   ctxsw %" PRIu64 " tlb-fills", it_acct_ctxsw);
     for (int i = 0; i < 16; i++) {
         if (it_acct_fills[i][0] || it_acct_fills[i][1]) {
@@ -303,10 +349,12 @@ static void *mttcg_cpu_thread_fn(void *arg)
             bql_unlock();
             if (it_acct_on) {
                 a = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                qatomic_set(&acct_run_since, a);
             }
             r = tcg_cpu_exec(cpu);
             if (it_acct_on) {
                 b = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+                qatomic_set(&acct_run_since, 0);
                 /*
                  * cpu_exec() RETURNS on a halt, cheaply -- the actual sleep is
                  * inside qemu_process_cpu_events() at the top of the loop, so the wait has to be

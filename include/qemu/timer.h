@@ -95,6 +95,13 @@ struct QEMUTimer {
 extern QEMUTimerListGroup main_loop_tlg;
 
 /*
+ * Perf accounting (IT_VCPU_ACCT): when set, called after each timer and
+ * bottom-half callback with the callback and how long it ran, so that BQL
+ * holds can be put down to the device that made them. NULL otherwise.
+ */
+extern void (*it_acct_cb_hook)(void *fn, int64_t ns);
+
+/*
  * qemu_clock_get_ns;
  * @type: the clock type
  *

@@ -70,6 +70,7 @@ static void ios_sequence_reset(void *opaque)
 }
 #include "hw/arm/ipod_touch_pcf50633_pmu.h"
 #include "hw/arm/ipod_touch_lcd.h"
+#include "hw/arm/guest-services/gles.h"
 
 #ifndef _WIN32
 #include <sys/resource.h>
@@ -270,6 +271,42 @@ static void ios_report_first_lit_frame(const uint8_t *bgra, int w, int h)
 }
 
 /*
+ * Perf work: IT_FRAME_TRACE=path appends one line per published frame --
+ * "ns serial vcpu-run vcpu-outside bql-outside bql-inside vcpu-cpu insns
+ * gl-call gl-present main-cpu" (see it_acct_frame_snapshot), all cumulative
+ * ns except insns -- so that a slow frame can be
+ * put down to guest work, guest idle, the BQL, GL or the host scheduler
+ * (tools/perf/framestats.py --trace). The vCPU figures need IT_VCPU_ACCT,
+ * the GL ones IT_GLES_PROF.
+ */
+void it_acct_frame_snapshot(int64_t v[6]);
+static void ios_frame_trace(uint64_t ns, uint64_t serial)
+{
+    static FILE *trace;
+    static bool opened;
+    int64_t v[6];
+    uint64_t gl_call, gl_present;
+    struct timespec ts = { 0 };
+
+    if (!opened) {
+        const char *path = getenv("IT_FRAME_TRACE");
+        opened = true;
+        trace = path && *path ? fopen(path, "a") : NULL;
+    }
+    if (!trace) {
+        return;
+    }
+    it_acct_frame_snapshot(v);
+    gles_host_prof(&gl_call, &gl_present);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    fprintf(trace, "%" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64 " %" PRId64
+            " %" PRId64 " %" PRId64 " %" PRId64 " %" PRIu64 " %" PRIu64 " %" PRId64 "\n",
+            ns, serial, v[0], v[1], v[2], v[3], v[4], v[5], gl_call, gl_present,
+            (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec);
+    fflush(trace);
+}
+
+/*
  * Copy the surface rather than handing the app QEMU's pixels directly: the
  * surface can be freed or reallocated by dpy_gfx_switch at any moment, and a
  * UIKit frame in flight referencing freed pixman memory is a use-after-free
@@ -342,6 +379,7 @@ static void ios_capture(DisplaySurface *surface)
     ios.timestamp_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     qemu_mutex_unlock(&ios.frame_lock);
 
+    ios_frame_trace(ios.timestamp_ns, ios.serial);
     ios_report_first_lit_frame(dst, w, h);
 
     if (ios.cb) {

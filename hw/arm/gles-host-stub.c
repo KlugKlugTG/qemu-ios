@@ -26,6 +26,12 @@ void gles_host_stats(uint64_t *draws, uint64_t *presents)
     *presents = 0;
 }
 
+void gles_host_prof(uint64_t *call_ns, uint64_t *present_ns)
+{
+    *call_ns = 0;
+    *present_ns = 0;
+}
+
 /* Nothing to gate when there is no host GL in the first place. */
 void gles_host_set_allowed(bool allowed)
 {

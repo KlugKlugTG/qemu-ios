@@ -604,6 +604,8 @@ int gles_host_context_count(void)
 
 static GLESHost gh_legacy;
 static GLESHost *gh_current = &gh_legacy;
+/* t_call and t_present summed over every sharegroup, for gles_host_prof(). */
+static uint64_t gles_prof_call_ns, gles_prof_present_ns;
 #define gh (*gh_current)
 
 /*
@@ -5592,7 +5594,11 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         uint64_t t0 = gles_t();
 
         gles_present_to_panel();
-        gh.t_present += gles_t() - t0;
+        {
+            uint64_t dt = gles_t() - t0;
+            gh.t_present += dt;
+            qatomic_set(&gles_prof_present_ns, gles_prof_present_ns + dt);
+        }
         gles_ctx_stats[gles_ctx_slot(ctx)].present_panel++;
         /*
          * Report from HERE too.
@@ -5676,7 +5682,11 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
             }
         }
         int64_t r = gles_present_to_surface(cpu, a[0], a[1], a[2], a[3], a[4]);
-        gh.t_present += gles_t() - t0;
+        {
+            uint64_t dt = gles_t() - t0;
+            gh.t_present += dt;
+            qatomic_set(&gles_prof_present_ns, gles_prof_present_ns + dt);
+        }
         gles_ctx_stats[gles_ctx_slot(ctx)].present_surface++;
         return r;
     }
@@ -7819,7 +7829,11 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
             }
         }
     }
-    gh.t_call += gles_t() - t0;
+    {
+        uint64_t dt = gles_t() - t0;
+        gh.t_call += dt;
+        qatomic_set(&gles_prof_call_ns, gles_prof_call_ns + dt);
+    }
     return r;
 }
 
@@ -7827,4 +7841,10 @@ void gles_host_stats(uint64_t *draws, uint64_t *presents)
 {
     *draws = gh.draws;
     *presents = gh.presents;
+}
+
+void gles_host_prof(uint64_t *call_ns, uint64_t *present_ns)
+{
+    *call_ns = qatomic_read(&gles_prof_call_ns);
+    *present_ns = qatomic_read(&gles_prof_present_ns);
 }

@@ -582,6 +582,33 @@ static __thread int64_t it_acct_held_since;
 static __thread const char *it_acct_held_file;
 static __thread int it_acct_held_line;
 
+/* Timer and BH callbacks run with the BQL held, by function (it_acct_cb_hook). */
+struct it_acct_cb { void *fn; uint64_t n, ns, long_n, long_ns, max; } it_acct_cbs[64];
+
+static void it_acct_cb_note(void *fn, int64_t ns)
+{
+    if (!bql_locked() || current_cpu) {
+        return;
+    }
+    for (int i = 0; i < 64; i++) {
+        struct it_acct_cb *c = &it_acct_cbs[i];
+        if (!c->fn || c->fn == fn) {
+            c->fn = fn;
+            c->n++;
+            c->ns += ns;
+            c->long_n += ns >= 100000;
+            c->long_ns += ns >= 100000 ? ns : 0;
+            c->max = MAX(c->max, (uint64_t)ns);
+            break;
+        }
+    }
+}
+
+void it_acct_cb_enable(void)
+{
+    it_acct_cb_hook = it_acct_cb_note;
+}
+
 static int it_acct_bucket(int64_t dt)
 {
     return dt < 1000 ? 0 : dt < 10000 ? 1 : dt < 100000 ? 2 : dt < 1000000 ? 3 : 4;

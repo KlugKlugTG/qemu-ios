@@ -586,6 +586,8 @@ bool timer_expired(const QEMUTimer *timer_head, int64_t current_time)
     return timer_expired_ns(timer_head, current_time * timer_head->scale);
 }
 
+void (*it_acct_cb_hook)(void *fn, int64_t ns);
+
 bool timerlist_run_timers(QEMUTimerList *timer_list)
 {
     QEMUTimer *ts;
@@ -661,7 +663,13 @@ bool timerlist_run_timers(QEMUTimerList *timer_list)
 
         /* run the callback (the timer list can be modified) */
         qemu_mutex_unlock(&timer_list->active_timers_lock);
-        cb(opaque);
+        if (unlikely(it_acct_cb_hook)) {
+            int64_t t0 = get_clock();
+            cb(opaque);
+            it_acct_cb_hook((void *)cb, get_clock() - t0);
+        } else {
+            cb(opaque);
+        }
         qemu_mutex_lock(&timer_list->active_timers_lock);
 
         progress = true;

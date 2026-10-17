@@ -170,7 +170,13 @@ void aio_bh_call(QEMUBH *bh)
         reentrancy_guard->engaged_in_io = true;
     }
 
-    bh->cb(bh->opaque);
+    if (unlikely(it_acct_cb_hook)) {
+        int64_t t0 = get_clock();
+        bh->cb(bh->opaque);
+        it_acct_cb_hook((void *)bh->cb, get_clock() - t0);
+    } else {
+        bh->cb(bh->opaque);
+    }
 
     if (reentrancy_guard) {
         reentrancy_guard->engaged_in_io = last_engaged_in_io;

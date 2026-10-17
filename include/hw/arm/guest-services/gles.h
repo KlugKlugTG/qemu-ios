@@ -405,6 +405,8 @@ void qc_gles_dump_stats(void);
 int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
                        uint32_t argc, const uint32_t *args);
 void gles_host_stats(uint64_t *draws, uint64_t *presents);
+/* Time in GL calls and in presents so far (IT_GLES_PROF only; zeros otherwise). */
+void gles_host_prof(uint64_t *call_ns, uint64_t *present_ns);
 void gles_host_reset(void);
 int gles_host_context_count(void);
 /* Every refusal the bridge makes, by name ("surface:A008", "teximage:0x1906/0x8033",
