@@ -683,7 +683,46 @@ void tcg_flush_jmp_cache(CPUState *cpu)
     }
 
     TB_CACHE_CLEAR_NOTE(jc, TB_CLEAR_full_total);
-    for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
-        qatomic_set(&jc->array[i].tb, NULL);
+    /* Every other cache in the bank goes stale; empty this one now. */
+    qatomic_inc(&jc->bank->epoch);
+    tb_jmp_cache_empty(jc);
+    jc->epoch = qatomic_read(&jc->bank->epoch);
+}
+
+/*
+ * Make the jump cache for address space @key current, emptying it first if
+ * it is new or stale. Called by the owning vCPU on a guest context switch.
+ */
+void tcg_switch_jmp_cache(CPUState *cpu, uint64_t key)
+{
+    CPUJumpCache *jc = cpu->tb_jmp_cache;
+    CPUJumpCacheBank *bank;
+    uint64_t epoch;
+    int i, victim = 0;
+
+    if (unlikely(jc == NULL)) {
+        return;
     }
+    bank = jc->bank;
+    epoch = qatomic_read(&bank->epoch);
+    for (i = 0; i < TB_JMP_CACHE_CONTEXTS; i++) {
+        if (bank->used[i] && bank->key[i] == key) {
+            break;
+        }
+        if (bank->used[i] < bank->used[victim]) {
+            victim = i;
+        }
+    }
+    if (i == TB_JMP_CACHE_CONTEXTS) {
+        i = victim;
+        bank->key[i] = key;
+        bank->cache[i].epoch = epoch - 1;
+    }
+    bank->used[i] = ++bank->clock;
+    jc = &bank->cache[i];
+    if (jc->epoch != epoch) {
+        tb_jmp_cache_empty(jc);
+        jc->epoch = epoch;
+    }
+    qatomic_set(&cpu->tb_jmp_cache, jc);
 }

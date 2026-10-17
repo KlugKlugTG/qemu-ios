@@ -149,6 +149,8 @@ static void tlb_window_reset(CPUTLBDesc *desc, int64_t ns,
 static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
 {
     CPUJumpCache *jc = cpu->tb_jmp_cache;
+    CPUJumpCacheBank *bank;
+    uint64_t epoch;
     int i, i0;
 
     if (unlikely(!jc)) {
@@ -157,8 +159,17 @@ static void tb_jmp_cache_clear_page(CPUState *cpu, vaddr page_addr)
 
     i0 = tb_jmp_cache_hash_page(page_addr);
     TB_CACHE_CLEAR_NOTE(jc, TB_CLEAR_page_total);
-    for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
-        qatomic_set(&jc->array[i0 + i].tb, NULL);
+    /* The page may be mapped in any address space; stale caches are skipped. */
+    bank = jc->bank;
+    epoch = qatomic_read(&bank->epoch);
+    for (int c = 0; c < TB_JMP_CACHE_CONTEXTS; c++) {
+        CPUJumpCache *each = &bank->cache[c];
+        if (each != jc && each->epoch != epoch) {
+            continue;
+        }
+        for (i = 0; i < TB_JMP_PAGE_SIZE; i++) {
+            qatomic_set(&each->array[i0 + i].tb, NULL);
+        }
     }
 }
 
@@ -367,9 +378,14 @@ static void flush_all_helper(CPUState *src, run_on_cpu_func fn,
     }
 }
 
+/* In a flush's work data: the guest switched address space, see tlb_flush_switch_context. */
+#define TLB_FLUSH_KEEP_JMP_CACHE (1u << 31)
+QEMU_BUILD_BUG_ON(NB_MMU_MODES > 31);
+
 static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
 {
-    MMUIdxMap asked = data.host_int;
+    MMUIdxMap asked = data.host_int & ~TLB_FLUSH_KEEP_JMP_CACHE;
+    bool keep_jmp_cache = data.host_int & TLB_FLUSH_KEEP_JMP_CACHE;
     MMUIdxMap all_dirty, work, to_clean;
     int64_t now = get_clock_realtime();
 
@@ -396,7 +412,9 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
                        !to_clean ? TB_CLEAR_tlb_clean :
                        to_clean == ALL_MMUIDX_BITS ? TB_CLEAR_tlb_all :
                        TB_CLEAR_tlb_partial);
-    tcg_flush_jmp_cache(cpu);
+    if (!keep_jmp_cache) {
+        tcg_flush_jmp_cache(cpu);
+    }
 
     if (to_clean == ALL_MMUIDX_BITS) {
         qatomic_set(&cpu->neg.tlb.c.full_flush_count,
@@ -424,6 +442,14 @@ void tlb_flush_by_mmuidx(CPUState *cpu, MMUIdxMap idxmap)
 void tlb_flush(CPUState *cpu)
 {
     tlb_flush_by_mmuidx(cpu, ALL_MMUIDX_BITS);
+}
+
+void tlb_flush_switch_context(CPUState *cpu, uint64_t key)
+{
+    assert_cpu_is_self(cpu);
+    tcg_switch_jmp_cache(cpu, key);
+    tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT(ALL_MMUIDX_BITS |
+                                                        TLB_FLUSH_KEEP_JMP_CACHE));
 }
 
 void tlb_flush_by_mmuidx_all_cpus_synced(CPUState *src_cpu, MMUIdxMap idxmap)

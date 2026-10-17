@@ -1224,7 +1224,13 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
         tcg_target_initialized = true;
     }
 
-    cpu->tb_jmp_cache = g_new0(CPUJumpCache, 1);
+    {
+        CPUJumpCacheBank *bank = g_new0(CPUJumpCacheBank, 1);
+        for (int i = 0; i < TB_JMP_CACHE_CONTEXTS; i++) {
+            bank->cache[i].bank = bank;
+        }
+        cpu->tb_jmp_cache = &bank->cache[0];
+    }
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY
     tcg_iommu_init_notifier_list(cpu);
@@ -1242,5 +1248,5 @@ void tcg_exec_unrealizefn(CPUState *cpu)
 #endif /* !CONFIG_USER_ONLY */
 
     tlb_destroy(cpu);
-    g_free_rcu(cpu->tb_jmp_cache, rcu);
+    g_free_rcu(cpu->tb_jmp_cache->bank, rcu);
 }
