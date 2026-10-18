@@ -1179,6 +1179,44 @@ static void iosurface_init(void)
     }
 }
 
+static void surface_log(unsigned base, unsigned stride, unsigned width, unsigned height,
+                        unsigned format)
+{
+    w("[mbxshim]   candidate surface base="); wd(base);
+    w(" stride="); wd(stride);
+    w(" "); wd(width); w("x"); wd(height);
+    w(" fmt="); wd(format); w("\n");
+}
+
+/*
+ * Whether an accepted surface with this geometry was already reported; records
+ * it if not. CA rotates two or three buffers, so without this the two lines
+ * above went out on every frame: a dozen write(2)s, each of which launchd
+ * relays to syslogd as a message of its own, which syslogd then parses (its
+ * regex time matching was the hottest shared-cache code in Flight Control),
+ * plus a dozen QEMU_CALL traps. Measured: the vCPU ran 73% of the time in
+ * Flight Control at 58 fps on the desktop, 54% without them.
+ */
+static int surface_seen(unsigned base, unsigned stride, unsigned width, unsigned height,
+                        unsigned format)
+{
+    static unsigned seen[8][4], next;
+    unsigned shape = width << 16 ^ height, i;
+
+    for (i = 0; i < 8; i++) {
+        if (seen[i][0] == base && seen[i][1] == stride && seen[i][2] == shape &&
+            seen[i][3] == format) {
+            return 1;
+        }
+    }
+    seen[next][0] = base;
+    seen[next][1] = stride;
+    seen[next][2] = shape;
+    seen[next][3] = format;
+    next = (next + 1) % 8;
+    return 0;
+}
+
 /*
  * Try to read a surface's geometry, and REJECT it unless the numbers are
  * self-consistent.
@@ -1208,11 +1246,6 @@ static int surface_capture(ca_view_t *v, void *s)
     height = p_IOSurfaceGetHeight ? p_IOSurfaceGetHeight(s) : 0;
     format = p_IOSurfaceGetPixelFormat ? p_IOSurfaceGetPixelFormat(s) : 0;
 
-    w("[mbxshim]   candidate surface base="); wd(base);
-    w(" stride="); wd(stride);
-    w(" "); wd(width); w("x"); wd(height);
-    w(" fmt="); wd(format); w("\n");
-
     /* A real drawable on this device is at most a screenful and its stride has
      * to cover its width -- at ITS OWN pixel size. A CAEAGLLayer asking for
      * kEAGLColorFormatRGB565 gets a 2-byte surface (320 wide, stride 640), and
@@ -1224,6 +1257,7 @@ static int surface_capture(ca_view_t *v, void *s)
         width > 2048 || height > 2048 || stride < width * bpp ||
         stride > width * bpp + 4096) {
         char fourcc[5];
+        surface_log(base, stride, width, height, format);
         w("[mbxshim]   -> REJECTED (not a plausible IOSurface); "
           "keeping panel fallback\n");
         refused("drawable:", fourcc_text(format, fourcc), ~0u);
@@ -1236,7 +1270,10 @@ static int surface_capture(ca_view_t *v, void *s)
     v->width  = width;
     v->height = height;
     v->format = format;
-    w("[mbxshim]   -> accepted\n");
+    if (!surface_seen(base, stride, width, height, format)) {
+        surface_log(base, stride, width, height, format);
+        w("[mbxshim]   -> accepted\n");
+    }
     return 1;
 }
 
