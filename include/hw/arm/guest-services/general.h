@@ -193,6 +193,9 @@ QEMU_BUILD_BUG_MSG(sizeof(qemu_call_t) != 52,
 struct ARMCPRegInfo;
 uint64_t qemu_call_status(CPUARMState *env, const struct ARMCPRegInfo *ri);
 void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value);
+/* Guest memory as the vCPU's own load/store would reach it, through the host pointers in its TLB
+ * (hw/arm/guest-gles.c). False, having possibly copied part, when a page needs the slow path. */
+bool guest_rw_ram(CPUState *cpu, uint64_t va, uint8_t *buf, size_t len, bool write);
 #else
 uint32_t qemu_call_status(qemu_call_t *qcall);
 void qemu_call(qemu_call_t *qcall);

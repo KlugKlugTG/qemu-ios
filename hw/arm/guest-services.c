@@ -52,6 +52,26 @@ static int agent_copy(void *opaque, uint32_t address, uint8_t *data,
     return cpu_memory_rw_debug(opaque, address, data, length, write);
 }
 
+/*
+ * The request block, 52 bytes on the caller's stack, read and written back once per call: GL calls
+ * come thousands of times a second, and a debug access walks the guest page tables and dispatches
+ * through the address space each time (~12% of the vCPU in a draw-call benchmark on a Poco F3).
+ * LT_QCALL_FAST=off always takes the debug path (A/B).
+ */
+static int qcall_rw(CPUState *cpu, uint64_t va, void *buf, size_t len, bool write)
+{
+    static int fast = -1;
+
+    if (fast < 0) {
+        const char *v = getenv("LT_QCALL_FAST");
+        fast = !(v && !strcmp(v, "off"));
+    }
+    if (fast && guest_rw_ram(cpu, va, buf, len, write)) {
+        return 0;
+    }
+    return cpu_memory_rw_debug(cpu, va, buf, len, write);
+}
+
 void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
 {
     CPUState *cpu = qemu_get_cpu(0);
@@ -99,7 +119,7 @@ void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
     }
     */
     // Read the request
-    if (cpu_memory_rw_debug(cpu, value, (uint8_t *)&qcall, sizeof(qcall), 0)) {
+    if (qcall_rw(cpu, value, &qcall, sizeof(qcall), 0)) {
         return;
     }
 
@@ -205,7 +225,7 @@ void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
     qcall.error = guest_svcs_errno;
 
     // Write the response
-    cpu_memory_rw_debug(cpu, value, (uint8_t*) &qcall, sizeof(qcall), 1);
+    qcall_rw(cpu, value, &qcall, sizeof(qcall), 1);
     if (bql) {
         bql_unlock();
     }

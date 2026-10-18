@@ -65,8 +65,7 @@ bool gles_guest_fault_pending(void)
  * arrays cost ~1 us of walks before. Returns false, having possibly copied
  * part, when any page needs the full path; that path redoes the whole access.
  */
-static bool gles_guest_rw_ram(CPUState *cpu, vaddr va, uint8_t *buf, size_t len,
-                              bool write)
+bool guest_rw_ram(CPUState *cpu, uint64_t va, uint8_t *buf, size_t len, bool write)
 {
     CPUArchState *env = cpu_env(cpu);
     MMUAccessType type = write ? MMU_DATA_STORE : MMU_DATA_LOAD;
@@ -96,7 +95,7 @@ static bool gles_guest_rw_ram(CPUState *cpu, vaddr va, uint8_t *buf, size_t len,
 
 int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write)
 {
-    if (len && !gf.pending && gles_guest_rw_ram(cpu, va, buf, len, write)) {
+    if (len && !gf.pending && guest_rw_ram(cpu, va, buf, len, write)) {
         return 0;
     }
     if (gf.armed && len) {
