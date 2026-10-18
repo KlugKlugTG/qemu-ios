@@ -2,7 +2,7 @@
  *
  * SLICE:lifetime contrib/it-gles/mbxshim.c fn ca_view_for_block
  * SLICE:lifetime contrib/it-gles/mbxshim.c range typedef struct ca_surface_lock { | static int ca_create_buffer
- * SLICE:lifetime contrib/it-gles/mbxshim.c fn surface_capture ca_create_buffer ca_destroy_buffer ca_detach_view
+ * SLICE:lifetime contrib/it-gles/mbxshim.c fn surface_log surface_seen surface_capture ca_create_buffer ca_destroy_buffer ca_detach_view
  * CFLAGS -Wall -Wextra -Wno-unused-variable
  */
 #include <assert.h>
