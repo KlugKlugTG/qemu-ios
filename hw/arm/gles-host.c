@@ -302,6 +302,14 @@ typedef struct {
 
     /* Which client-state enum turns this array on, e.g. GL_VERTEX_ARRAY. */
     GLenum client_state;
+
+    /* Actual host state, separate from the guest's pointer/enable state.
+     * Scratch contents are refreshed every draw even when its address stays
+     * the same. These fields belong to this array's host context. */
+    bool host_enabled, host_pointer_valid;
+    uint32_t host_size, host_stride;
+    GLenum host_type;
+    const void *host_pointer;
 } GLESArray;
 
 typedef struct {
@@ -393,6 +401,7 @@ typedef struct {
      */
     GLESArray texcoord[GLES_MAX_TEXUNITS];
     unsigned client_active_unit;    /* glClientActiveTexture, as an index */
+    unsigned host_client_active_unit;
     GLESArray color;
     GLESArray normal;
     /* GL_POINT_SIZE_ARRAY_OES: per-point sizes for point sprites. Desktop GL
@@ -508,9 +517,12 @@ typedef struct {
      */
     uint64_t calls;
     uint64_t t_call, t_fetch, t_err, t_present;
+    uint64_t t_arrays, array_binds, array_pointers, array_enables, array_units;
     uint64_t last_report_calls;
     uint64_t last_report_t_call, last_report_t_fetch;
     uint64_t last_report_t_err, last_report_t_present;
+    uint64_t last_array_ns, last_array_binds, last_array_pointers;
+    uint64_t last_array_enables, last_array_units;
 
     /*
      * Frame-to-frame interval over the reporting burst. A mean of 60 fps is
@@ -641,6 +653,9 @@ static uint64_t gles_prof_call_ns, gles_prof_present_ns;
  */
 static int gles_prof = -1;
 static int gles_strict = -1;
+/* LT_GLES_ARRAY_CACHE=off restores per-draw enable/pointer/check/disable for
+ * same-binary A/B runs. Strict checks still guard every changed pointer. */
+static bool gles_array_cache;
 /*
  * IT_GLES_SWIZZLE=1 restores the old readback -- RGBA plus a per-pixel byte
  * swap -- and =2 alternates between old and new every 300 frames. Alternating
@@ -673,6 +688,10 @@ static void gles_read_switches(void)
     gles_prof = v ? atoi(v) : 0;
     v = getenv("IT_GLES_STRICT");
     gles_strict = v ? atoi(v) : 1;
+    v = getenv("LT_GLES_ARRAY_CACHE");
+    gles_array_cache = !v || (strcmp(v, "off") && strcmp(v, "0"));
+    fprintf(stderr, "[gles] client-array-cache=%s strict=%d\n",
+            gles_array_cache ? "on" : "off", gles_strict);
     v = getenv("IT_GLES_SWIZZLE");
     gles_swizzle_mode = v ? atoi(v) : 0;
     gles_swizzle = (gles_swizzle_mode == 1);
@@ -1235,7 +1254,7 @@ static bool gles_needs_widen(GLenum client_state, uint32_t type)
  * to copy the whole span including the gaps, because the host GL will walk it
  * with the same stride.
  *
- * Returns true if the array was bound and the caller must disable it again.
+ * Returns true if the array was prepared for this draw.
  */
 static const char *gles_array_name(GLenum client_state)
 {
@@ -1281,6 +1300,28 @@ static bool gles_pointer_ok(GLenum client_state, uint32_t size, GLenum type)
         return float_like || wide_int || type == GL_BYTE;
     default:
         return false;
+    }
+}
+
+static void gles_client_active(unsigned unit)
+{
+    if (!gles_array_cache || gh.host_client_active_unit != unit) {
+        glClientActiveTexture(GL_TEXTURE0 + unit);
+        gh.host_client_active_unit = unit;
+        if (gles_prof) gh.array_units++;
+    }
+}
+
+static void gles_array_enable(GLESArray *a, bool enabled)
+{
+    if (!gles_array_cache || a->host_enabled != enabled) {
+        if (enabled) {
+            glEnableClientState(a->client_state);
+        } else {
+            glDisableClientState(a->client_state);
+        }
+        a->host_enabled = enabled;
+        if (gles_prof) gh.array_enables++;
     }
 }
 
@@ -1394,7 +1435,14 @@ static bool gles_bind_array(CPUState *cpu, GLESArray *a, uint32_t first,
         return false;
     }
 
-    glEnableClientState(a->client_state);
+    gles_array_enable(a, true);
+    if (gles_array_cache && a->host_pointer_valid &&
+        a->host_size == a->size && a->host_type == type &&
+        a->host_stride == stride && a->host_pointer == data) {
+        return true;
+    }
+    a->host_pointer_valid = false;
+    if (gles_prof) gh.array_pointers++;
     if (gles_strict) {
         uint64_t t0 = gles_t();
         while (glGetError() != GL_NO_ERROR) {
@@ -1417,7 +1465,7 @@ static bool gles_bind_array(CPUState *cpu, GLESArray *a, uint32_t first,
         glNormalPointer(type, stride, data);
         break;
     default:
-        glDisableClientState(a->client_state);
+        gles_array_enable(a, false);
         return false;
     }
 
@@ -1442,21 +1490,19 @@ static bool gles_bind_array(CPUState *cpu, GLESArray *a, uint32_t first,
                         gles_array_name(a->client_state),
                         a->size, type, stride, e);
             }
-            glDisableClientState(a->client_state);
+            gles_array_enable(a, false);
             gles_debug_mark();
             return false;
         }
     }
+    a->host_pointer_valid = true;
+    a->host_size = a->size;
+    a->host_type = type;
+    a->host_stride = stride;
+    a->host_pointer = data;
     return true;
 }
 
-/*
- * Bind every enabled client array for a draw covering elements [first, first+count).
- *
- * Returns a mask of which arrays were bound so the caller can unbind exactly
- * those. Leaving an array enabled across draws would make the next draw walk a
- * scratch buffer that has since been reallocated for a different array.
- */
 /* Which texture units have a coordinate array enabled, as a bitmask. A draw
  * with texturing on but 0x00 here samples one texel for every fragment, which
  * looks like flat untextured color rather than like a missing array. */
@@ -1632,16 +1678,23 @@ static void gles_draw_tex(float x, float y, float z, float w, float h)
 #endif
 }
 
+/* Prepare every array before a host draw, including disabling any array that
+ * is no longer enabled or could not be fetched. No host draw may use stale
+ * scratch after a realloc, failed guest read, or buffer deletion. DrawTex's
+ * native helper saves and restores the host arrays and client-active unit. */
 static uint32_t gles_bind_all_arrays(CPUState *cpu, uint32_t first,
                                      uint32_t count)
 {
     GLESArray *arrays[] = { &gh.vertex, &gh.color, &gh.normal };
     uint32_t bound = 0;
     unsigned i;
+    uint64_t t0 = gles_t();
 
     for (i = 0; i < ARRAY_SIZE(arrays); i++) {
         if (gles_bind_array(cpu, arrays[i], first, count)) {
             bound |= 1u << i;
+        } else if (gles_array_cache) {
+            gles_array_enable(arrays[i], false);
         }
     }
 
@@ -1653,17 +1706,24 @@ static uint32_t gles_bind_all_arrays(CPUState *cpu, uint32_t first,
      * to change.
      */
     for (i = 0; i < GLES_MAX_TEXUNITS; i++) {
-        if (!gh.texcoord[i].enabled) {
+        if (!gh.texcoord[i].enabled &&
+            (!gles_array_cache || !gh.texcoord[i].host_enabled)) {
             continue;
         }
-        glClientActiveTexture(GL_TEXTURE0 + i);
+        gles_client_active(i);
         if (gles_bind_array(cpu, &gh.texcoord[i], first, count)) {
             bound |= 1u << (GLES_TEXCOORD_BIT + i);
+        } else if (gles_array_cache) {
+            gles_array_enable(&gh.texcoord[i], false);
         }
     }
-    glClientActiveTexture(GL_TEXTURE0 + gh.client_active_unit);
+    gles_client_active(gh.client_active_unit);
     if (gles_guest_fault_pending()) {
         bound &= ~1u;       /* an array page is being faulted in: no draw yet */
+    }
+    if (gles_prof) {
+        gh.t_arrays += gles_t() - t0;
+        gh.array_binds++;
     }
     return bound;
 }
@@ -2776,19 +2836,25 @@ static void gles_unbind_arrays(uint32_t bound)
 {
     GLESArray *arrays[] = { &gh.vertex, &gh.color, &gh.normal };
     unsigned i;
+    uint64_t t0;
 
+    if (gles_array_cache) {
+        return; /* Next draw prepares every array before the driver uses it. */
+    }
+    t0 = gles_t();
     for (i = 0; i < ARRAY_SIZE(arrays); i++) {
         if (bound & (1u << i)) {
-            glDisableClientState(arrays[i]->client_state);
+            gles_array_enable(arrays[i], false);
         }
     }
     for (i = 0; i < GLES_MAX_TEXUNITS; i++) {
         if (bound & (1u << (GLES_TEXCOORD_BIT + i))) {
-            glClientActiveTexture(GL_TEXTURE0 + i);
-            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            gles_client_active(i);
+            gles_array_enable(&gh.texcoord[i], false);
         }
     }
-    glClientActiveTexture(GL_TEXTURE0 + gh.client_active_unit);
+    gles_client_active(gh.client_active_unit);
+    gh.t_arrays += gles_t() - t0;
 }
 
 /*
@@ -3559,6 +3625,20 @@ static void gles_report_progress(void)
         gh.last_report_t_fetch = gh.t_fetch;
         gh.last_report_t_err = gh.t_err;
         gh.last_report_t_present = gh.t_present;
+        uint64_t binds = gh.array_binds - gh.last_array_binds;
+        if (binds) {
+            fprintf(stderr, "[gles]   arrays: %" PRIu64 " draws, %.3f us/draw; "
+                    "host pointers %.3f enables %.3f units %.3f per draw\n",
+                    binds, (gh.t_arrays - gh.last_array_ns) / (double)binds / 1000,
+                    (gh.array_pointers - gh.last_array_pointers) / (double)binds,
+                    (gh.array_enables - gh.last_array_enables) / (double)binds,
+                    (gh.array_units - gh.last_array_units) / (double)binds);
+        }
+        gh.last_array_ns = gh.t_arrays;
+        gh.last_array_binds = gh.array_binds;
+        gh.last_array_pointers = gh.array_pointers;
+        gh.last_array_enables = gh.array_enables;
+        gh.last_array_units = gh.array_units;
     }
     /*
      * The state dump and the per-draw trace are the two tools that answer
@@ -5891,11 +5971,8 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         if (!gles_refresh_surfaces(cpu)) return -1;
         bound = gles_bind_all_arrays(cpu, first, count);
         if (!(bound & 1u)) {                    /* no positions -> no draw */
-            /* Unbind the arrays that DID bind: leaving e.g. GL_COLOR_ARRAY
-             * enabled on the host, pointing into scratch that a later draw
-             * reallocs, is the stale-pointer host crash this file warns about
-             * (gles_bind_array's "loaded gun" note) -- reintroduced on the
-             * error path if we return without unbinding. */
+            /* The uncached path cleans up here; the cached path prepares
+             * every array again before it allows another host draw. */
             gles_unbind_arrays(bound);
             return -1;
         }
@@ -6843,7 +6920,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
             u = GLES_MAX_TEXUNITS - 1;
         }
         gh.client_active_unit = u;
-        glClientActiveTexture(GL_TEXTURE0 + u);
+        gles_client_active(u);
         return 0;
     }
 
