@@ -43,11 +43,16 @@ typedef struct IPodTouchGPIOState
     qemu_irq outputs[NUM_GPIO_PADS * 8];
     uint32_t fsel_offset;            /* "fsel-offset": the pad function select register */
     uint32_t rest_high_pad, rest_high_mask;   /* "rest-high-pad"/"-mask": active-low inputs at rest */
+    /* Pins a button outside the SoC drives, and their levels: a reset of the
+     * block (the AP's wake from hibernate is one) doesn't move them. */
+    uint32_t input_mask[NUM_GPIO_PADS], input_level[NUM_GPIO_PADS];
 } IPodTouchGPIOState;
 
 bool gpio_is_on(uint32_t *state, uint32_t gpio);
 bool gpio_is_off(uint32_t *state, uint32_t gpio);
 void gpio_set_on(uint32_t *state, uint32_t gpio);
 void gpio_set_off(uint32_t *state, uint32_t gpio);
+/* @gpio is driven from outside: keep its current level across resets. */
+void ipod_touch_gpio_input_changed(IPodTouchGPIOState *s, uint32_t gpio);
 
 #endif

@@ -1947,6 +1947,7 @@ static void ipod_touch_key_event(void *opaque, int keycode)
         }
     }
     else return;
+    ipod_touch_gpio_input_changed(s->gpio_state, button_gpio);
 
     // Only raise a GPIO interrupt on a genuine press/release edge. Without this
     // guard, SDL key auto-repeat (which resends KEY_*_DOWN while a key is held)

@@ -101,8 +101,20 @@ static void s5l8900_gpio_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &gpio_ops, s, "gpio", 0x1000);
 }
 
-/* Pad state is all driven by the guest; clear it so the second boot does not
- * read back the first boot's pin levels while it is probing. */
+void ipod_touch_gpio_input_changed(IPodTouchGPIOState *s, uint32_t gpio)
+{
+    unsigned pad = GPIO2PAD(gpio);
+    uint32_t bit = 1u << GPIO2PIN(gpio);
+
+    assert(pad < NUM_GPIO_PADS);
+    s->input_mask[pad] |= bit;
+    s->input_level[pad] = (s->input_level[pad] & ~bit) | (s->gpio_state[pad] & bit);
+}
+
+/* Pad state is driven by the guest, apart from the buttons; clear it so the
+ * second boot does not read back the first boot's pin levels while it is
+ * probing. A button still held keeps its level: pressing one wakes a
+ * hibernating AP, which resets the SoC with the button down. */
 static void s5l8900_gpio_reset(DeviceState *dev)
 {
     IPodTouchGPIOState *s = IPOD_TOUCH_GPIO(dev);
@@ -136,6 +148,10 @@ static void s5l8900_gpio_reset(DeviceState *dev)
     /* A board's own active-low inputs (the M68's volume buttons). */
     if (s->rest_high_pad < NUM_GPIO_PADS) {
         s->gpio_state[s->rest_high_pad] |= s->rest_high_mask;
+    }
+    for (unsigned pad = 0; pad < NUM_GPIO_PADS; pad++) {
+        s->gpio_state[pad] = (s->gpio_state[pad] & ~s->input_mask[pad]) |
+                             (s->input_level[pad] & s->input_mask[pad]);
     }
     for (unsigned pad = 0; pad < NUM_GPIO_PADS; pad++) {
         for (unsigned pin = 0; pin < 8; pin++) {
