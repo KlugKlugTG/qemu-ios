@@ -761,6 +761,9 @@ static void cpu_exec_longjmp_cleanup(CPUState *cpu)
         mmap_unlock();
     }
 #else
+    /* longjmp bypasses the MMIO scope's normal cleanup. */
+    extern void *it_acct_mmio_mr;
+    it_acct_mmio_mr = NULL;
     /*
      * For softmmu, a tlb_fill fault during translation will land here,
      * and we need to release any page locks held.  In system mode we

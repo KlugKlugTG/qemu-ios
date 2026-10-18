@@ -299,6 +299,7 @@ static void mttcg_acct_dump(int64_t now)
             }
         }
     }
+    fprintf(stderr, "[acct]   end-ns %" PRId64 "\n", now);
 }
 
 static void *mttcg_cpu_thread_fn(void *arg)
