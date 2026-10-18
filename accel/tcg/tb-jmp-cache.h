@@ -12,8 +12,13 @@
 #include "qemu/rcu.h"
 #include "exec/cpu-common.h"
 
+/*
+ * 16K entries (128 page groups of 128 under softmmu) per address space. An
+ * iOS app's indirect-branch working set (objc_msgSend, UIKit, the app)
+ * thrashes upstream's 4K.
+ */
 #ifndef TB_JMP_CACHE_BITS
-#define TB_JMP_CACHE_BITS 12
+#define TB_JMP_CACHE_BITS 14
 #endif
 #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
 
