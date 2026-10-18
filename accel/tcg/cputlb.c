@@ -971,12 +971,32 @@ void tlb_unprotect_code(ram_addr_t ram_addr)
  * Called with tlb_c.lock held.
  */
 static void tlb_reset_dirty_range_locked(CPUTLBEntryFull *full, CPUTLBEntry *ent,
-                                         uintptr_t start, uintptr_t length)
+                                         uintptr_t start, uintptr_t length,
+                                         bool fast)
 {
     const uintptr_t addr = ent->addr_write;
+    const int mask = TLB_INVALID_MASK | TLB_MMIO | TLB_DISCARD_WRITE | TLB_NOTDIRTY;
+
+    if (fast) {
+        /* Most entries are invalid, already tracked, or outside the scanout.
+         * Avoid fetching the much larger full entry for those cases. The TLB
+         * lock still protects addr/addend/full and the same flags are tested. */
+        if (addr & mask) {
+            return;
+        }
+        uintptr_t host = (addr & TARGET_PAGE_MASK) + ent->addend;
+        if ((host - start) >= length) {
+            return;
+        }
+        if (full->slow_flags[MMU_DATA_STORE] & mask) {
+            return;
+        }
+        qatomic_set(&ent->addr_write, addr | TLB_NOTDIRTY);
+        return;
+    }
     int flags = addr | full->slow_flags[MMU_DATA_STORE];
 
-    flags &= TLB_INVALID_MASK | TLB_MMIO | TLB_DISCARD_WRITE | TLB_NOTDIRTY;
+    flags &= mask;
     if (flags == 0) {
         uintptr_t host = (addr & TARGET_PAGE_MASK) + ent->addend;
         if ((host - start) < length) {
@@ -999,7 +1019,9 @@ static inline void copy_tlb_helper_locked(CPUTLBEntry *d, const CPUTLBEntry *s)
  * We must take tlb_c.lock to avoid racing with another vCPU update. The only
  * thing actually updated is the target TLB entry ->addr_write flags.
  */
-void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
+static inline QEMU_ALWAYS_INLINE
+void tlb_reset_dirty_impl(CPUState *cpu, uintptr_t start, uintptr_t length,
+                         bool fast_reset)
 {
     int mmu_idx;
 
@@ -1012,15 +1034,34 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
 
         for (i = 0; i < n; i++) {
             tlb_reset_dirty_range_locked(&desc->fulltlb[i], &fast->table[i],
-                                         start, length);
+                                         start, length, fast_reset);
         }
 
         for (i = 0; i < CPU_VTLB_SIZE; i++) {
             tlb_reset_dirty_range_locked(&desc->vfulltlb[i], &desc->vtable[i],
-                                         start, length);
+                                         start, length, fast_reset);
         }
     }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+}
+
+void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
+{
+    static gsize mode;
+
+    if (g_once_init_enter(&mode)) {
+        const char *env = getenv("LT_TLB_DIRTY_FAST");
+        bool enabled = env && strcmp(env, "off") && strcmp(env, "0");
+
+        fprintf(stderr, "[tlb] dirty-reset-fast=%s\n", enabled ? "on" : "off");
+        g_once_init_leave(&mode, enabled ? 2 : 1);
+    }
+    /* Specialize outside the scan so there is no experiment branch per entry. */
+    if (mode == 2) {
+        tlb_reset_dirty_impl(cpu, start, length, true);
+    } else {
+        tlb_reset_dirty_impl(cpu, start, length, false);
+    }
 }
 
 /* Called with tlb_c.lock held */
