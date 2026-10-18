@@ -251,10 +251,41 @@ static void gles_native_tex_image(GLenum target, GLint level, GLint internal, GL
 {
     void *copy = gles_native_texels(w,h,&format,&type,pixels);
     if (pixels && !copy) { gles_native_error(w <= 0 || h <= 0 ? GL_INVALID_VALUE : GL_OUT_OF_MEMORY); return; }
+    /*
+     * ES takes no conversion in glTexImage2D: the internal format must be the
+     * data's format, or the upload fails with GL_INVALID_OPERATION and leaves the
+     * texture empty (drawn white, or grey when lit). Desktop GL converts, and the
+     * bridge relies on that: opaque PVRTC is decoded to RGBA and uploaded as
+     * GL_RGB (every opaque PVRTC texture in Real Racing, Jetpack Joyride and
+     * Battle Bears was missing on Android), and surfaces upload 565, alpha and
+     * luminance data as GL_RGBA. Do the desktop's conversion here: RGB keeps
+     * opaque alpha; alpha and luminance data expand to RGBA as (0,0,0,a) and
+     * (l,l,l,a) (copy is a fresh tightly packed buffer).
+     */
+    if (format == GL_RGBA && (internal == GL_BGRA || internal == GL_RGBA)) internal=GL_RGBA;
+    else if (internal == GL_RGB && format == GL_RGBA && type == GL_UNSIGNED_BYTE) {
+        if (copy) for (size_t i = 0; i < (size_t)w * h; i++) ((unsigned char *)copy)[i * 4 + 3] = 255;
+        internal = GL_RGBA;
+    } else if (internal == GL_RGBA && format == GL_RGB) internal = GL_RGB;
+    else if (internal == GL_RGBA && type == GL_UNSIGNED_BYTE &&
+             (format == GL_ALPHA || format == GL_LUMINANCE || format == GL_LUMINANCE_ALPHA)) {
+        unsigned char *rgba = copy ? malloc((size_t)w * h * 4) : NULL;
+        if (copy && !rgba) { free(copy); gles_native_error(GL_OUT_OF_MEMORY); return; }
+        if (copy) {
+            const unsigned char *src = copy;
+            unsigned n = format == GL_LUMINANCE_ALPHA ? 2 : 1;
+            for (size_t i = 0; i < (size_t)w * h; i++) {
+                unsigned char l = format == GL_ALPHA ? 0 : src[i * n];
+                unsigned char a = format == GL_LUMINANCE ? 255 : src[i * n + n - 1];
+                rgba[i*4] = rgba[i*4+1] = rgba[i*4+2] = l; rgba[i*4+3] = a;
+            }
+            free(copy); copy = rgba;
+        }
+        format = GL_RGBA;
+    }
     GLuint old=gles_native_texture_start(target);
     GLenum native_target=gles_native_target(target);
     glPixelStorei(GL_UNPACK_ALIGNMENT,1);
-    if (format == GL_RGBA && (internal == GL_BGRA || internal == GL_RGBA)) internal=GL_RGBA;
     gles_native_save_errors();
     glTexImage2D(native_target,level,internal,w,h,border,format,type,copy);
     GLenum error=glGetError();
