@@ -160,6 +160,7 @@ static void gles_native_collect_textures(bool current)
         if (!texture->deleted || texture->refs) { slot=&texture->next; continue; }
         glDeleteTextures(1,&texture->native_name);
         *slot=texture->next;
+        memset(gles_egl_current->textures->recent,0,sizeof(gles_egl_current->textures->recent));
         free(texture);
     }
 }
@@ -183,8 +184,11 @@ static void gles_native_texture_cleanup(CGLContextObj context, bool current)
 static GLESEGLTexture *gles_native_texture(unsigned name, bool create)
 {
     if (!name) return &gles_egl_current->default_texture;
+    /* Every bind looks its name up; a game has hundreds of textures in this list. */
+    GLESEGLTexture **recent=&gles_egl_current->textures->recent[name&255];
+    if (*recent && (*recent)->name==name && !(*recent)->deleted && !(*recent)->hidden) return *recent;
     for (GLESEGLTexture *texture=gles_egl_current->textures->head;texture;texture=texture->next)
-        if (texture->name==name && !texture->deleted && !texture->hidden) return texture;
+        if (texture->name==name && !texture->deleted && !texture->hidden) return *recent=texture;
     if (!create) return NULL;
     GLESEGLTexture *texture=calloc(1,sizeof(*texture));
     if (!texture) { gles_native_error(GL_OUT_OF_MEMORY); return NULL; }

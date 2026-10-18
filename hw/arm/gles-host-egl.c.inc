@@ -20,6 +20,8 @@ typedef struct GLESEGLTexture {
 typedef struct GLESEGLTextures {
     unsigned refs;
     GLESEGLTexture *head;
+    /* Recent lookups by name & 255, checked on use; emptied when any is freed. */
+    GLESEGLTexture *recent[256];
     unsigned next_name;
     struct GLESEGLContext *contexts;
 } GLESEGLTextures;
