@@ -125,3 +125,40 @@ inputs, and point LEGACY_SYSTEM_STUB at a directory holding a `libSystem.tbd` ma
 `-lSystem` binds only what that libSystem has. `contrib/hello-2007/build.sh` is the worked example,
 Objective-C included (`-fobjc-runtime=macosx-fragile-10.5`). Two 1.x runtime traps it documents: the
 delayed library initializers and the fragile ivar layout (docs/m68/sideload.md).
+
+## Setting up a Mac to build the guest package
+
+What a build of `contrib/guest-package/build.sh` (or `contrib/export-guest-artifacts.sh`) needs, as
+set up on an Apple-silicon Mac with macOS 26.6 on 2026-10-18 to build guest package serial 27:
+
+| Input | Where it came from | Where it goes |
+| --- | --- | --- |
+| Xcode (27.1 worked: `ld-27037.1`, Apple clang 21) | the App Store install in `/Applications/Xcode.app`; open it once, or run `sudo /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -license accept`, to accept the license | select it per command with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer` (or `sudo xcode-select -s` it) |
+| iPhoneOS 3.1.3 SDK (`ARMV6_SDK`) | `iPhoneOS3.1.3.sdk.tbz2` from github.com/qianjigui/iOS-sdks (sha256 `7ccc15923bc9be1a4bd234a41bac38f3fea088f1d83a3b18163b4251dccaedd5`) | `~/Developer/ipod2g-re/OldSDK/iPhoneOS3.1.3.sdk` (the default) |
+| iPhoneOS 3.2 SDK (`IPAD_SDK`, the armv7 iPad helpers and AppSync) | `iPhoneOS3.2.sdk.tbz2` from the same repository (sha256 `2098e67e2a026abf238fb2ff4bb990871b0286b717590854b4c4ad566e6d5be3`) | anywhere; pass `IPAD_SDK=`, since the default path is the old iPhone SDK installer's layout |
+| `ldid` | Homebrew (`/opt/homebrew/bin/ldid`) | on `PATH` |
+| `jq` | macOS ships `/usr/bin/jq` | |
+
+```sh
+cd qemu-ios
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+IPAD_SDK=$HOME/Developer/ipod2g-re/OldSDK/iPhoneOS3.2.sdk PATH=/opt/homebrew/bin:$PATH \
+    bash contrib/guest-package/build.sh OUT      # OUT/armv6.itpack, OUT/armv7.itpack; logs in OUT/logs
+```
+
+A clean build prints no `guest-package: warning:` lines and ends with each family's file count and
+the two itpacks' sizes. The SDKs only supply headers and the `libSystem` link stub.
+
+Things that do **not** work, so nobody retries them:
+
+- **Command Line Tools alone.** CLT 26.6's `ld` (ld-1267) is not the one in Xcode 27.1, and its
+  output does not load on iOS 3: it calls other images through lazy stubs (`__picsymbolstub4` and
+  `__stub_helper`, so `machotool mkold --legacy` refuses with "has lazy binds"), puts pointers,
+  `__cfstring`, `__mod_init_func` and the Objective-C lists in a `__DATA_CONST` segment, where
+  iOS 3's runtime does not look for `__objc_classlist`, and marks dylibs shared-cache eligible
+  (`LC_SEGMENT_SPLIT_INFO`). Linking with `-bind_at_load` and `-not_for_dyld_shared_cache` gets
+  past machotool, but the OpenGLES built that way crash-loops SpringBoard (bus error). Xcode 27.1's
+  ld emits `__picsymbolstub5` through non-lazy pointers and keeps everything in `__DATA`, like
+  the builds before. `xcrun ld -v` says which ld a shell gets.
+- **The Xcode 3.1.3 developer DVD** (`xcode313_2736_developerdvd.dmg`) is Xcode for Mac OS X 10.5:
+  it has no iPhone SDK packages, and its 2009 compilers do not run on a current Mac.
