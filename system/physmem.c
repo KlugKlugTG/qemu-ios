@@ -99,6 +99,7 @@ RAMList ram_list = { .blocks = QLIST_HEAD_INITIALIZER(ram_list.blocks) };
 
 /* Initialized before vCPUs start; keep the ordinary path available for A/B. */
 static bool dirty_query_fast;
+static bool dirty_query_prof;
 
 static MemoryRegion *system_memory;
 static MemoryRegion *system_io;
@@ -948,7 +949,8 @@ bool physical_memory_get_dirty_flag(ram_addr_t addr, unsigned client)
     return physical_memory_get_dirty(addr, 1, client);
 }
 
-bool physical_memory_is_clean(ram_addr_t addr)
+static inline QEMU_ALWAYS_INLINE
+bool physical_memory_is_clean_impl(ram_addr_t addr)
 {
     if (dirty_query_fast) {
         bool vga, code, migration;
@@ -966,6 +968,55 @@ bool physical_memory_is_clean(ram_addr_t addr)
     bool migration =
         physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_MIGRATION);
     return !(vga && code && migration);
+}
+
+/* CPU 0 owns these counters. Sample the query itself, leaving bookkeeping and
+ * diagnostic output outside its timing. The diagnostic can perturb scheduling
+ * and includes timer overhead; use it separately from ordinary FPS windows. */
+static bool __attribute__((noinline))
+physical_memory_is_clean_profiled(ram_addr_t addr)
+{
+    static struct {
+        uint64_t n, samples, ns, max_ns, begin_ns, next_ns;
+    } times;
+    CPUState *cpu = current_cpu;
+    uint64_t begin, end, ns;
+    bool clean;
+
+    if (!cpu || cpu->cpu_index != 0) {
+        return physical_memory_is_clean_impl(addr);
+    }
+    if ((++times.n & 255) != 0) {
+        return physical_memory_is_clean_impl(addr);
+    }
+    begin = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    clean = physical_memory_is_clean_impl(addr);
+    end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    ns = end - begin;
+    times.samples++;
+    times.ns += ns;
+    times.max_ns = MAX(times.max_ns, ns);
+    if (!times.next_ns || end >= times.next_ns) {
+        if (times.next_ns) {
+            fprintf(stderr, "[dirty-query] fast=%s begin-ns %" PRIu64
+                    " end-ns %" PRIu64 " queries %" PRIu64
+                    " samples %" PRIu64 " ns %" PRIu64 " max-ns %" PRIu64 "\n",
+                    dirty_query_fast ? "on" : "off", times.begin_ns, end,
+                    times.n, times.samples, times.ns, times.max_ns);
+        }
+        memset(&times, 0, sizeof(times));
+        times.begin_ns = end;
+        times.next_ns = end + 5000000000ULL;
+    }
+    return clean;
+}
+
+bool physical_memory_is_clean(ram_addr_t addr)
+{
+    if (unlikely(dirty_query_prof)) {
+        return physical_memory_is_clean_profiled(addr);
+    }
+    return physical_memory_is_clean_impl(addr);
 }
 
 static bool physical_memory_all_dirty(ram_addr_t start, ram_addr_t length,
@@ -3631,10 +3682,12 @@ void address_space_register_map_client(AddressSpace *as, QEMUBH *bh)
 void cpu_exec_init_all(void)
 {
     const char *fast = getenv("LT_DIRTY_QUERY_FAST");
+    const char *prof = getenv("LT_DIRTY_QUERY_PROF");
 
     dirty_query_fast = fast && strcmp(fast, "off") && strcmp(fast, "0");
-    fprintf(stderr, "[memory] dirty-query-fast=%s\n",
-            dirty_query_fast ? "on" : "off");
+    dirty_query_prof = prof && strcmp(prof, "off") && strcmp(prof, "0");
+    fprintf(stderr, "[memory] dirty-query-fast=%s dirty-query-prof=%s\n",
+            dirty_query_fast ? "on" : "off", dirty_query_prof ? "on" : "off");
     qemu_mutex_init(&ram_list.mutex);
     /* The data structures we set up here depend on knowing the page size,
      * so no more changes can be made after this point.
