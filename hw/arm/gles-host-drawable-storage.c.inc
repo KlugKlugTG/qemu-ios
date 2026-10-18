@@ -11,6 +11,10 @@ static int64_t gles_drawable_storage(uint32_t width, uint32_t height)
     depth_format = gh.drawable_depth_format;
 #endif
     uint8_t *readback;
+    bool mapped = false;
+#ifdef GLES_HOST_AHB
+    GLESAhb ahb = { .image = EGL_NO_IMAGE_KHR };
+#endif
 
     if (!width || !height || width > 2048 || height > 2048) {
         gles_refuse("drawable:size:%ux%u", width, height);
@@ -30,8 +34,14 @@ static int64_t gles_drawable_storage(uint32_t width, uint32_t height)
     glGetIntegerv(GL_FRAMEBUFFER_BINDING_EXT, &framebuffer);
     color = gles_private_name(glIsTexture);
     glBindTexture(GL_TEXTURE_2D, color);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height,
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+#ifdef GLES_HOST_AHB
+    /* CPU-mapped storage, so the present can skip glReadPixels (see gh.ahb). */
+    mapped = !gles_no_iosurface && gles_ahb_attach(&ahb, width, height);
+#endif
+    if (!mapped) {
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height,
+                     0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    }
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     gles_drawable_depth_allocate(depth_format, width, height,
@@ -42,6 +52,16 @@ static int64_t gles_drawable_storage(uint32_t width, uint32_t height)
                               GL_TEXTURE_2D, color, 0);
     gles_drawable_depth_attach(depth, stencil);
     status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+#ifdef GLES_HOST_AHB
+    if (mapped && status != GL_FRAMEBUFFER_COMPLETE_EXT) {
+        /* Accepted but not renderable: ordinary storage, read back as before. */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height,
+                     0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        gles_ahb_free(&ahb);
+        mapped = false;
+        status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
+    }
+#endif
     error = glGetError();
     if (error == GL_NO_ERROR && status != GL_FRAMEBUFFER_COMPLETE_EXT)
         error = GL_OUT_OF_MEMORY;
@@ -59,11 +79,19 @@ static int64_t gles_drawable_storage(uint32_t width, uint32_t height)
         gh.readback = readback;
         gh.drawable_width = width; gh.drawable_height = height;
         /* The portable readback path handles resized layers on both hosts.
-         * The platform's original IOSurface remains owned by its context. */
-        gh.iosurface = false;
+         * The platform's original IOSurface remains owned by its context;
+         * Android's AHardwareBuffer is per drawable, so it follows the resize. */
+        gh.iosurface = mapped;
+#ifdef GLES_HOST_AHB
+        gles_ahb_free(&gh.ahb);
+        gh.ahb = ahb;
+#endif
         gh.fb_dirty = true;
         gh.depth_cleared_this_frame = false;
     } else {
+#ifdef GLES_HOST_AHB
+        gles_ahb_free(&ahb);
+#endif
         glDeleteTextures(1, &color);
         gles_drawable_depth_delete(depth, stencil);
         glDeleteFramebuffersEXT(1, &fbo);

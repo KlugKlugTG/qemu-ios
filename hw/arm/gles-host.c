@@ -213,6 +213,10 @@ void gles_eagl_iosurface_unlock(void);
 #endif
 #ifdef GLES_HOST_EGL_ES
 #include "gles-host-native.c.inc"
+#ifdef __ANDROID__
+#define GLES_HOST_AHB 1
+#include "gles-host-ahb.c.inc"
+#endif
 #endif
 
 /* The physical LCD remains portrait. Individual CA drawables can be landscape
@@ -369,6 +373,10 @@ typedef struct {
      * is both the macOS behavior and the iOS fallback.
      */
     bool iosurface;
+#ifdef GLES_HOST_AHB
+    /* Android's equivalent: the AHardwareBuffer behind the drawable texture. */
+    GLESAhb ahb;
+#endif
 
     GLESArray vertex;
     /*
@@ -702,9 +710,21 @@ static bool gles_platform_context_create(void)
     return true;
 }
 static bool gles_platform_make_current(void) { return CGLSetCurrentContext(gh.cgl) == 0; }
+#ifdef GLES_HOST_AHB
+static bool gles_platform_attach_iosurface(void)
+{
+    return gles_ahb_attach(&gh.ahb, GLES_FB_WIDTH, GLES_FB_HEIGHT);
+}
+static void *gles_platform_frame_lock(size_t *stride)
+{
+    return (void *)gles_ahb_lock(&gh.ahb, stride);
+}
+static void gles_platform_frame_unlock(void) { gles_ahb_unlock(&gh.ahb); }
+#else
 static bool gles_platform_attach_iosurface(void) { return false; }
 static void *gles_platform_frame_lock(size_t *stride) { return NULL; }
 static void gles_platform_frame_unlock(void) {}
+#endif
 #elif defined(GLES_HOST_ANGLE)
 
 static bool gles_platform_context_create(void)
@@ -1051,6 +1071,9 @@ static bool gles_host_init(void)
                      0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT,
                                   GL_TEXTURE_2D, gh.tex, 0);
+#ifdef GLES_HOST_AHB
+        gles_ahb_free(&gh.ahb);
+#endif
     }
 
     GLenum init_status = glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT);
@@ -3040,6 +3063,28 @@ static const uint8_t *gles_frame_lock(size_t *stride)
     return gles_platform_frame_lock(stride);
 }
 
+/*
+ * A locked frame row in the guest's BGRA order: @src itself, or @scratch
+ * holding it byte-swapped when the platform could only render RGBA.
+ */
+static inline const uint8_t *gles_frame_row(const uint8_t *src, uint8_t *scratch,
+                                            uint32_t pixels)
+{
+#ifdef GLES_HOST_AHB
+    if (gh.ahb.rgba) {
+        const uint32_t *s = (const uint32_t *)src;
+        uint32_t *d = (uint32_t *)scratch;
+
+        for (uint32_t i = 0; i < pixels; i++) {
+            uint32_t v = s[i];
+            d[i] = (v & 0xff00ff00u) | (v >> 16 & 0xffu) | (v & 0xffu) << 16;
+        }
+        return scratch;
+    }
+#endif
+    return src;
+}
+
 #include "gles-host-pixels.c.inc"
 
 static void gles_report_frame_pixels(const uint8_t *frame, size_t stride,
@@ -3098,15 +3143,18 @@ static void gles_present_to_panel(void)
     }
 
     /* The surface is already in the panel's byte order, so the row is a copy
-     * and the flip is the only work left. */
-    frame = gles_frame_lock(&fstride);
+     * and the flip is the only work left. A resized drawable is not the
+     * panel's size: that one is read back. */
+    frame = gh.drawable_width == GLES_FB_WIDTH && gh.drawable_height == GLES_FB_HEIGHT ?
+            gles_frame_lock(&fstride) : NULL;
     if (frame) {
         for (y = 0; y < GLES_FB_HEIGHT; y++) {
             const uint8_t *src = frame + (size_t)(GLES_FB_HEIGHT - 1 - y)
                                  * fstride;
 
             cpu_physical_memory_write(fb + (hwaddr)y * GLES_FB_WIDTH * 4,
-                                      src, GLES_FB_WIDTH * 4);
+                                      gles_frame_row(src, gh.readback, GLES_FB_WIDTH),
+                                      GLES_FB_WIDTH * 4);
         }
         gles_report_frame_pixels(frame, fstride, GLES_FB_WIDTH, GLES_FB_HEIGHT,
                                  4, true, fb, "panel-IOSurface");
@@ -3673,6 +3721,7 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                 /* GL's origin is bottom-left, the surface's is top-left. */
                 const uint8_t *src = frame + (size_t)(rh - 1 - y) * fstride;
 
+                src = gles_frame_row(src, gh.readback, rw);
                 if (gles_guest_rw(cpu, base + (hwaddr)y * stride,
                                         (void *)src, rw * 4, 1) != 0) {
                     /* a page being faulted in reissues the whole present: not a refusal */
@@ -7628,6 +7677,9 @@ static void gles_context_free(GLESHost *state)
     if (state->uloc) g_hash_table_destroy(state->uloc);
     if (state->cgl) {
         gles_context_delete_objects(state);
+#ifdef GLES_HOST_AHB
+        gles_ahb_free(&state->ahb);
+#endif
         CGLReleaseContext(state->cgl);
     }
     gles_group_unref(state->group);
