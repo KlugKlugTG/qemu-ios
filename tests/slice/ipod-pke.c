@@ -13,7 +13,8 @@
 #include <errno.h>
 #include <openssl/bn.h>
 typedef uint64_t hwaddr;
-typedef struct {void *sha1;bool forge_sigcheck;uint8_t segments[2048],modulus[256];uint32_t seg_size_reg,segment_size,modulus_size,key_len,seg_id,seg_sign;} IPodTouchPKEState;
+typedef struct {void *sha1;bool forge_sigcheck;uint8_t segments[2048],modulus[256];uint32_t seg_size_reg,segment_size,modulus_size,key_len,seg_id,seg_sign;
+                struct bignum_st *radix_inverse;uint8_t inverse_modulus[256];uint32_t inverse_size,inverse_bits;} IPodTouchPKEState;
 #define REG_PKE_START 8
 #define REG_PKE_SEG_SIZE 0x14
 #define REG_PKE_SWRESET 0x24
@@ -21,6 +22,11 @@ typedef struct {void *sha1;bool forge_sigcheck;uint8_t segments[2048],modulus[25
 #define LOG_GUEST_ERROR 0
 #define qemu_log_mask(...) ((void)0)
 static bool ipod_touch_sha1_last_hash(void *sha1, uint8_t *hash) {memset(hash,0xa5,20);return true;}
+/* Radix inversions the device performs: one per modulus and width, not one per product. */
+static unsigned inversions;
+static BIGNUM *count_inverse(BIGNUM *r,const BIGNUM *a,const BIGNUM *n,BN_CTX *c)
+{inversions++;return BN_mod_inverse(r,a,n,c);}
+#define BN_mod_inverse count_inverse
 #include "slice.h"
 
 static void op(IPodTouchPKEState *s, unsigned a, unsigned b, unsigned dest, bool one, bool load) {
@@ -66,7 +72,7 @@ int main(void) {
         assert(BN_bin2bn(block,length,plain) && BN_mod_exp(signature,plain,d,n,ctx));
         assert(BN_bn2lebinpad(n,s.segments,length)==length);
         assert(BN_bn2lebinpad(signature,s.segments+length,length)==length);
-        s.forge_sigcheck=true;exponentiate(&s,65537,n);
+        inversions=0;s.forge_sigcheck=true;exponentiate(&s,65537,n);assert(inversions==1);
         for(unsigned i=0;i<length;i++)assert(s.segments[length+i]==block[length-1-i]);
         memset(s.segments+length,0,length);s.segments[length]=1;exponentiate(&s,65537,n);
         memset(hash,0xa5,20);assert(build_pkcs1_block(block,length,hash));
@@ -79,6 +85,14 @@ int main(void) {
             uint64_t expected=1;for(unsigned i=0;i<exponent;i++)expected*=3;
             for(unsigned i=0;i<length;i++)assert(s.segments[length+i]==(i<8 ? (expected>>(8*i))&255:0));
         }
+        assert(inversions==1);
+        /* Another modulus takes its own inverse: 3^5 modulo n with bit 1 flipped. */
+        assert(BN_bn2lebinpad(n,s.segments,length)==length);s.segments[0]^=2;
+        BIGNUM *n2=BN_lebin2bn(s.segments,length,NULL);
+        memset(s.segments+length,0,length);s.segments[length]=3;exponentiate(&s,5,n2);
+        for(unsigned i=0;i<length;i++)assert(s.segments[length+i]==(i==0 ? 243:0));
+        assert(inversions==2);BN_free(n2);
+        assert(BN_bn2lebinpad(n,s.segments,length)==length);
         memset(s.segments+length,0,length);exponentiate(&s,3,n);
         for(unsigned i=0;i<length;i++)assert(s.segments[length+i]==0);
         /* No preload, invalid segment IDs, and even modulus do not publish. */
@@ -102,5 +116,5 @@ int main(void) {
     ipod_touch_pke_write(&s,UINT64_MAX,123,4);assert(ipod_touch_pke_read(&s,UINT64_MAX,4)==0);
     ipod_touch_pke_write(&s,0xfff,0xab,1);assert(ipod_touch_pke_read(&s,0xfff,1)==0xab);
     assert(pke_post_load(&s,2)==0);s.modulus_size=300;assert(pke_post_load(&s,2)==-EINVAL);
-    puts("PASS: operand-driven 512/1024/2048-bit RSA, arbitrary exponents, signature compatibility, full SRAM and invalid commands");
+    puts("PASS: operand-driven 512/1024/2048-bit RSA, arbitrary exponents, one radix inverse per modulus, signature compatibility, full SRAM and invalid commands");
 }
