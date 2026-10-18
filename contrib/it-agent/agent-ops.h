@@ -204,8 +204,38 @@ static int agent_statusbar(const char *body, unsigned len)
     return 0;
 }
 
-#define AG_HELLO "it_agent v4\nops ping exec spawn sync put putpart get getrange chown unlink settime " \
-    "launch frontmost lockstatus orientation dlicon halt type backspace uidump cadebug statusbar\n"
+/* `statusbarget override|data SIZE`: SIZE bytes of what SpringBoard's status bar server holds, asked as the post is
+ * (4.2 to 7.1.2): +[UIStatusBarServer getStatusBarOverrideData], the overrides last posted (all zeros once SpringBoard
+ * restarts), or getStatusBarData, the data it publishes to the status bars with the overrides merged in. The host
+ * knows the firmware's sizes. v5 */
+static int agent_statusbarget(const char *args)
+{
+    const char *which = !strncmp(args, "override ", 9) ? "getStatusBarOverrideData"
+                      : !strncmp(args, "data ", 5) ? "getStatusBarData" : 0;
+    if (!which) return -EINVAL;
+    char *end;
+    const char *n = strchr(args, ' ') + 1;
+    errno = 0;
+    unsigned long size = strtoul(n, &end, 10);
+    if (errno || end == n || *end || !size || size > 4096) return -EINVAL;
+    void *objc = dlopen("/usr/lib/libobjc.A.dylib", 2);
+    dlopen("/System/Library/Frameworks/UIKit.framework/UIKit", 2);
+    void *(*cls)(const char *) = objc ? dlsym(objc, "objc_getClass") : 0;
+    void *(*sel)(const char *) = objc ? dlsym(objc, "sel_registerName") : 0;
+    void *(*msg)(void *, void *, ...) = objc ? dlsym(objc, "objc_msgSend") : 0;
+    void *server = cls ? cls("UIStatusBarServer") : 0, *pools = cls ? cls("NSAutoreleasePool") : 0;
+    if (!sel || !msg || !server || !pools) return -ENOSYS;
+    void *pool = msg(msg(pools, sel("alloc")), sel("init"));
+    const void *data = msg(server, sel(which));
+    if (data) memcpy(ag_response, data, size);
+    msg(pool, sel("drain"));
+    if (!data) return -ENODATA;
+    ag_response_len = size;
+    return 0;
+}
+
+#define AG_HELLO "it_agent v5\nops ping exec spawn sync put putpart get getrange chown unlink settime " \
+    "launch frontmost lockstatus orientation dlicon halt type backspace uidump cadebug statusbar statusbarget\n"
 
 static void agent_dispatch(unsigned size)
 {
@@ -245,6 +275,8 @@ static void agent_dispatch(unsigned size)
         status = agent_cadebug(args);
     } else if (!strcmp(op, "statusbar")) {
         status = agent_statusbar(body, body_len);
+    } else if (!strcmp(op, "statusbarget")) {
+        status = agent_statusbarget(args);
     } else if (!strcmp(op, "halt")) {
         extern int reboot2(int, const char *);
         if (reboot2(8, 0)) status = -errno;
