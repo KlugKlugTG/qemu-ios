@@ -9,6 +9,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/core/hw-error.h"
 #include "hw/core/irq.h"
+#include "hw/arm/nand-image.h"
 
 bool ipod_touch_fmss_io_failed(void);
 
@@ -79,6 +80,8 @@ typedef struct IPodTouchFMSSState
     bool read_clean;              /* the read moved before the next run found only erased pages */
     char *nand_path;
     char *nand_overlay;   /* writable COW overlay dir, or NULL to discard writes */
+    /* nand_path as a NAND image store (nand-image.h), written in place: no overlay, no packed base. */
+    NANDImage *image;
 
     /*
      * Packed base image (see imgtools/pack_nand.py), mapped once at realize.

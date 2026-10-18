@@ -4,6 +4,7 @@
 #include "qemu/log.h"
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
+#include "qapi/error.h"
 #include "system/runstate.h"
 #include "system/address-spaces.h"
 #include <sys/mman.h>
@@ -600,12 +601,19 @@ static bool fmss_script_erase(IPodTouchFMSSState *s, unsigned select, uint32_t r
     unsigned ce = ctz32(select | 0x100);
     uint32_t block = row / NAND_PAGES_PER_BLOCK;
 
-    if (!fmss_physical() || !s->nand_overlay) {
+    if (!fmss_physical() || (!s->nand_overlay && !s->image)) {
         return true;
     }
     if (ce >= FMSS_CHIPS || select != (1u << ce) || block >= 4096) {
         qemu_log_mask(LOG_GUEST_ERROR, "[fmss] erase of row 0x%x on chip select 0x%x ignored\n", row, select);
         return true;
+    }
+    if (s->image) {
+        int result = nand_image_erase(s->image, ce, block);
+        for (uint32_t p = block * NAND_PAGES_PER_BLOCK; p < (block + 1) * NAND_PAGES_PER_BLOCK; p++) {
+            g_tree_remove(s->phys_pages, fmss_block_key(ce, p));
+        }
+        return result < 0 ? fmss_io_error(s->nand_path, -result) : true;
     }
     return fmss_erase_block(s, ce, block);
 }
@@ -895,6 +903,24 @@ static void fmss_load_page_inner(IPodTouchFMSSState *s, uint32_t cs,
         return;
     }
 
+    if (s->image) {
+        uint8_t record[NAND_BYTES_PER_PAGE + NAND_BYTES_PER_SPARE];
+        int result = nand_image_read(s->image, cs, page_nr, record);
+        if (result < 0) {
+            /* As an unreadable page file: the permissive blank, never presented as erased flash. */
+            error_report("FMSS: cannot read cs%u page %u of %s: %s", cs, page_nr, s->nand_path, strerror(-result));
+            fmss_blank_page(data, spare, false);
+            return;
+        }
+        memcpy(data, record, NAND_BYTES_PER_PAGE);
+        memcpy(spare, record + NAND_BYTES_PER_PAGE, NAND_BYTES_PER_SPARE);
+        fmss_stats.base++;
+        if (fmss_usedspare() && ((uint32_t *)spare)[2] == 0x00FF00FF) {
+            ((uint32_t *)spare)[2] = 0xFFFF40FF;
+        }
+        return;
+    }
+
     if (s->nand_overlay && fmss_overlay_has(s, cs, page_nr)) {
         snprintf(filename, sizeof(filename), "%s/cs%d/%d.page", s->nand_overlay, cs, page_nr);
         f = fopen(filename, "rb");
@@ -1046,7 +1072,11 @@ static uint32_t fmss_total_blocks(IPodTouchFMSSState *s)
     s->total_blocks = NAND_DEFAULT_TOTAL_BLOCKS;
 
     /* logical 2 is cs2 page 256 under the formula below */
-    if (s->packed) {
+    if (s->image) {
+        uint8_t record[NAND_BYTES_PER_PAGE + NAND_BYTES_PER_SPARE];
+        got = nand_image_read(s->image, 2, 256, record) == 0;
+        memcpy(ent, record, sizeof(ent));
+    } else if (s->packed) {
         got = fmss_packed_page(s, 2, 256, ent, spare) == FMSS_PACKED_DATA;
     } else {
         snprintf(path, sizeof(path), "%s/cs2/256.page", s->nand_path);
@@ -1132,6 +1162,15 @@ static bool fmss_store_page(IPodTouchFMSSState *s, uint32_t cs, uint32_t page_nr
 {
     char dir[1088], filename[1152], tmp[1200];
     uint32_t block = page_nr / NAND_PAGES_PER_BLOCK;
+
+    if (s->image) {
+        /* In place: the kernel's page cache keeps it through a killed process, and a VM stop flushes it. */
+        uint8_t record[NAND_BYTES_PER_PAGE + NAND_BYTES_PER_SPARE];
+        memcpy(record, data, NAND_BYTES_PER_PAGE);
+        memcpy(record + NAND_BYTES_PER_PAGE, spare, NAND_BYTES_PER_SPARE);
+        int result = nand_image_write(s->image, cs, page_nr, record);
+        return result < 0 ? fmss_io_error(s->nand_path, -result) : true;
+    }
 
     snprintf(dir, sizeof(dir), "%s/cs%d", s->nand_overlay, cs);
     if (g_mkdir_with_parents(dir, 0755) != 0) {
@@ -1375,7 +1414,7 @@ static void write_nand_pages(IPodTouchFMSSState *s)
         return;
     }
     s->read_clean = false;
-    if (!s->nand_overlay) {
+    if (!s->nand_overlay && !s->image) {
         return; /* no writable overlay -> writes are discarded (original behavior) */
     }
 
@@ -1696,7 +1735,22 @@ static const MemoryRegionOps fmss_ops = {
 
 static void ipod_touch_fmss_realize(DeviceState *dev, Error **errp)
 {
-    fmss_try_map_packed(IPOD_TOUCH_FMSS(dev));
+    IPodTouchFMSSState *s = IPOD_TOUCH_FMSS(dev);
+    static const NANDImageGeometry geo = {
+        .chips = FMSS_CHIPS, .page_bytes = NAND_BYTES_PER_PAGE, .spare_bytes = NAND_BYTES_PER_SPARE,
+        .pages_per_block = NAND_PAGES_PER_BLOCK, .blocks_per_chip = 4096,
+    };
+
+    if (s->nand_path && nand_image_is_store(s->nand_path)) {
+        if (s->nand_overlay) {
+            error_setg(errp, "%s is a NAND image store, written in place: it takes no nandrw overlay",
+                       s->nand_path);
+            return;
+        }
+        s->image = nand_image_open(dev, s->nand_path, &geo, errp);
+        return;
+    }
+    fmss_try_map_packed(s);
 }
 
 static void ipod_touch_fmss_init(Object *obj)

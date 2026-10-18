@@ -1680,6 +1680,139 @@ static void erase_block_and_clean_status(void)
     g_free(overlay);
 }
 
+/* A NAND image store (hw/arm/nand-image.c): geometry.json and cs<N>.pages, written in place, no nandrw. */
+static char *image_store(const char *blank)
+{
+    char *dir = g_dir_make_tmp("fmss-image-XXXXXX", NULL);
+    g_autofree char *geometry = g_build_filename(dir, "geometry.json", NULL);
+    g_autofree char *json = g_strdup_printf(
+        "{\"storage_format\": \"nand-xor-blank-v2\", \"blank\": \"%s\", \"chip_selects\": 4, "
+        "\"page_bytes\": 4096, \"spare_bytes\": 64, \"pages_per_block\": 128, \"blocks_per_ce\": 4096}", blank);
+    g_assert_true(g_file_set_contents(geometry, json, -1, NULL));
+    return dir;
+}
+
+static QTestState *start_image(const char *dir)
+{
+    return qtest_initf("-machine iPod-Touch,bootrom=%s,nor=%s,nand=%s "
+                       "-display none -audio driver=none -nic none -d unimp",
+                       rom_path, nor_path, dir);
+}
+
+static void remove_image(char *dir)
+{
+    for (unsigned cs = 0; cs < 4; cs++) {
+        g_autofree char *chip = g_strdup_printf("%s/cs%u.pages", dir, cs);
+        unlink(chip);
+    }
+    g_autofree char *geometry = g_build_filename(dir, "geometry.json", NULL);
+    unlink(geometry);
+    g_assert_cmpint(rmdir(dir), ==, 0);
+    g_free(dir);
+}
+
+/* Physical mode (main's default): a hole reads as the store's blank, a program lands in the chip file (stored XOR
+ * blank), an erase makes its block blank again, and all of it is there after the emulator is started again. */
+static void image_store_program_erase_reopen(void)
+{
+    char *dir = image_store("ff");
+    uint8_t pattern[4096], meta[12], data[4096], spare[12], stored[4160];
+    memset(pattern, 0x3c, sizeof(pattern));
+    memset(meta, 0x11, sizeof(meta));
+    QTestState *qts = start_image(dir);
+
+    read_page(qts, 1, 7, data, spare);
+    assert_blank(data, spare, true);
+    program(qts, 1, 7, pattern, meta);
+    program(qts, 0, 130, pattern, meta);
+    program(qts, 0, 300, pattern, meta);
+    read_page(qts, 1, 7, data, spare);
+    g_assert_cmpmem(data, sizeof(data), pattern, sizeof(pattern));
+    g_assert_cmpmem(spare, sizeof(spare), meta, sizeof(meta));
+
+    static const uint32_t erase[] = {
+        0x01000000, 1u << 1,     /* FMCTRL0: chip enable 0 */
+        0x01000008, 0x60,
+        0x0100000c, 131,         /* any page of block 1 */
+        0x01000008, 0xd0,
+        0, 0
+    };
+    for (unsigned i = 0; i < G_N_ELEMENTS(erase); i++) {
+        qtest_writel(qts, RAM + 0x4000 + 4 * i, erase[i]);
+    }
+    qtest_writel(qts, FMSS + 0xc04, RAM + 0x4000);
+    qtest_writel(qts, FMSS + 0xc00, 0xffb5);
+    g_assert_cmphex(qtest_readl(qts, FMSS + 0xc30), ==, 1);
+    qtest_writel(qts, FMSS + 0xc00, 8);
+    read_page(qts, 0, 130, data, spare);
+    assert_blank(data, spare, true);
+    qtest_quit(qts);
+
+    /* On disk: the record XOR the blank, at record * 4160. */
+    g_autofree char *chip = g_build_filename(dir, "cs1.pages", NULL);
+    int fd = open(chip, O_RDONLY);
+    g_assert_cmpint(fd, >=, 0);
+    g_assert_cmpint(pread(fd, stored, sizeof(stored), 7 * 4160), ==, sizeof(stored));
+    close(fd);
+    g_assert_cmphex(stored[0], ==, 0x3c ^ 0xff);
+    g_assert_cmphex(stored[4096], ==, 0x11 ^ 0xff);
+    g_assert_cmphex(stored[4096 + 12], ==, 0xff);  /* past the driver's 12 bytes: the model's zero padding */
+
+    qts = start_image(dir);
+    read_page(qts, 1, 7, data, spare);
+    g_assert_cmpmem(data, sizeof(data), pattern, sizeof(pattern));
+    g_assert_cmpmem(spare, sizeof(spare), meta, sizeof(meta));
+    read_page(qts, 0, 300, data, spare);
+    g_assert_cmpmem(data, sizeof(data), pattern, sizeof(pattern));
+    read_page(qts, 0, 130, data, spare);
+    assert_blank(data, spare, true);
+    qtest_quit(qts);
+    remove_image(dir);
+}
+
+/* The generated layout's blank (FirmwareKit's n72 stores): a hole reads as fmss_blank_page's generated page, and a
+ * write lands at the logical home, as the page files' overlay did. */
+static void image_store_generated(void)
+{
+    char *dir = image_store("n72-generated");
+    uint8_t pattern[4096], meta[12] = { 0 }, data[4096], spare[12];
+    struct stat st;
+    g_unsetenv("FMSS_PHYSICAL");
+    QTestState *qts = start_image(dir);
+    read_page(qts, 2, 256, data, spare);
+    assert_blank(data, spare, false);
+    /* logical 3 (block 0) lives at cs3 page 256 under the layout formula */
+    memset(pattern, 0x6b, sizeof(pattern));
+    meta[0] = 3;
+    program(qts, 0, 5000, pattern, meta);
+    qtest_quit(qts);
+    g_autofree char *chip = g_build_filename(dir, "cs3.pages", NULL);
+    g_assert_cmpint(stat(chip, &st), ==, 0);
+    g_assert_cmpint(st.st_size, ==, 4096LL * 128 * 4160);
+    qts = start_image(dir);
+    read_page(qts, 3, 256, data, spare);
+    g_assert_cmpmem(data, sizeof(data), pattern, sizeof(pattern));
+    for (unsigned i = 0; i < sizeof(spare); i++) {  /* stored with the generated layout's own spare */
+        g_assert_cmphex(spare[i], ==, (i == 8 || i == 10) ? 0xff : 0);
+    }
+    qtest_quit(qts);
+    g_setenv("FMSS_PHYSICAL", "1", true);
+    remove_image(dir);
+}
+
+static void image_store_refuses_overlay(void)
+{
+    char *dir = image_store("ff");
+    g_autofree char *overlay = g_dir_make_tmp("fmss-overlay-XXXXXX", NULL);
+    g_autofree char *machine = g_strdup_printf("iPod-Touch,bootrom=%s,nor=%s,nand=%s,nandrw=%s",
+                                               rom_path, nor_path, dir, overlay);
+    char *argv[] = { getenv("QTEST_QEMU_BINARY"), "-machine", machine, "-display", "none", "-audio", "driver=none",
+                     "-nic", "none", "-monitor", "none", "-serial", "none", "-S", NULL };
+    expect_startup_failure(argv, "takes no nandrw overlay");
+    rmdir(overlay);
+    remove_image(dir);
+}
+
 int main(int argc, char **argv)
 {
     g_autofree char *rom = g_malloc0(131072);
@@ -1728,6 +1861,9 @@ int main(int argc, char **argv)
     qtest_add_func("/ipod/fmss/sequencer-transactions", sequencer_transactions);
     qtest_add_func("/ipod/fmss/cpu-read-transactions", cpu_read_transactions);
     qtest_add_func("/ipod/fmss/cpu-write-source-guard", cpu_write_source_guard);
+    qtest_add_func("/ipod/fmss/image-store", image_store_program_erase_reopen);
+    qtest_add_func("/ipod/fmss/image-store-generated", image_store_generated);
+    qtest_add_func("/ipod/fmss/image-store-refuses-overlay", image_store_refuses_overlay);
     result = g_test_run();
     unlink(rom_path); unlink(nor_path); rmdir(nand_path);
     g_free(rom_path); g_free(nor_path); g_free(nand_path);
