@@ -36,6 +36,9 @@
  */
 void tcg_init(size_t tb_size, int splitwx, unsigned max_threads);
 
+/* Optional single-vCPU miss-helper cache and independent timing diagnostic. */
+void tcg_indirect_l2_init(bool enabled, bool profile);
+
 /**
  * tcg_register_thread: Register this thread with the TCG runtime
  *

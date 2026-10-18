@@ -129,6 +129,16 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
             tcg_masked_irq_fast ? "on" : "off",
             tcg_irq_check_prof ? "on" : "off");
 
+    const char *indirect_l2 = getenv("LT_IBTC_L2");
+    const char *indirect_prof = getenv("LT_IBTC_L2_PROF");
+    bool l2_on = indirect_l2 && strcmp(indirect_l2, "off") &&
+                 strcmp(indirect_l2, "0");
+    bool l2_prof = indirect_prof && strcmp(indirect_prof, "off") &&
+                   strcmp(indirect_prof, "0");
+    /* The generated site cache and this side table share single-vCPU rules. */
+    bool single_vcpu = ms->smp.cpus == 1 && ms->smp.max_cpus == 1;
+    tcg_indirect_l2_init(l2_on && single_vcpu, l2_prof && single_vcpu);
+
 #ifndef CONFIG_USER_ONLY
     CPUClass *cc = CPU_CLASS(object_class_by_name(target_cpu_type()));
     bool mttcg_supported = cc->tcg_ops->mttcg_supported;

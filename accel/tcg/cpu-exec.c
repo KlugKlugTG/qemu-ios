@@ -32,6 +32,7 @@
 #include "exec/mmap-lock.h"
 #include "exec/translation-block.h"
 #include "tcg/tcg.h"
+#include "tcg/startup.h"
 #include "qemu/atomic.h"
 #include "qemu/rcu.h"
 #include "exec/log.h"
@@ -454,26 +455,89 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
     return tb->tc.ptr;
 }
 
+/*
+ * A bounded second cache, reached only after the generated two-entry site
+ * cache misses. Nothing is added to TBs or generated code. The slot address
+ * is part of the key: target PC/Thumb and ibtc_ctx alone omit the source TB's
+ * other implicit architectural flags and cannot validate a global hit.
+ * Invalidation renews ibtc_ctx, just as for the generated site cache; entries
+ * from an older generation cannot match. Only PC-relative targets are filled:
+ * their invalidation path always renews the context generation. Single-vCPU
+ * only, allocated on opt-in.
+ */
+#define IBTC_L2_BITS 14
+#define IBTC_L2_SIZE (1u << IBTC_L2_BITS)
+typedef struct IndirectL2Entry {
+    TCGIndirectSlot *site;
+    uint64_t key;
+    const void *host;
+} IndirectL2Entry;
+
+static IndirectL2Entry *indirect_l2;
+static bool indirect_l2_prof;
+static struct {
+    uint64_t begin_ns, next_ns, calls, hits, samples, ns, max_ns;
+    uint64_t hit_samples, hit_ns, miss_samples, miss_ns;
+} indirect_l2_times;
+
+void tcg_indirect_l2_init(bool enabled, bool profile)
+{
+    g_free(indirect_l2);
+    indirect_l2 = enabled ? g_new0(IndirectL2Entry, IBTC_L2_SIZE) : NULL;
+    indirect_l2_prof = profile;
+    memset(&indirect_l2_times, 0, sizeof(indirect_l2_times));
+    fprintf(stderr, "[tcg] indirect-l2=%s indirect-l2-prof=%s entries=%u bytes=%zu\n",
+            enabled ? "on" : "off", profile ? "on" : "off",
+            enabled ? IBTC_L2_SIZE : 0,
+            enabled ? sizeof(*indirect_l2) * IBTC_L2_SIZE : 0);
+}
+
+static inline void indirect_site_fill(TCGIndirectSlot *site, uint64_t key,
+                                      const void *host)
+{
+    site->e[1] = site->e[0];
+    site->e[0].host = host;
+    site->e[0].key = key;
+}
+
 /**
- * helper_lookup_tb_ptr_cached: helper_lookup_tb_ptr for an indirect-branch
+ * lookup_tb_ptr_cached: helper_lookup_tb_ptr for an indirect-branch
  * site with a cache (tcg_gen_lookup_and_goto_ptr_cached)
- * @env: current cpu state
- * @slot: the site's cache
+ * @cpu: current CPU state
+ * @site: the site's cache
  * @key: the site's key for the current target, computed by generated code
+ * @l2_hit: optional diagnostic output, initially false
  *
  * Called when the site's cache does not hold @key. Looks the TB up as
  * helper_lookup_tb_ptr does and, if found, makes it the site's newest target
  * (the older one moves to the second entry), so that the next jump to either
  * in the same context skips this call.
  */
-const void *HELPER(lookup_tb_ptr_cached)(CPUArchState *env, void *slot,
-                                         uint64_t key)
+static inline QEMU_ALWAYS_INLINE
+const void *lookup_tb_ptr_cached(CPUState *cpu, TCGIndirectSlot *site,
+                                 uint64_t key, bool *l2_hit)
 {
-    CPUState *cpu = env_cpu(env);
-    TCGIndirectSlot *site = slot;
     TranslationBlock *tb;
+    IndirectL2Entry *entry = NULL;
 
     cpu->neg.can_do_io = true;
+
+    if (indirect_l2 && !it_acct_on &&
+        (uint32_t)(key >> 32) != 0 &&
+        (uint32_t)(key >> 32) == qatomic_read(&cpu->neg.ibtc_ctx) &&
+        QTAILQ_EMPTY(&cpu->breakpoints) &&
+        !qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
+        unsigned hash = (key ^ (key >> 18) ^ ((uintptr_t)site >> 5)) &
+                        (IBTC_L2_SIZE - 1);
+        entry = &indirect_l2[hash];
+        if (entry->site == site && entry->key == key) {
+            indirect_site_fill(site, key, entry->host);
+            if (l2_hit) {
+                *l2_hit = true;
+            }
+            return entry->host;
+        }
+    }
 
     TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
     s.cflags = curr_cflags(cpu);
@@ -496,9 +560,12 @@ const void *HELPER(lookup_tb_ptr_cached)(CPUArchState *env, void *slot,
     if ((uint32_t)(key >> 32) == qatomic_read(&cpu->neg.ibtc_ctx) &&
         (uint32_t)(key >> 32) != 0 &&
         QTAILQ_EMPTY(&cpu->breakpoints)) {
-        site->e[1] = site->e[0];
-        site->e[0].host = tb->tc.ptr;
-        site->e[0].key = key;
+        indirect_site_fill(site, key, tb->tc.ptr);
+        if (entry && (tb_cflags(tb) & CF_PCREL)) {
+            entry->site = site;
+            entry->key = key;
+            entry->host = tb->tc.ptr;
+        }
     }
 
     if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
@@ -506,6 +573,71 @@ const void *HELPER(lookup_tb_ptr_cached)(CPUArchState *env, void *slot,
     }
 
     return tb->tc.ptr;
+}
+
+/* One in 256 complete miss-helper calls, including the existing lookup on
+ * fallback. No TLS, clocks or counter updates in the ordinary helpers. */
+static const void *indirect_l2_profiled(CPUState *cpu, TCGIndirectSlot *site,
+                                       uint64_t key)
+{
+    uint64_t begin = 0, now;
+    bool hit = false;
+    const void *host;
+
+    if (!indirect_l2_times.next_ns) {
+        indirect_l2_times.begin_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        indirect_l2_times.next_ns = indirect_l2_times.begin_ns + 5000000000ULL;
+    }
+    indirect_l2_times.calls++;
+    if ((indirect_l2_times.calls & 255) == 0) {
+        begin = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
+    host = lookup_tb_ptr_cached(cpu, site, key, &hit);
+    indirect_l2_times.hits += hit;
+    if (begin) {
+        uint64_t elapsed = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - begin;
+        indirect_l2_times.samples++;
+        indirect_l2_times.ns += elapsed;
+        indirect_l2_times.max_ns = MAX(indirect_l2_times.max_ns, elapsed);
+        if (hit) {
+            indirect_l2_times.hit_samples++;
+            indirect_l2_times.hit_ns += elapsed;
+        } else {
+            indirect_l2_times.miss_samples++;
+            indirect_l2_times.miss_ns += elapsed;
+        }
+    }
+    if ((indirect_l2_times.calls & 1023) == 0) {
+        now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        if (now >= indirect_l2_times.next_ns) {
+            fprintf(stderr, "[ibtc-l2] on=%s begin-ns %" PRIu64 " end-ns %" PRIu64
+                    " calls %" PRIu64 " hits %" PRIu64 " samples %" PRIu64
+                    " ns %" PRIu64 " max-ns %" PRIu64
+                    " hit-samples %" PRIu64 " hit-ns %" PRIu64
+                    " miss-samples %" PRIu64 " miss-ns %" PRIu64 "\n",
+                    indirect_l2 ? "on" : "off", indirect_l2_times.begin_ns, now,
+                    indirect_l2_times.calls, indirect_l2_times.hits,
+                    indirect_l2_times.samples, indirect_l2_times.ns,
+                    indirect_l2_times.max_ns, indirect_l2_times.hit_samples,
+                    indirect_l2_times.hit_ns, indirect_l2_times.miss_samples,
+                    indirect_l2_times.miss_ns);
+            memset(&indirect_l2_times, 0, sizeof(indirect_l2_times));
+            indirect_l2_times.begin_ns = now;
+            indirect_l2_times.next_ns = now + 5000000000ULL;
+        }
+    }
+    return host;
+}
+
+const void *HELPER(lookup_tb_ptr_cached)(CPUArchState *env, void *slot,
+                                         uint64_t key)
+{
+    CPUState *cpu = env_cpu(env);
+
+    if (unlikely(indirect_l2_prof) && cpu->cpu_index == 0) {
+        return indirect_l2_profiled(cpu, slot, key);
+    }
+    return lookup_tb_ptr_cached(cpu, slot, key, NULL);
 }
 
 /* Return the current PC from CPU, which may be cached in TB. */
