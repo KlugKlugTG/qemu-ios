@@ -7182,6 +7182,11 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         uint32_t attach = a[1], rb = a[3];
 
         if (attach == GL_COLOR_ATTACHMENT0_EXT) {
+            /* Replacing the color attachment ends writes to the outgoing
+             * surface as leaving the framebuffer does: mark it now, or the
+             * frame's flush sees only the new attachment and never writes
+             * the old one back. */
+            if (gles_sync_surface(cpu)) return -1;
             /* A color renderbuffer that never got GL storage is the CA
              * drawable, so from now on this framebuffer MEANS gh.fbo. Any
              * other color attachment takes that meaning away again. */
@@ -7213,6 +7218,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
          * screen and left the texture empty, which composited as a white
          * level while the menus (UIKit) looked perfect. */
         if (a[1] == GL_COLOR_ATTACHMENT0_EXT) {
+            if (gles_sync_surface(cpu)) return -1;   /* as above */
             gles_set_drawable(gh.bound_framebuffer, false);
         }
         gles_trace_attach("glFramebufferTexture2D", a[1], a[3]);
