@@ -245,7 +245,10 @@ static void ipod_touch_spi_write(void *opaque, hwaddr addr, uint64_t data, unsig
         if (r & R_CTRL_RX_RESET) {
             fifo8_reset(&s->rx_fifo);
         }
-        if (r & R_CTRL_RUN && !fifo8_is_empty(&s->tx_fifo)) {
+        /* With AGD the controller clocks sentinel bytes in for RXCNT, so RUN
+         * starts a receive-only transfer with nothing queued to send. */
+        if (r & R_CTRL_RUN &&
+            ((REG(s, R_CFG) & R_CFG_AGD) || !fifo8_is_empty(&s->tx_fifo))) {
             run = true;
         }
         break;
