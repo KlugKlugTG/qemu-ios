@@ -496,15 +496,9 @@ const void *HELPER(lookup_tb_ptr_cached)(CPUArchState *env, void *slot,
     if ((uint32_t)(key >> 32) == qatomic_read(&cpu->neg.ibtc_ctx) &&
         (uint32_t)(key >> 32) != 0 &&
         QTAILQ_EMPTY(&cpu->breakpoints)) {
-        if (tcg_ibtc_indexed) {
-            TCGIndirectEntry *entry = &site->indexed[tcg_ibtc_index(key)];
-            entry->host = tb->tc.ptr;
-            entry->key = key;
-        } else {
-            site->e[1] = site->e[0];
-            site->e[0].host = tb->tc.ptr;
-            site->e[0].key = key;
-        }
+        site->e[1] = site->e[0];
+        site->e[0].host = tb->tc.ptr;
+        site->e[0].key = key;
     }
 
     if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {

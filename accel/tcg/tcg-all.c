@@ -87,7 +87,6 @@ static void tcg_accel_instance_init(Object *obj)
 bool one_insn_per_tb;
 bool tcg_cross_page_chain;
 bool tcg_indirect_cache;
-bool tcg_ibtc_indexed;
 bool tcg_inline_tb_lookup;
 
 #ifndef CONFIG_USER_ONLY
@@ -111,11 +110,6 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
 {
     TCGState *s = TCG_STATE(as);
     unsigned max_threads = 1;
-    const char *indexed = getenv("LT_IBTC_INDEXED");
-
-    tcg_ibtc_indexed = indexed && strcmp(indexed, "off") && strcmp(indexed, "0");
-    fprintf(stderr, "[tcg] indirect-site-indexed=%s slot-bytes=%zu\n",
-            tcg_ibtc_indexed ? "on" : "off", sizeof(TCGIndirectSlot));
 
     const char *inline_lookup = getenv("LT_TB_LOOKUP_INLINE");
     tcg_inline_tb_lookup = inline_lookup && strcmp(inline_lookup, "off") &&
