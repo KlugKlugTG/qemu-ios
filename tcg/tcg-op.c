@@ -2590,15 +2590,24 @@ void tcg_gen_lookup_and_goto_ptr_cached(TCGv_i32 site_key)
     tcg_gen_ld32u_i64(cached, tcg_env,
                       offsetof(CPUState, neg.ibtc_ctx) - sizeof(CPUState));
     tcg_gen_deposit_i64(key, key, cached, 32, 32);
-    tcg_gen_ld_i64(cached, slot, offsetof(TCGIndirectSlot, key));
+    tcg_temp_free_i64(cached);
 
     miss = gen_new_label();
-    tcg_gen_brcond_i64(TCG_COND_NE, key, cached, miss);
-    tcg_temp_free_i64(cached);
-    ptr = tcg_temp_ebb_new_ptr();
-    tcg_gen_ld_ptr(ptr, slot, offsetof(TCGIndirectSlot, host));
-    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
-    tcg_temp_free_ptr(ptr);
+    for (int i = 0; i < ARRAY_SIZE(tb->ibtc.e); i++) {
+        TCGLabel *next = i + 1 < ARRAY_SIZE(tb->ibtc.e) ? gen_new_label() : miss;
+
+        cached = tcg_temp_ebb_new_i64();
+        tcg_gen_ld_i64(cached, slot, offsetof(TCGIndirectSlot, e[i].key));
+        tcg_gen_brcond_i64(TCG_COND_NE, key, cached, next);
+        tcg_temp_free_i64(cached);
+        ptr = tcg_temp_ebb_new_ptr();
+        tcg_gen_ld_ptr(ptr, slot, offsetof(TCGIndirectSlot, e[i].host));
+        tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+        tcg_temp_free_ptr(ptr);
+        if (next != miss) {
+            gen_set_label(next);
+        }
+    }
 
     gen_set_label(miss);
     ptr = tcg_temp_ebb_new_ptr();

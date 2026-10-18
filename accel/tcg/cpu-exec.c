@@ -437,8 +437,9 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
  * @key: the site's key for the current target, computed by generated code
  *
  * Called when the site's cache does not hold @key. Looks the TB up as
- * helper_lookup_tb_ptr does and, if found, makes it the site's target, so
- * that the next jump to the same target in the same context skips this call.
+ * helper_lookup_tb_ptr does and, if found, makes it the site's newest target
+ * (the older one moves to the second entry), so that the next jump to either
+ * in the same context skips this call.
  */
 const void *HELPER(lookup_tb_ptr_cached)(CPUArchState *env, void *slot,
                                          uint64_t key)
@@ -464,14 +465,15 @@ const void *HELPER(lookup_tb_ptr_cached)(CPUArchState *env, void *slot,
     /*
      * The key names the context it was computed in (cpu->neg.ibtc_ctx at
      * the jump); store it only if that is still current, and never with
-     * breakpoints, which the cached path would skip. The pointer is written
-     * first: only this vCPU reads the slot (single-vCPU guests only).
+     * breakpoints, which the cached path would skip. Only this vCPU reads
+     * the slot (single-vCPU guests only), so plain stores do.
      */
     if ((uint32_t)(key >> 32) == qatomic_read(&cpu->neg.ibtc_ctx) &&
         (uint32_t)(key >> 32) != 0 &&
         QTAILQ_EMPTY(&cpu->breakpoints)) {
-        qatomic_set(&site->host, tb->tc.ptr);
-        qatomic_set(&site->key, key);
+        site->e[1] = site->e[0];
+        site->e[0].host = tb->tc.ptr;
+        site->e[0].key = key;
     }
 
     if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {

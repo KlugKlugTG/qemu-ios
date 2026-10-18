@@ -85,7 +85,7 @@ void tcg_gen_lookup_and_goto_ptr(void);
 
 /**
  * tcg_gen_lookup_and_goto_ptr_cached() - tcg_gen_lookup_and_goto_ptr with a
- * one-entry cache of this exit's last target
+ * two-entry cache of this exit's last targets
  * @site_key: the target PC and any state the next TB's flags depend on that
  *            this TB's flags do not fix, as one 32-bit value
  *

@@ -44,14 +44,19 @@ struct tb_tc {
 };
 
 /*
- * The target last taken by a TB's indirect exit, when that exit has a cache
- * (tcg_gen_lookup_and_goto_ptr_cached): @key, a target-specific value for the
- * target PC and state with the context id (cpu->neg.ibtc_ctx) in its high 32
- * bits, and the host code to run for it. A key of 0 matches nothing.
+ * The last two targets taken by a TB's indirect exit, newest first, when that
+ * exit has a cache (tcg_gen_lookup_and_goto_ptr_cached): @key, a
+ * target-specific value for the target PC and state with the context id
+ * (cpu->neg.ibtc_ctx) in its high 32 bits, and the host code to run for it.
+ * A key of 0 matches nothing.
  */
-typedef struct TCGIndirectSlot {
+typedef struct TCGIndirectEntry {
     uint64_t key;
     const void *host;
+} TCGIndirectEntry;
+
+typedef struct TCGIndirectSlot {
+    TCGIndirectEntry e[2];
 } TCGIndirectSlot;
 
 struct TranslationBlock {
