@@ -329,17 +329,59 @@ static void gles_native_read_pixels(GLint x, GLint y, GLsizei w, GLsizei h,
     if (w <= 0 || h <= 0 || (size_t)w > 64*1024*1024u/4/(unsigned)h) {
         glReadPixels(x,y,w,h,format,type,pixels); return;
     }
-    unsigned char *copy=malloc((size_t)w*h*4);
-    if (!copy) { gles_native_error(GL_OUT_OF_MEMORY); return; }
+    /*
+     * The present reads every frame back as B,G,R,A bytes (GL_BGRA with
+     * UNSIGNED_BYTE or 8_8_8_8_REV). Where the driver has
+     * GL_EXT_read_format_bgra it does that itself; otherwise the RGBA read is
+     * swapped a word at a time. Either way, not the per-byte loop below into a
+     * fresh 600 KB allocation, which was ~2% of the vCPU in a game on the Poco.
+     * LT_GLES_BGRA_READ=0 keeps the old path, for A/B.
+     */
+    static int bgra_read=-1;
+    if (bgra_read < 0) {
+        const char *e=getenv("LT_GLES_BGRA_READ");
+        bgra_read=e && !atoi(e) ? 0 :
+            gles_native_extension((const char *)glGetString(GL_EXTENSIONS),"GL_EXT_read_format_bgra") ? 2 : 1;
+    }
+    bool bgra32=bgra_read && format==GL_BGRA && (type==GL_UNSIGNED_BYTE || type==GL_UNSIGNED_INT_8_8_8_8_REV);
+    if (bgra32 && bgra_read==2) {
+        gles_native_save_errors();
+        glReadPixels(x,y,w,h,GL_BGRA,GL_UNSIGNED_BYTE,pixels);
+        GLenum error=glGetError();
+        if (error==GL_NO_ERROR) return;
+        bgra_read=1;  /* not for this surface after all: swap by hand from now on */
+    }
+    static unsigned char *scratch; static size_t scratch_size;
+    unsigned char *copy;
+    if (bgra32) {
+        if (scratch_size < (size_t)w*h*4) {
+            free(scratch); scratch_size=0;
+            if (!(scratch=malloc((size_t)w*h*4))) { gles_native_error(GL_OUT_OF_MEMORY); return; }
+            scratch_size=(size_t)w*h*4;
+        }
+        copy=scratch;
+    } else if (!(copy=malloc((size_t)w*h*4))) { gles_native_error(GL_OUT_OF_MEMORY); return; }
     gles_native_save_errors();
     GLint alignment; glGetIntegerv(GL_PACK_ALIGNMENT,&alignment);
     glPixelStorei(GL_PACK_ALIGNMENT,1);
     glReadPixels(x,y,w,h,GL_RGBA,GL_UNSIGNED_BYTE,copy);
     GLenum error=glGetError();
     glPixelStorei(GL_PACK_ALIGNMENT,alignment);
-    if (error != GL_NO_ERROR) { gles_native_error(error); free(copy); return; }
+    if (error != GL_NO_ERROR) { gles_native_error(error); if (copy!=scratch) free(copy); return; }
     unsigned bpp=packed16 || rgb565 ? 2 : format==GL_RGB ? 3 : 4;
     size_t stride=((size_t)w*bpp+alignment-1)&~(size_t)(alignment-1);
+    if (bgra32) {
+        for (unsigned row=0;row<(unsigned)h;row++) {
+            const uint32_t *src=(const uint32_t *)(copy+(size_t)row*w*4);
+            unsigned char *dst=(unsigned char *)pixels+row*stride;
+            for (unsigned col=0;col<(unsigned)w;col++) {
+                uint32_t v=src[col];
+                v=(v&0xff00ff00u) | (v>>16&0xffu) | (v&0xffu)<<16;
+                memcpy(dst+col*4,&v,4);
+            }
+        }
+        return;
+    }
     for (unsigned row=0;row<(unsigned)h;row++) for (unsigned col=0;col<(unsigned)w;col++) {
         unsigned char *src=copy+((size_t)row*w+col)*4, *dst=(unsigned char *)pixels+row*stride+col*bpp;
         unsigned char q[4]={src[format==GL_BGRA?2:0],src[1],src[format==GL_BGRA?0:2],src[3]};
