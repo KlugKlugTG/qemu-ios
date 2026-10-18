@@ -74,6 +74,7 @@ if have_block
     'test-blockjob': [testblock],
     'test-blockjob-txn': [testblock],
     'test-block-backend': [testblock],
+    'test-block-accounting': [testblock],
     'test-block-iothread': [testblock],
     'test-write-threshold': [testblock],
     'test-crypto-hash': [crypto],
@@ -113,6 +114,7 @@ if have_block
   endif
   if host_os != 'windows'
     tests += {
+      'test-io-channel-websock': [io],
       'test-image-locking': [testblock],
       'test-nested-aio-poll': [],
     }
