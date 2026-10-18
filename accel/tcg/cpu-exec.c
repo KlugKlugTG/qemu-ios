@@ -856,9 +856,16 @@ static inline bool cpu_handle_exception(CPUState *cpu, int *ret)
     if (replay_exception()) {
         const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
 
-        bql_lock();
+        bool bql = !tcg_ops->do_interrupt_needs_bql ||
+                   tcg_ops->do_interrupt_needs_bql(cpu);
+
+        if (bql) {
+            bql_lock();
+        }
         tcg_ops->do_interrupt(cpu);
-        bql_unlock();
+        if (bql) {
+            bql_unlock();
+        }
         cpu->exception_index = -1;
 
         if (unlikely(cpu->singlestep_enabled)) {
@@ -929,6 +936,16 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
 #ifdef CONFIG_USER_ONLY
     assert(!cpu_test_interrupt(cpu, ~0));
 #else
+    /*
+     * Every exception entry asks for EXITTB, which on its own only means
+     * "do not chain into the next TB": clearing it needs no BQL, and on iOS
+     * it is most of the interrupt checks (one per syscall and page fault).
+     * A bit set meanwhile stays pending and has kicked the CPU.
+     */
+    if (qatomic_load_acquire(&cpu->interrupt_request) == CPU_INTERRUPT_EXITTB) {
+        cpu_reset_interrupt(cpu, CPU_INTERRUPT_EXITTB);
+        *last_tb = NULL;
+    }
     if (unlikely(cpu_test_interrupt(cpu, ~0))) {
         bql_lock();
         if (cpu_test_interrupt(cpu, CPU_INTERRUPT_DEBUG)) {

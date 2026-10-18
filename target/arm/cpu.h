@@ -1254,6 +1254,7 @@ uint64_t arm_build_mp_affinity(int idx, uint8_t clustersz);
 extern const VMStateDescription vmstate_arm_cpu;
 
 void arm_cpu_do_interrupt(CPUState *cpu);
+bool arm_cpu_do_interrupt_needs_bql(CPUState *cpu);
 void arm_v7m_cpu_do_interrupt(CPUState *cpu);
 
 hwaddr arm_cpu_get_phys_page_attrs_debug(CPUState *cpu, vaddr addr,

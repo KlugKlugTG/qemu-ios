@@ -607,13 +607,21 @@ void HELPER(cpsr_write)(CPUARMState *env, uint32_t val, uint32_t mask)
 /* Write the CPSR for a 32-bit exception return */
 void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
 {
+    ARMCPU *cpu = env_archcpu(env);
     uint32_t mask;
 
-    bql_lock();
-    arm_call_pre_el_change_hook(env_archcpu(env));
-    bql_unlock();
+    /*
+     * iOS does an exception return for every syscall, trap and IRQ, and
+     * taking the BQL twice each time for hooks a CPU without them never
+     * runs was a large share of the vCPU's BQL waits.
+     */
+    if (!QLIST_EMPTY(&cpu->pre_el_change_hooks)) {
+        bql_lock();
+        arm_call_pre_el_change_hook(cpu);
+        bql_unlock();
+    }
 
-    mask = aarch32_cpsr_valid_mask(env->features, &env_archcpu(env)->isar);
+    mask = aarch32_cpsr_valid_mask(env->features, &cpu->isar);
     cpsr_write(env, val, mask, CPSRWriteExceptionReturn);
 
     /* Generated code has already stored the new PC value, but
@@ -624,9 +632,11 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
     env->regs[15] &= (env->thumb ? ~1 : ~3);
     arm_rebuild_hflags(env);
 
-    bql_lock();
-    arm_call_el_change_hook(env_archcpu(env));
-    bql_unlock();
+    if (!QLIST_EMPTY(&cpu->el_change_hooks)) {
+        bql_lock();
+        arm_call_el_change_hook(cpu);
+        bql_unlock();
+    }
 }
 
 /* Access to user mode registers from privileged modes.  */

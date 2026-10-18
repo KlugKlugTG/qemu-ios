@@ -9529,6 +9529,20 @@ static void tcg_handle_semihosting(CPUState *cs)
  *       and KVM to re-inject guest debug exceptions, and to
  *       inject a Synchronous-External-Abort.
  */
+/*
+ * iOS takes an exception for every syscall and page fault, thousands a
+ * second, and waiting for the BQL there was the vCPU's largest lock wait.
+ */
+bool arm_cpu_do_interrupt_needs_bql(CPUState *cs)
+{
+    ARMCPU *cpu = ARM_CPU(cs);
+
+    return !QLIST_EMPTY(&cpu->pre_el_change_hooks) ||
+           !QLIST_EMPTY(&cpu->el_change_hooks) ||
+           cs->exception_index == EXCP_SEMIHOST ||
+           arm_is_psci_call(cpu, cs->exception_index);
+}
+
 void arm_cpu_do_interrupt(CPUState *cs)
 {
     ARMCPU *cpu = ARM_CPU(cs);
@@ -9572,11 +9586,11 @@ void arm_cpu_do_interrupt(CPUState *cs)
 #endif
 
     /*
-     * Hooks may change global state so BQL should be held, also the
-     * BQL needs to be held for any modification of
-     * cs->interrupt_request.
+     * Hooks may change global state so BQL should be held. Without hooks
+     * the entry only touches this CPU's state (cpu_set_interrupt is
+     * atomic), so arm_cpu_do_interrupt_needs_bql lets exceptions skip it.
      */
-    g_assert(bql_locked());
+    g_assert(bql_locked() || !arm_cpu_do_interrupt_needs_bql(cs));
 
     arm_call_pre_el_change_hook(cpu);
 

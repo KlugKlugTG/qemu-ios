@@ -2372,6 +2372,7 @@ static const TCGCPUOps arm_tcg_ops = {
     .cpu_exec_halt = arm_cpu_exec_halt,
     .cpu_exec_reset = cpu_reset,
     .do_interrupt = arm_cpu_do_interrupt,
+    .do_interrupt_needs_bql = arm_cpu_do_interrupt_needs_bql,
     .do_transaction_failed = arm_cpu_do_transaction_failed,
     .do_unaligned_access = arm_cpu_do_unaligned_access,
     .adjust_watchpoint_address = arm_adjust_watchpoint_address,
