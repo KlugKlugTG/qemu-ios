@@ -571,7 +571,9 @@ void rust_bql_mock_lock(void)
  * The BQL is taken from so many places that it is worth profiling the
  * callers directly, instead of funneling them all through a single function.
  */
-extern bool it_acct_on;
+/* Full accounting and LT_BQL_PROF share lock tables. The latter leaves guest
+ * instruction, TB lookup and TLB-fill instrumentation disabled. */
+bool it_bql_acct_on;
 bool it_profile_on;
 /* The standalone QEMU executable has no embedded UI bridge. */
 void qemu_ios_profile_lock(uint64_t, uint64_t, bool, const char *, int) __attribute__((weak));
@@ -622,7 +624,8 @@ void bql_lock_impl(const char *file, int line)
     QemuMutexLockFunc bql_lock_fn = qatomic_read(&bql_mutex_lock_func);
 
     g_assert(!bql_locked());
-    if (unlikely(it_acct_on || qatomic_read(&it_profile_on)) && current_cpu) {
+    if (unlikely(qatomic_read(&it_bql_acct_on) ||
+                 qatomic_read(&it_profile_on)) && current_cpu) {
         /* How long a vCPU waits for the BQL, MMIO accesses included. */
         int64_t t0 = get_clock(), dt;
 
@@ -636,7 +639,7 @@ void bql_lock_impl(const char *file, int line)
         it_acct_vcpu_bql_slow += dt > 100000;
         /* Live captures need the totals and slow intervals, not the full
          * accounting tables or allocations while holding the BQL. */
-        if (it_acct_on) {
+        if (qatomic_read(&it_bql_acct_on)) {
             it_acct_wait_hist[it_acct_bucket(dt)][0]++;
             it_acct_wait_hist[it_acct_bucket(dt)][1] += dt;
             /* Non-MMIO takers are keyed by call site (file is a literal). */
@@ -662,7 +665,8 @@ void bql_lock_impl(const char *file, int line)
         return;
     }
     bql_lock_fn(&bql, file, line);
-    if (unlikely(it_acct_on || qatomic_read(&it_profile_on))) {
+    if (unlikely(qatomic_read(&it_bql_acct_on) ||
+                 qatomic_read(&it_profile_on))) {
         it_acct_held_since = get_clock();
         it_acct_held_file = file;
         it_acct_held_line = line;
@@ -682,7 +686,7 @@ void bql_unlock(void)
                                   false, it_acct_held_file, it_acct_held_line);
         }
         it_acct_held_since = 0;
-        if (it_acct_on) {
+        if (qatomic_read(&it_bql_acct_on)) {
             it_acct_hold_hist[it_acct_bucket(dt)][0]++;
             it_acct_hold_hist[it_acct_bucket(dt)][1] += dt;
             for (int i = 0; i < 64; i++) {

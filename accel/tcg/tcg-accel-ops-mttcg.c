@@ -122,6 +122,7 @@ static void mttcg_request_performance_core(void)
  * halted, which is what lets the two be told apart from out here.
  */
 extern bool it_acct_on;
+extern bool it_bql_acct_on;
 extern bool it_profile_on;
 extern uint64_t it_acct_insns, it_acct_blocks, it_acct_irqs, it_acct_exits;
 extern uint64_t it_acct_lookups, it_acct_jc_misses, it_acct_jc_empty, it_acct_jc_other_pc;
@@ -165,18 +166,25 @@ static int64_t thread_cpu_ns(void)
 static void mttcg_acct_init(void)
 {
     const char *v = getenv("IT_VCPU_ACCT");
+    const char *bql = getenv("LT_BQL_PROF");
+    bool bql_only = bql && strcmp(bql, "off") && strcmp(bql, "0");
 
 #if !defined(CONFIG_DARWIN) && !defined(_WIN32) /* no pthread_getcpuclockid */
     acct_cpu_clock_ok = !pthread_getcpuclockid(pthread_self(), &acct_cpu_clock);
 #endif
-    if (!v) {
+    if (!v && !bql_only) {
         return;
     }
-    it_acct_on = true;
-    acct_interval_ns = (int64_t)(atof(v) > 0 ? atof(v) : 5.0) * 1000000000LL;
+    it_acct_on = v != NULL;
+    qatomic_set(&it_bql_acct_on, true);
+    acct_interval_ns = (int64_t)(v && atof(v) > 0 ? atof(v) : 5.0) *
+                       1000000000LL;
     acct_t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     acct_next_dump = acct_t0 + acct_interval_ns;
     it_acct_cb_enable();
+    fprintf(stderr, "[acct-mode] full=%s bql=on begin-ns %" PRId64
+            " interval-ns %" PRId64 "\n", it_acct_on ? "on" : "off",
+            acct_t0, acct_interval_ns);
 }
 
 /*
@@ -187,7 +195,8 @@ static void mttcg_acct_init(void)
  * running queued work, including v[2]), v[2] BQL waits outside cpu_exec,
  * v[3] BQL waits inside it, v[4] vCPU thread CPU time, v[5] guest
  * instructions. Read from another thread without locks: diagnostics only, a
- * figure can be one exec stale. Zeros unless IT_VCPU_ACCT is on.
+ * figure can be one exec stale. Timing also runs during manual recording or
+ * LT_BQL_PROF; instruction counts require IT_VCPU_ACCT.
  */
 void it_acct_frame_snapshot(int64_t v[6])
 {
@@ -234,6 +243,8 @@ static void mttcg_acct_dump(int64_t now)
             (unsigned long)acct_why_stopped, (unsigned long)acct_why_other,
             it_acct_lookups, it_acct_jc_misses, it_acct_jc_empty,
             it_acct_jc_other_pc, it_acct_pcrel_invals, it_acct_jc_flushes);
+    fprintf(stderr, "[acct]   bounds begin-ns %" PRId64 " end-ns %" PRId64
+            " full=%s\n", acct_t0, now, it_acct_on ? "on" : "off");
     fprintf(stderr, "[acct]   vcpu-bql n %" PRIu64 " wait-ns %" PRIu64 " slow %" PRIu64 "\n",
             it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow);
     for (int i = 0; i < 64 && it_acct_cbs[i].fn; i++) {
@@ -317,7 +328,8 @@ static void *mttcg_cpu_thread_fn(void *arg)
 
     do {
         /* Keep one timing decision across exec and relock, including stop races. */
-        bool timing = it_acct_on || qatomic_read(&it_profile_on);
+        bool timing = qatomic_read(&it_bql_acct_on) ||
+                      qatomic_read(&it_profile_on);
         if (!timing) {
             qatomic_set(&acct_io_mark, 0);
         }
@@ -348,13 +360,15 @@ static void *mttcg_cpu_thread_fn(void *arg)
                 }
                 acct_io_mark = 0;
             }
-            if (it_acct_on && now >= acct_next_dump) {
+            if (qatomic_read(&it_bql_acct_on) && now >= acct_next_dump) {
                 acct_next_dump = now + acct_interval_ns;
                 mttcg_acct_dump(now);
 #ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
-                tb_cache_clear_dump(stderr, (now - acct_t0) / 1e9,
-                                    cpu->cpu_index, TB_JMP_CACHE_SIZE,
-                                    &cpu->tb_jmp_cache->clear_stats);
+                if (it_acct_on) {
+                    tb_cache_clear_dump(stderr, (now - acct_t0) / 1e9,
+                                        cpu->cpu_index, TB_JMP_CACHE_SIZE,
+                                        &cpu->tb_jmp_cache->clear_stats);
+                }
 #endif
             }
         }
