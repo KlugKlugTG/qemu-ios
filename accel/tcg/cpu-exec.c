@@ -1025,6 +1025,68 @@ static inline bool icount_exit_request(CPUState *cpu)
     return cpu->neg.icount_decr.u16.low + cpu->icount_extra == 0;
 }
 
+#ifndef CONFIG_USER_ONLY
+extern bool tcg_masked_irq_fast;
+extern bool tcg_irq_check_prof;
+
+typedef struct IRQCheckSample {
+    uint64_t begin_ns;
+    uint64_t wait_begin_ns;
+    uint64_t acquired_ns;
+    bool masked;
+    bool skipped;
+    bool delivered;
+    bool special;
+} IRQCheckSample;
+
+/* Independent CPU-0 diagnostic: no instruction accounting or BQL tables. */
+static void irq_check_profile(const IRQCheckSample *sample)
+{
+    static struct {
+        uint64_t begin_ns, checks, masked, skipped, delivered, unhandled;
+        uint64_t special, masked_delivered, check_ns, wait_ns;
+        uint64_t masked_ns, masked_wait_ns, max_check_ns;
+    } p;
+    uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    uint64_t elapsed = now - sample->begin_ns;
+    uint64_t wait = sample->acquired_ns ?
+                    sample->acquired_ns - sample->wait_begin_ns : 0;
+
+    if (!p.begin_ns) {
+        p.begin_ns = sample->begin_ns;
+    }
+    p.checks++;
+    p.masked += sample->masked;
+    p.skipped += sample->skipped;
+    p.delivered += sample->delivered;
+    p.special += sample->special;
+    p.unhandled += !sample->skipped && !sample->delivered && !sample->special;
+    p.masked_delivered += sample->masked && sample->delivered;
+    p.check_ns += elapsed;
+    p.wait_ns += wait;
+    if (sample->masked) {
+        p.masked_ns += elapsed;
+        p.masked_wait_ns += wait;
+    }
+    p.max_check_ns = MAX(p.max_check_ns, elapsed);
+    if (now - p.begin_ns >= 5000000000ULL) {
+        fprintf(stderr, "[irq-check] fast=%s begin-ns %" PRIu64
+                " end-ns %" PRIu64 " checks %" PRIu64 " masked %" PRIu64
+                " skipped %" PRIu64 " delivered %" PRIu64
+                " unhandled %" PRIu64 " special %" PRIu64
+                " masked-delivered %" PRIu64 " check-ns %" PRIu64
+                " wait-ns %" PRIu64 " masked-ns %" PRIu64
+                " masked-wait-ns %" PRIu64 " max-check-ns %" PRIu64 "\n",
+                tcg_masked_irq_fast ? "on" : "off", p.begin_ns, now,
+                p.checks, p.masked, p.skipped, p.delivered, p.unhandled,
+                p.special, p.masked_delivered, p.check_ns, p.wait_ns,
+                p.masked_ns, p.masked_wait_ns, p.max_check_ns);
+        memset(&p, 0, sizeof(p));
+        p.begin_ns = now;
+    }
+}
+#endif
+
 static inline bool cpu_handle_interrupt(CPUState *cpu,
                                         TranslationBlock **last_tb)
 {
@@ -1059,30 +1121,77 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
         *last_tb = NULL;
     }
     if (unlikely(cpu_test_interrupt(cpu, ~0))) {
+        const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
+        bool profile = tcg_irq_check_prof && cpu->cpu_index == 0;
+        IRQCheckSample sample = { 0 };
+        int request_snapshot = qatomic_load_acquire(&cpu->interrupt_request);
+
+        if (profile) {
+            sample.begin_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        }
+        if ((tcg_masked_irq_fast || profile) &&
+            replay_mode == REPLAY_MODE_NONE && !cpu->singlestep_enabled &&
+            tcg_ops->cpu_interrupts_masked) {
+            sample.masked = tcg_ops->cpu_interrupts_masked(cpu, request_snapshot);
+        }
+        if (tcg_masked_irq_fast && sample.masked) {
+            /*
+             * Leave the IRQ/FIQ level pending. Unmasking ends/rechecks the TB.
+             * Requests arriving after the snapshot keep their vCPU kick;
+             * only EXITTB in this snapshot is acknowledged, as above.
+             */
+            if (request_snapshot & CPU_INTERRUPT_EXITTB) {
+                cpu_reset_interrupt(cpu, CPU_INTERRUPT_EXITTB);
+                *last_tb = NULL;
+            }
+            if (profile) {
+                sample.skipped = true;
+                irq_check_profile(&sample);
+            }
+            goto interrupts_done;
+        }
+        if (profile) {
+            sample.wait_begin_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        }
         bql_lock();
+        if (profile) {
+            sample.acquired_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        }
         if (cpu_test_interrupt(cpu, CPU_INTERRUPT_DEBUG)) {
             cpu_reset_interrupt(cpu, CPU_INTERRUPT_DEBUG);
             cpu->exception_index = EXCP_DEBUG;
             bql_unlock();
+            if (profile) {
+                sample.special = true;
+                irq_check_profile(&sample);
+            }
             return true;
         }
         if (replay_mode == REPLAY_MODE_PLAY && !replay_has_interrupt()) {
             /* Do nothing */
+            sample.special = true;
         } else if (cpu_test_interrupt(cpu, CPU_INTERRUPT_HALT)) {
             replay_interrupt();
             cpu_reset_interrupt(cpu, CPU_INTERRUPT_HALT);
             cpu->halted = 1;
             cpu->exception_index = EXCP_HLT;
             bql_unlock();
+            if (profile) {
+                sample.special = true;
+                irq_check_profile(&sample);
+            }
             return true;
         } else {
-            const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
             int interrupt_request = cpu->interrupt_request;
 
             if (cpu_test_interrupt(cpu, CPU_INTERRUPT_RESET)) {
                 replay_interrupt();
                 tcg_ops->cpu_exec_reset(cpu);
                 bql_unlock();
+                if (profile) {
+                    sample.special = true;
+                    irq_check_profile(&sample);
+                }
                 return true;
             }
 
@@ -1098,6 +1207,7 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
              * and via longjmp via cpu_loop_exit.
              */
             if (tcg_ops->cpu_exec_interrupt(cpu, interrupt_request)) {
+                sample.delivered = true;
                 if (unlikely(it_acct_on)) {
                     it_acct_irqs++;
                 }
@@ -1113,6 +1223,9 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
                 if (unlikely(cpu->singlestep_enabled)) {
                     cpu->exception_index = EXCP_DEBUG;
                     bql_unlock();
+                    if (profile) {
+                        irq_check_profile(&sample);
+                    }
                     return true;
                 }
                 cpu->exception_index = -1;
@@ -1128,7 +1241,11 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
 
         /* If we exit via cpu_loop_exit/longjmp it is reset in cpu_exec */
         bql_unlock();
+        if (profile) {
+            irq_check_profile(&sample);
+        }
     }
+ interrupts_done:
 #endif /* !CONFIG_USER_ONLY */
 
     /*

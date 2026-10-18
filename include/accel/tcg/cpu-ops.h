@@ -180,6 +180,15 @@ struct TCGCPUOps {
     bool (*do_interrupt_needs_bql)(CPUState *cpu);
     /** @cpu_exec_interrupt: Callback for processing interrupts in cpu_exec */
     bool (*cpu_exec_interrupt)(CPUState *cpu, int interrupt_request);
+    /**
+     * @cpu_interrupts_masked: Optional conservative precheck on the vCPU
+     * thread without BQL. True means this snapshot contains only external
+     * interrupts which cannot currently be delivered, optionally with EXITTB.
+     * Must only read vCPU-owned state and must not acknowledge any interrupt.
+     * Unknown bits and special events must return false. The caller handles
+     * EXITTB and preserves kicks for requests arriving after the snapshot.
+     */
+    bool (*cpu_interrupts_masked)(CPUState *cpu, int interrupt_request);
     /** @cpu_exec_reset: Callback for reset in cpu_exec.  */
     void (*cpu_exec_reset)(CPUState *cpu);
     /**

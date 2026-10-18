@@ -88,6 +88,8 @@ bool one_insn_per_tb;
 bool tcg_cross_page_chain;
 bool tcg_indirect_cache;
 bool tcg_inline_tb_lookup;
+bool tcg_masked_irq_fast;
+bool tcg_irq_check_prof;
 
 #ifndef CONFIG_USER_ONLY
 static void tcg_vm_change_state(void *opaque, bool running, RunState state)
@@ -116,6 +118,16 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
                            strcmp(inline_lookup, "0");
     fprintf(stderr, "[tcg] inline-tb-lookup=%s (accounting uses legacy path)\n",
             tcg_inline_tb_lookup ? "on" : "off");
+
+    const char *masked_irq = getenv("LT_MASKED_IRQ_FAST");
+    const char *irq_prof = getenv("LT_IRQ_CHECK_PROF");
+    tcg_masked_irq_fast = masked_irq && strcmp(masked_irq, "off") &&
+                          strcmp(masked_irq, "0");
+    tcg_irq_check_prof = irq_prof && strcmp(irq_prof, "off") &&
+                         strcmp(irq_prof, "0");
+    fprintf(stderr, "[tcg] masked-irq-fast=%s irq-check-prof=%s\n",
+            tcg_masked_irq_fast ? "on" : "off",
+            tcg_irq_check_prof ? "on" : "off");
 
 #ifndef CONFIG_USER_ONLY
     CPUClass *cc = CPU_CLASS(object_class_by_name(target_cpu_type()));
