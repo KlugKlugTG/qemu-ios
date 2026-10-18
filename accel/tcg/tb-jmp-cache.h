@@ -42,6 +42,9 @@ typedef struct CPUJumpCache {
     CPUJumpCacheBank *bank;
     /* The bank epoch this cache was last emptied in; stale if behind. */
     uint64_t epoch;
+    /* cpu->neg.ibtc_ctx while current, and the bank ibtc_inval it saw. */
+    uint32_t ibtc_id;
+    uint32_t ibtc_inval;
     struct {
         TranslationBlock *tb;
         vaddr pc;
@@ -72,11 +75,30 @@ typedef struct CPUJumpCache {
 struct CPUJumpCacheBank {
     struct rcu_head rcu;
     uint64_t epoch;                         /* atomic */
+    uint32_t ibtc_inval;                    /* atomic; bumped by other threads */
     uint64_t clock;                         /* owner vCPU only */
     uint64_t key[TB_JMP_CACHE_CONTEXTS];    /* owner vCPU only */
     uint64_t used[TB_JMP_CACHE_CONTEXTS];   /* owner vCPU only; 0: unkeyed */
     CPUJumpCache cache[TB_JMP_CACHE_CONTEXTS];
 };
+
+/*
+ * Give the current cache @jc of @cpu a new indirect-branch context id, so
+ * that no site cache filled under the old one matches. Owning vCPU, or with
+ * it stopped.
+ */
+static inline void tb_jmp_cache_new_ibtc_id(CPUState *cpu, CPUJumpCache *jc)
+{
+    static uint32_t next;
+    uint32_t id;
+
+    do {
+        id = qatomic_fetch_inc(&next) + 1;
+    } while (id == 0);
+    jc->ibtc_id = id;
+    jc->ibtc_inval = qatomic_read(&jc->bank->ibtc_inval);
+    qatomic_set(&cpu->neg.ibtc_ctx, id);
+}
 
 static inline void tb_jmp_cache_empty(CPUJumpCache *jc)
 {

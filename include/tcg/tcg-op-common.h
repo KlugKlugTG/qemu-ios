@@ -83,6 +83,21 @@ void tcg_gen_goto_tb(unsigned idx);
  */
 void tcg_gen_lookup_and_goto_ptr(void);
 
+/**
+ * tcg_gen_lookup_and_goto_ptr_cached() - tcg_gen_lookup_and_goto_ptr with a
+ * one-entry cache of this exit's last target
+ * @site_key: the target PC and any state the next TB's flags depend on that
+ *            this TB's flags do not fix, as one 32-bit value
+ *
+ * Only for an exit where the next TB's flags, cs_base and cflags are a function
+ * of this TB's and @site_key: the jump then goes straight to the code last
+ * found for @site_key in the same context (address space), with no call.
+ * The context is part of the key, so a guest switching address spaces does
+ * not see another's targets; within one, the guest must not map a virtual
+ * code page to different code in place (as for cross-page chaining).
+ */
+void tcg_gen_lookup_and_goto_ptr_cached(TCGv_i32 site_key);
+
 void tcg_gen_plugin_cb(unsigned from);
 void tcg_gen_plugin_mem_cb(TCGv_i64 addr, unsigned meminfo);
 

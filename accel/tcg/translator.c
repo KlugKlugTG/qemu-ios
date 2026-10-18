@@ -134,6 +134,21 @@ bool translator_use_goto_tb(DisasContextBase *db, vaddr dest)
            qatomic_read(&tcg_cross_page_chain);
 }
 
+bool translator_use_indirect_cache(DisasContextBase *db)
+{
+    static int ir_cache = -1;
+
+    if (!qatomic_read(&tcg_indirect_cache) ||
+        (tb_cflags(db->tb) & (CF_NO_GOTO_PTR | CF_USE_ICOUNT | CF_PARALLEL))) {
+        return false;
+    }
+    /* The experimental IR cache would replay the slot's address. */
+    if (ir_cache < 0) {
+        ir_cache = getenv("LT_TCG_IR_CACHE_ENABLE") != NULL;
+    }
+    return !ir_cache;
+}
+
 void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
                      vaddr pc, void *host_pc, const TranslatorOps *ops,
                      DisasContextBase *db)

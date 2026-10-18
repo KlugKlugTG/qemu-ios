@@ -379,6 +379,12 @@ typedef struct CPUNegativeOffsetState {
 #endif
     IcountDecr icount_decr;
     bool can_do_io;
+    /*
+     * Names the current TB jump cache (address space) and its contents for
+     * the indirect-branch site caches in generated code: a new value whenever
+     * that cache is emptied or a TB is invalidated. Never 0.
+     */
+    uint32_t ibtc_ctx;
 } CPUNegativeOffsetState;
 
 struct KVMState;

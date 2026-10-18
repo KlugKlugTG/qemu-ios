@@ -336,6 +336,8 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 
     gen_code_buf = tcg_ctx->code_gen_ptr;
     tb->tc.ptr = tcg_splitwx_to_rx(gen_code_buf);
+    tb->ibtc.key = 0;
+    tb->ibtc.host = NULL;
     if (!(s.cflags & CF_PCREL)) {
         tb->pc = s.pc;
     }
@@ -694,6 +696,20 @@ void tcg_flush_jmp_cache(CPUState *cpu)
     qatomic_inc(&jc->bank->epoch);
     tb_jmp_cache_empty(jc);
     jc->epoch = qatomic_read(&jc->bank->epoch);
+
+    /*
+     * The indirect-branch site caches must stop matching too: they hold host
+     * code pointers, possibly of a TB invalidated just now. The owning vCPU
+     * (or anyone while it is stopped) renews its context id here; from
+     * another thread the vCPU is kicked out of its TBs and renews it in
+     * cpu_exec_loop before it runs another.
+     */
+    if (qemu_cpu_is_self(cpu)) {
+        tb_jmp_cache_new_ibtc_id(cpu, jc);
+    } else {
+        qatomic_inc(&jc->bank->ibtc_inval);
+        cpu_exit(cpu);
+    }
 }
 
 /*
@@ -730,8 +746,14 @@ void tcg_switch_jmp_cache(CPUState *cpu, uint64_t key)
     if (jc->epoch != epoch) {
         tb_jmp_cache_empty(jc);
         jc->epoch = epoch;
+        jc->ibtc_id = 0;
     }
     qatomic_set(&cpu->tb_jmp_cache, jc);
+    if (jc->ibtc_id == 0 || jc->ibtc_inval != qatomic_read(&bank->ibtc_inval)) {
+        tb_jmp_cache_new_ibtc_id(cpu, jc);
+    } else {
+        qatomic_set(&cpu->neg.ibtc_ctx, jc->ibtc_id);
+    }
 }
 
 /*
@@ -757,6 +779,7 @@ int tcg_flush_jmp_cache_key(CPUState *cpu, uint64_t key)
         if (bank->used[i] && bank->key[i] == key) {
             if (i == current) {
                 tb_jmp_cache_empty(jc);
+                tb_jmp_cache_new_ibtc_id(cpu, jc);
                 return 1;
             }
             bank->cache[i].epoch = qatomic_read(&bank->epoch) - 1;

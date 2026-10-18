@@ -1310,6 +1310,27 @@ static void gen_goto_ptr(void)
     tcg_gen_lookup_and_goto_ptr();
 }
 
+/*
+ * The exit of an insn that only wrote the PC (and with BX the Thumb bit):
+ * every other part of the next TB's flags is this TB's, so the PC and Thumb
+ * bit key a cache of this exit's last target. Not inside an IT block, whose
+ * state the key would also need, and not for M-profile, where a branch can be
+ * an exception return.
+ */
+static void gen_goto_ptr_indirect(DisasContext *s)
+{
+    if (translator_use_indirect_cache(&s->base) && !s->condexec_mask &&
+        !arm_dc_feature(s, ARM_FEATURE_M)) {
+        TCGv_i32 key = tcg_temp_new_i32();
+        QEMU_BUILD_BUG_ON(sizeof_field(CPUARMState, thumb) != 1);
+        tcg_gen_ld8u_i32(key, tcg_env, offsetof(CPUARMState, thumb));
+        tcg_gen_or_i32(key, key, cpu_R[15]);
+        tcg_gen_lookup_and_goto_ptr_cached(key);
+    } else {
+        gen_goto_ptr();
+    }
+}
+
 /* This will end the TB but doesn't guarantee we'll return to
  * cpu_loop_exec. Any live exit_requests will be processed as we
  * enter the next TB.
@@ -6805,9 +6826,10 @@ static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
             break;
         case DISAS_UPDATE_NOCHAIN:
             gen_update_pc(dc, curr_insn_len(dc));
-            /* fall through */
-        case DISAS_JUMP:
             gen_goto_ptr();
+            break;
+        case DISAS_JUMP:
+            gen_goto_ptr_indirect(dc);
             break;
         case DISAS_UPDATE_EXIT:
             gen_update_pc(dc, curr_insn_len(dc));

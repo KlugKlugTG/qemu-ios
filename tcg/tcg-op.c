@@ -2568,3 +2568,42 @@ void tcg_gen_lookup_and_goto_ptr(void)
     tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
     tcg_temp_free_ptr(ptr);
 }
+
+void tcg_gen_lookup_and_goto_ptr_cached(TCGv_i32 site_key)
+{
+    TranslationBlock *tb = tcg_ctx->gen_tb;
+    TCGv_ptr slot, ptr;
+    TCGv_i64 key, cached;
+    TCGLabel *miss;
+
+    if (tb->cflags & CF_NO_GOTO_PTR) {
+        tcg_gen_exit_tb(NULL, 0);
+        return;
+    }
+
+    plugin_gen_disable_mem_helpers();
+    /* The slot is in this TB, next to its code; tb_gen_code zeroes it. */
+    slot = tcg_constant_ptr(&tb->ibtc);
+    key = tcg_temp_new_i64();
+    cached = tcg_temp_ebb_new_i64();
+    tcg_gen_extu_i32_i64(key, site_key);
+    tcg_gen_ld32u_i64(cached, tcg_env,
+                      offsetof(CPUState, neg.ibtc_ctx) - sizeof(CPUState));
+    tcg_gen_deposit_i64(key, key, cached, 32, 32);
+    tcg_gen_ld_i64(cached, slot, offsetof(TCGIndirectSlot, key));
+
+    miss = gen_new_label();
+    tcg_gen_brcond_i64(TCG_COND_NE, key, cached, miss);
+    tcg_temp_free_i64(cached);
+    ptr = tcg_temp_ebb_new_ptr();
+    tcg_gen_ld_ptr(ptr, slot, offsetof(TCGIndirectSlot, host));
+    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+    tcg_temp_free_ptr(ptr);
+
+    gen_set_label(miss);
+    ptr = tcg_temp_ebb_new_ptr();
+    gen_helper_lookup_tb_ptr_cached(ptr, tcg_env, slot, key);
+    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+    tcg_temp_free_ptr(ptr);
+    tcg_temp_free_i64(key);
+}

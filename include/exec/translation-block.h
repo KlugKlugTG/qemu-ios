@@ -43,6 +43,17 @@ struct tb_tc {
     size_t size;
 };
 
+/*
+ * The target last taken by a TB's indirect exit, when that exit has a cache
+ * (tcg_gen_lookup_and_goto_ptr_cached): @key, a target-specific value for the
+ * target PC and state with the context id (cpu->neg.ibtc_ctx) in its high 32
+ * bits, and the host code to run for it. A key of 0 matches nothing.
+ */
+typedef struct TCGIndirectSlot {
+    uint64_t key;
+    const void *host;
+} TCGIndirectSlot;
+
 struct TranslationBlock {
     /*
      * Guest PC corresponding to this block.  This must be the true
@@ -146,6 +157,9 @@ struct TranslationBlock {
     uintptr_t jmp_list_head;
     uintptr_t jmp_list_next[2];
     uintptr_t jmp_dest[2];
+
+    /* Read and written by generated code and helper_lookup_tb_ptr_cached. */
+    TCGIndirectSlot ibtc;
 };
 
 /* The alignment given to TranslationBlock during allocation. */

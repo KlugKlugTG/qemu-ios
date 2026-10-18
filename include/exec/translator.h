@@ -160,6 +160,17 @@ void translator_loop(CPUState *cpu, TranslationBlock *tb, int *max_insns,
 bool translator_use_goto_tb(DisasContextBase *db, vaddr dest);
 
 /**
+ * translator_use_indirect_cache
+ * @db: Disassembly context
+ *
+ * Return true if an indirect exit of this TB may use
+ * tcg_gen_lookup_and_goto_ptr_cached: the accelerator's indirect-cache
+ * option is on and the TB runs with one vCPU, no icount and may goto_ptr
+ * (gdb single-step clears that).
+ */
+bool translator_use_indirect_cache(DisasContextBase *db);
+
+/**
  * translator_io_start
  * @db: Disassembly context
  *

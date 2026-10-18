@@ -53,6 +53,7 @@ struct TCGState {
     OnOffAuto mttcg_enabled;
     bool one_insn_per_tb;
     bool cross_page_chain;
+    bool indirect_cache;
     int splitwx_enabled;
     unsigned long tb_size;
 };
@@ -85,6 +86,7 @@ static void tcg_accel_instance_init(Object *obj)
 
 bool one_insn_per_tb;
 bool tcg_cross_page_chain;
+bool tcg_indirect_cache;
 
 #ifndef CONFIG_USER_ONLY
 static void tcg_vm_change_state(void *opaque, bool running, RunState state)
@@ -257,6 +259,19 @@ static void tcg_set_cross_page_chain(Object *obj, bool value, Error **errp)
     qatomic_set(&tcg_cross_page_chain, value);
 }
 
+static bool tcg_get_indirect_cache(Object *obj, Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+    return s->indirect_cache;
+}
+
+static void tcg_set_indirect_cache(Object *obj, bool value, Error **errp)
+{
+    TCGState *s = TCG_STATE(obj);
+    s->indirect_cache = value;
+    qatomic_set(&tcg_indirect_cache, value);
+}
+
 static int tcg_gdbstub_supported_sstep_flags(AccelState *as)
 {
     /*
@@ -310,6 +325,13 @@ static void tcg_accel_class_init(ObjectClass *oc, const void *data)
     object_class_property_set_description(oc, "cross-page-chain",
         "Chain direct jumps between guest pages (the guest must not remap "
         "a code page to different code while the old page is unchanged)");
+
+    object_class_property_add_bool(oc, "indirect-cache",
+                                   tcg_get_indirect_cache,
+                                   tcg_set_indirect_cache);
+    object_class_property_set_description(oc, "indirect-cache",
+        "Cache each indirect branch's last target in its TB, per address "
+        "space (single vCPU; same guest condition as cross-page-chain)");
 }
 
 static const TypeInfo tcg_accel_type = {

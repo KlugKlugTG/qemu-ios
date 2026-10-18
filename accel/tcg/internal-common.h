@@ -19,6 +19,7 @@ extern int64_t max_advance;
 
 extern bool one_insn_per_tb;
 extern bool tcg_cross_page_chain;
+extern bool tcg_indirect_cache;
 
 extern bool icount_align_option;
 

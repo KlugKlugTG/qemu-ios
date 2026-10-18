@@ -429,6 +429,58 @@ const void *HELPER(lookup_tb_ptr)(CPUArchState *env)
     return tb->tc.ptr;
 }
 
+/**
+ * helper_lookup_tb_ptr_cached: helper_lookup_tb_ptr for an indirect-branch
+ * site with a cache (tcg_gen_lookup_and_goto_ptr_cached)
+ * @env: current cpu state
+ * @slot: the site's cache
+ * @key: the site's key for the current target, computed by generated code
+ *
+ * Called when the site's cache does not hold @key. Looks the TB up as
+ * helper_lookup_tb_ptr does and, if found, makes it the site's target, so
+ * that the next jump to the same target in the same context skips this call.
+ */
+const void *HELPER(lookup_tb_ptr_cached)(CPUArchState *env, void *slot,
+                                         uint64_t key)
+{
+    CPUState *cpu = env_cpu(env);
+    TCGIndirectSlot *site = slot;
+    TranslationBlock *tb;
+
+    cpu->neg.can_do_io = true;
+
+    TCGTBCPUState s = cpu->cc->tcg_ops->get_tb_cpu_state(cpu);
+    s.cflags = curr_cflags(cpu);
+
+    if (check_for_breakpoints(cpu, s.pc, &s.cflags)) {
+        cpu_loop_exit(cpu);
+    }
+
+    tb = tb_lookup(cpu, s);
+    if (tb == NULL) {
+        return tcg_code_gen_epilogue;
+    }
+
+    /*
+     * The key names the context it was computed in (cpu->neg.ibtc_ctx at
+     * the jump); store it only if that is still current, and never with
+     * breakpoints, which the cached path would skip. The pointer is written
+     * first: only this vCPU reads the slot (single-vCPU guests only).
+     */
+    if ((uint32_t)(key >> 32) == qatomic_read(&cpu->neg.ibtc_ctx) &&
+        (uint32_t)(key >> 32) != 0 &&
+        QTAILQ_EMPTY(&cpu->breakpoints)) {
+        qatomic_set(&site->host, tb->tc.ptr);
+        qatomic_set(&site->key, key);
+    }
+
+    if (qemu_loglevel_mask(CPU_LOG_TB_CPU | CPU_LOG_EXEC)) {
+        log_cpu_exec(s.pc, cpu, tb);
+    }
+
+    return tb->tc.ptr;
+}
+
 /* Return the current PC from CPU, which may be cached in TB. */
 static vaddr log_pc(CPUState *cpu, const TranslationBlock *tb)
 {
@@ -1163,6 +1215,15 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                 continue;
             }
 #endif
+
+            /* Another thread invalidated TBs: see tcg_flush_jmp_cache. */
+            {
+                CPUJumpCache *jc = cpu->tb_jmp_cache;
+                if (unlikely(jc->ibtc_id == 0 ||
+                             jc->ibtc_inval != qatomic_read(&jc->bank->ibtc_inval))) {
+                    tb_jmp_cache_new_ibtc_id(cpu, jc);
+                }
+            }
 
             tb = tb_lookup(cpu, s);
             if (tb == NULL) {
