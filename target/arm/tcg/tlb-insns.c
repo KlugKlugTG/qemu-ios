@@ -125,7 +125,8 @@ static void tlbiasid_write(CPUARMState *env, const ARMCPRegInfo *ri,
     if (tlb_force_broadcast(env)) {
         tlb_flush_all_cpus_synced(cs);
     } else {
-        tlb_flush(cs);
+        /* The ASID as written to CONTEXTIDR (see contextidr_write) */
+        tlb_flush_context(cs, extract64(value, 0, 8));
     }
 }
 

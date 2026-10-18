@@ -447,6 +447,22 @@ void tlb_flush_switch_context(CPUState *cpu, uint64_t key)
                                                         TLB_FLUSH_KEEP_JMP_CACHE));
 }
 
+void tlb_flush_context(CPUState *cpu, uint64_t key)
+{
+    assert_cpu_is_self(cpu);
+    switch (tcg_flush_jmp_cache_key(cpu, key)) {
+    case 1:
+        tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT(ALL_MMUIDX_BITS |
+                                                            TLB_FLUSH_KEEP_JMP_CACHE));
+        break;
+    case 0:
+        break;  /* another address space: nothing of it is in the TLB */
+    default:
+        tlb_flush(cpu);
+        break;
+    }
+}
+
 void tlb_flush_by_mmuidx_all_cpus_synced(CPUState *src_cpu, MMUIdxMap idxmap)
 {
     const run_on_cpu_func fn = tlb_flush_by_mmuidx_async_work;

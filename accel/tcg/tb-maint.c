@@ -897,17 +897,23 @@ static inline void tb_jmp_unlink(TranslationBlock *dest)
     qemu_spin_unlock(&dest->jmp_lock);
 }
 
+extern bool it_acct_on;
+extern uint64_t it_acct_pcrel_invals;
+
 static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
 {
     CPUState *cpu;
 
     if (tb_cflags(tb) & CF_PCREL) {
+        if (unlikely(it_acct_on)) {
+            it_acct_pcrel_invals++;
+        }
         /* A TB may be at any virtual address */
         CPU_FOREACH(cpu) {
             tcg_flush_jmp_cache(cpu);
         }
     } else {
-        uint32_t h = tb_jmp_cache_hash_func(tb->pc);
+        uint32_t h = tb_jmp_cache_hash_func(tb->pc, tb->cs_base);
 
         CPU_FOREACH(cpu) {
             CPUJumpCache *jc = cpu->tb_jmp_cache;

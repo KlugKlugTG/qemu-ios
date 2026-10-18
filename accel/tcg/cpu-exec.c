@@ -224,6 +224,10 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
  *
  * Returns: an existing translation block or NULL.
  */
+extern bool it_acct_on;
+extern uint64_t it_acct_lookups, it_acct_jc_misses, it_acct_jc_empty, it_acct_jc_other_pc;
+extern uint64_t it_acct_flagbit[3][32];
+
 static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
 {
     TranslationBlock *tb;
@@ -233,9 +237,12 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
     /* we should never be trying to look up an INVALID tb */
     tcg_debug_assert(!(s.cflags & CF_INVALID));
 
-    hash = tb_jmp_cache_hash_func(s.pc);
+    hash = tb_jmp_cache_hash_func(s.pc, s.cs_base);
     jc = cpu->tb_jmp_cache;
 
+    if (unlikely(it_acct_on)) {
+        it_acct_lookups++;
+    }
     tb = qatomic_read(&jc->array[hash].tb);
     if (likely(tb &&
                jc->array[hash].pc == s.pc &&
@@ -243,6 +250,24 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
                tb->flags == s.flags &&
                tb_cflags(tb) == s.cflags)) {
         goto hit;
+    }
+    if (unlikely(it_acct_on)) {
+        it_acct_jc_misses++;
+        if (!tb) {
+            it_acct_jc_empty++;
+        } else if (jc->array[hash].pc != s.pc) {
+            it_acct_jc_other_pc++;
+        } else {
+            uint64_t x[3] = { tb->cs_base ^ s.cs_base, tb->flags ^ s.flags,
+                              tb_cflags(tb) ^ s.cflags };
+            for (int k = 0; k < 3; k++) {
+                for (int b = 0; b < 32; b++) {
+                    if (x[k] & (1ull << b)) {
+                        it_acct_flagbit[k][b]++;
+                    }
+                }
+            }
+        }
     }
 
     tb = tb_htable_lookup(cpu, s);
@@ -457,6 +482,13 @@ uint64_t it_acct_insns;     /* guest instructions handed to the engine */
 uint64_t it_acct_blocks;    /* translation blocks entered */
 uint64_t it_acct_irqs;      /* interrupts actually delivered to the guest */
 uint64_t it_acct_exits;     /* exits to the main loop (kicks) */
+uint64_t it_acct_lookups;   /* TB lookups by guest PC (indirect branches, exits) */
+uint64_t it_acct_jc_misses; /* of those, jump-cache misses that went to the QHT */
+uint64_t it_acct_jc_empty;  /* misses on an empty (flushed) slot */
+uint64_t it_acct_jc_other_pc; /* misses on a slot holding another PC (collision) */
+uint64_t it_acct_flagbit[3][32]; /* same-PC misses: differing cs_base/flags/cflags bits */
+uint64_t it_acct_pcrel_invals;  /* invalidated CF_PCREL TBs (each emptied every jump cache) */
+uint64_t it_acct_jc_flushes;    /* whole jump-cache flushes */
 
 static GHashTable *guest_prof;
 static uint64_t guest_prof_samples;
@@ -1129,7 +1161,7 @@ cpu_exec_loop(CPUState *cpu, SyncClocks *sc)
                  * We add the TB in the virtual pc hash table
                  * for the fast lookup
                  */
-                h = tb_jmp_cache_hash_func(s.pc);
+                h = tb_jmp_cache_hash_func(s.pc, s.cs_base);
                 jc = cpu->tb_jmp_cache;
                 jc->array[h].pc = s.pc;
                 qatomic_set(&jc->array[h].tb, tb);

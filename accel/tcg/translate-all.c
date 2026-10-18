@@ -678,9 +678,16 @@ void cpu_io_recompile(CPUState *cpu, uintptr_t retaddr)
  * Called by generic code at e.g. cpu reset after cpu creation,
  * therefore we must be prepared to allocate the jump cache.
  */
+extern bool it_acct_on;
+extern uint64_t it_acct_jc_flushes;
+
 void tcg_flush_jmp_cache(CPUState *cpu)
 {
     CPUJumpCache *jc = cpu->tb_jmp_cache;
+
+    if (unlikely(it_acct_on)) {
+        it_acct_jc_flushes++;
+    }
 
     /* During early initialization, the cache may not yet be allocated. */
     if (unlikely(jc == NULL)) {
@@ -730,4 +737,36 @@ void tcg_switch_jmp_cache(CPUState *cpu, uint64_t key)
         jc->epoch = epoch;
     }
     qatomic_set(&cpu->tb_jmp_cache, jc);
+}
+
+/*
+ * Empty the jump cache kept for address space @key. Returns 1 if @key is
+ * the current address space, 0 if it is another (now stale), and -1 if the
+ * current cache has no key yet, when the caller must flush everything.
+ */
+int tcg_flush_jmp_cache_key(CPUState *cpu, uint64_t key)
+{
+    CPUJumpCache *jc = cpu->tb_jmp_cache;
+    CPUJumpCacheBank *bank;
+    int current;
+
+    if (unlikely(jc == NULL)) {
+        return -1;
+    }
+    bank = jc->bank;
+    current = jc - bank->cache;
+    if (!bank->used[current]) {
+        return -1;
+    }
+    for (int i = 0; i < TB_JMP_CACHE_CONTEXTS; i++) {
+        if (bank->used[i] && bank->key[i] == key) {
+            if (i == current) {
+                tb_jmp_cache_empty(jc);
+                return 1;
+            }
+            bank->cache[i].epoch = qatomic_read(&bank->epoch) - 1;
+            return 0;
+        }
+    }
+    return 0;
 }
