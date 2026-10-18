@@ -313,6 +313,29 @@ static void ios_frame_trace(uint64_t ns, uint64_t serial)
  * that would only show up under load. This is the ONLY copy -- the app reads
  * the published buffer in place.
  */
+/*
+ * A frame's timestamp is the frame interrupt it was latched on, when that is
+ * known (ipod_lcd_vsync_due, main loop only): an exact 16.67 ms grid that a
+ * front end can present on, where the capture time carries the main loop's
+ * dispatch jitter (+/-2 ms on a phone, enough to land a frame on the wrong
+ * refresh of a 120 Hz panel). A capture with no fresh vsync (QEMU's display
+ * poll, a screendump) is stamped when it happens.
+ */
+static int64_t ios_vsync_due_ns;
+
+static void ios_note_vsync_due(int64_t realtime_ns)
+{
+    ios_vsync_due_ns = realtime_ns;
+}
+
+static int64_t ios_frame_due(int64_t now)
+{
+    int64_t due = ios_vsync_due_ns;
+
+    ios_vsync_due_ns = 0;
+    return due && due <= now && now - due < 16666667 ? due : now;
+}
+
 static void ios_capture(DisplaySurface *surface)
 {
     int w = surface_width(surface);
@@ -376,7 +399,7 @@ static void ios_capture(DisplaySurface *surface)
     ios.published = next;
     ios.serial++;
     ios_frame_count(&ios_frame_counters.publications);
-    ios.timestamp_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    ios.timestamp_ns = ios_frame_due(qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
     qemu_mutex_unlock(&ios.frame_lock);
 
     ios_frame_trace(ios.timestamp_ns, ios.serial);
@@ -586,6 +609,7 @@ void qemu_ios_ui_vm_started(void)
         ios.publish_bh = qemu_bh_new(ios_publish_bh, NULL);
 #endif
         register_displaychangelistener(&ios.dcl);
+        ipod_lcd_vsync_due = ios_note_vsync_due;
     }
     qatomic_set(&portable_paused, !runstate_is_running());
     qemu_add_vm_change_state_handler(portable_runstate_changed, NULL);

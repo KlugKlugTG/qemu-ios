@@ -171,6 +171,15 @@ void lcd_changebrightness(int brightness);
  */
 void it_display_set_orientation(uint32_t orientation);
 
+/*
+ * The host clock time (QEMU_CLOCK_REALTIME) a frame interrupt was due, before
+ * the frame it latches is pushed: on the panel's exact 60 Hz grid, unlike the
+ * moment the main loop got round to the tick. A front end can present on that
+ * grid instead of on the jitter of the push (qemu-ios-ui.c stamps frames with
+ * it). NULL unless a front end listens.
+ */
+extern void (*ipod_lcd_vsync_due)(int64_t realtime_ns);
+
 /* The S5L8920's CLCD scans out through its DART (dart0): window 1 holds an IOVA. */
 void ipod_lcd_set_iommu(DeviceState *lcd, hwaddr (*xlate)(void *opaque, uint32_t va, unsigned sid),
                         void *opaque);

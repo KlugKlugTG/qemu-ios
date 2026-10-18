@@ -1324,10 +1324,18 @@ static const QemuInputHandler ipod_touch_lcd_mtt_handler = {
  *    phase. Skipped when nothing is listening (-display none), where the blit
  *    would be pure cost.
  */
+void (*ipod_lcd_vsync_due)(int64_t realtime_ns);
+
 static void refresh_timer_tick(void *opaque)
 {
     IPodTouchLCDState *s = (IPodTouchLCDState *)opaque;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
+    /* The virtual clock is the host's less time spent paused, so the deadline
+     * maps across by how late this tick runs. */
+    if (ipod_lcd_vsync_due && !lcd_vsync_legacy() && s->next_vsync <= now) {
+        ipod_lcd_vsync_due(qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - (now - s->next_vsync));
+    }
 
     if (lcd_frametrace()) {
         lcd_ft("vsync", (uint32_t)(now - s->next_vsync));
