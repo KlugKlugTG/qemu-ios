@@ -28,6 +28,32 @@
 #include "decode-vfp.c.inc"
 #include "decode-vfp-uncond.c.inc"
 
+/* Select helpers during translation, with no runtime switch branch in the
+ * default path. Only AArch32 single-precision VFP multiplication is affected.
+ * Both switches default off and are fixed for this engine process. */
+static void gen_vfp_muls_selected(TCGv_i32 dst, TCGv_i32 a, TCGv_i32 b,
+                                  TCGv_ptr fpst)
+{
+    static gsize mode;
+
+    if (g_once_init_enter(&mode)) {
+        const char *v = getenv("LT_VFP_MUL_ZERO_FAST");
+        bool fast = v && strcmp(v, "off") && strcmp(v, "0");
+        v = getenv("LT_VFP_MUL_ZERO_PROF");
+        bool prof = v && strcmp(v, "off") && strcmp(v, "0");
+        fprintf(stderr, "[vfp] mul-zero-fast=%s mul-zero-prof=%s\n",
+                fast ? "on" : "off", prof ? "on" : "off");
+        g_once_init_leave(&mode, 1 + fast + 2 * prof);
+    }
+    switch (mode) {
+    case 1: gen_helper_vfp_muls(dst, a, b, fpst); break;
+    case 2: gen_helper_vfp_muls_zero(dst, a, b, fpst); break;
+    case 3: gen_helper_vfp_muls_zero_prof_off(dst, a, b, fpst); break;
+    case 4: gen_helper_vfp_muls_zero_prof_on(dst, a, b, fpst); break;
+    default: g_assert_not_reached();
+    }
+}
+
 static inline void vfp_load_reg64(TCGv_i64 var, int reg)
 {
     tcg_gen_ld_i64(var, tcg_env, vfp_reg_offset(true, reg));
@@ -1736,7 +1762,7 @@ static void gen_VMLA_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
     /* Note that order of inputs to the add matters for NaNs */
     TCGv_i32 tmp = tcg_temp_new_i32();
 
-    gen_helper_vfp_muls(tmp, vn, vm, fpst);
+    gen_vfp_muls_selected(tmp, vn, vm, fpst);
     gen_helper_vfp_adds(vd, vd, tmp, fpst);
 }
 
@@ -1785,7 +1811,7 @@ static void gen_VMLS_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
      */
     TCGv_i32 tmp = tcg_temp_new_i32();
 
-    gen_helper_vfp_muls(tmp, vn, vm, fpst);
+    gen_vfp_muls_selected(tmp, vn, vm, fpst);
     gen_vfp_negs(tmp, tmp);
     gen_helper_vfp_adds(vd, vd, tmp, fpst);
 }
@@ -1843,7 +1869,7 @@ static void gen_VNMLS_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
      */
     TCGv_i32 tmp = tcg_temp_new_i32();
 
-    gen_helper_vfp_muls(tmp, vn, vm, fpst);
+    gen_vfp_muls_selected(tmp, vn, vm, fpst);
     gen_vfp_negs(vd, vd);
     gen_helper_vfp_adds(vd, vd, tmp, fpst);
 }
@@ -1894,7 +1920,7 @@ static void gen_VNMLA_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
     /* VNMLA: -fd + -(fn * fm) */
     TCGv_i32 tmp = tcg_temp_new_i32();
 
-    gen_helper_vfp_muls(tmp, vn, vm, fpst);
+    gen_vfp_muls_selected(tmp, vn, vm, fpst);
     gen_vfp_negs(tmp, tmp);
     gen_vfp_negs(vd, vd);
     gen_helper_vfp_adds(vd, vd, tmp, fpst);
@@ -1928,7 +1954,7 @@ static bool trans_VMUL_hp(DisasContext *s, arg_VMUL_sp *a)
 
 static bool trans_VMUL_sp(DisasContext *s, arg_VMUL_sp *a)
 {
-    return do_vfp_3op_sp(s, gen_helper_vfp_muls, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_sp(s, gen_vfp_muls_selected, a->vd, a->vn, a->vm, false);
 }
 
 static bool trans_VMUL_dp(DisasContext *s, arg_VMUL_dp *a)
@@ -1951,7 +1977,7 @@ static bool trans_VNMUL_hp(DisasContext *s, arg_VNMUL_sp *a)
 static void gen_VNMUL_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
 {
     /* VNMUL: -(fn * fm) */
-    gen_helper_vfp_muls(vd, vn, vm, fpst);
+    gen_vfp_muls_selected(vd, vn, vm, fpst);
     gen_vfp_negs(vd, vd);
 }
 
