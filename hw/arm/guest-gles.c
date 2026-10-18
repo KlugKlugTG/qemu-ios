@@ -57,8 +57,48 @@ bool gles_guest_fault_pending(void)
     return gf.pending;
 }
 
+/*
+ * The common case: every page is in the caller's TLB as plain RAM (no MMIO,
+ * dirty tracking or watchpoint flags), so the bytes are copied through the
+ * host pointers the probe returns, as a guest load or store would. A debug
+ * access walks the page tables again for each page: a draw's three client
+ * arrays cost ~1 us of walks before. Returns false, having possibly copied
+ * part, when any page needs the full path; that path redoes the whole access.
+ */
+static bool gles_guest_rw_ram(CPUState *cpu, vaddr va, uint8_t *buf, size_t len,
+                              bool write)
+{
+    CPUArchState *env = cpu_env(cpu);
+    MMUAccessType type = write ? MMU_DATA_STORE : MMU_DATA_LOAD;
+    int idx = cpu_mmu_index(cpu, false);
+    size_t done = 0;
+
+    if (va + len - 1 < va || va + len - 1 > UINT32_MAX) {
+        return false;
+    }
+    while (done < len) {
+        vaddr p = va + done;
+        size_t n = MIN(len - done, TARGET_PAGE_SIZE - (p & ~TARGET_PAGE_MASK));
+        void *host;
+
+        if (probe_access_flags(env, p, 0, type, idx, true, &host, 0) || !host) {
+            return false;
+        }
+        if (write) {
+            memcpy(host, buf + done, n);
+        } else {
+            memcpy(buf + done, host, n);
+        }
+        done += n;
+    }
+    return true;
+}
+
 int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write)
 {
+    if (len && !gf.pending && gles_guest_rw_ram(cpu, va, buf, len, write)) {
+        return 0;
+    }
     if (gf.armed && len) {
         CPUArchState *env = cpu_env(cpu);
         MMUAccessType type = write ? MMU_DATA_STORE : MMU_DATA_LOAD;
