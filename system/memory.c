@@ -23,6 +23,7 @@
 #include "qemu/main-loop.h"
 #include "qemu/qemu-print.h"
 #include "qemu/target-info.h"
+#include "qemu/timer.h"
 #include "qom/object.h"
 #include "trace.h"
 #include "system/physmem.h"
@@ -2293,6 +2294,28 @@ DirtyBitmapSnapshot *memory_region_snapshot_and_clear_dirty(MemoryRegion *mr,
     memory_region_sync_dirty_bitmap(mr, false);
     snapshot = physical_memory_snapshot_and_clear_dirty(mr, addr, size, client);
     memory_global_after_dirty_log_sync();
+    return snapshot;
+}
+
+DirtyBitmapSnapshot *memory_region_snapshot_and_clear_dirty_profiled(
+    MemoryRegion *mr, hwaddr addr, hwaddr size, unsigned client,
+    DirtySnapshotTimings *timings)
+{
+    DirtyBitmapSnapshot *snapshot;
+    uint64_t begin, end;
+
+    assert(mr->ram_block);
+    memset(timings, 0, sizeof(*timings));
+    begin = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    memory_region_sync_dirty_bitmap(mr, false);
+    end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    timings->presync_ns = end - begin;
+    snapshot = physical_memory_snapshot_and_clear_dirty_profiled(
+        mr, addr, size, client, timings);
+    begin = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    memory_global_after_dirty_log_sync();
+    end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    timings->barrier_ns = end - begin;
     return snapshot;
 }
 

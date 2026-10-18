@@ -845,8 +845,11 @@ static bool lcd_blit_unlock(IPodTouchLCDState *lcd)
 
 static int lcd_skip_forced_snapshot = -1;
 static bool lcd_snapshot_prof;
+static bool lcd_snapshot_stages;
 static struct {
     uint64_t n, forced, skipped, ns, forced_ns, max_ns, begin_ns, next_ns;
+    uint64_t empty, dirty_pages;
+    DirtySnapshotTimings stages;
 } lcd_snapshot_times;
 
 static void lcd_snapshot_switches(void)
@@ -854,12 +857,18 @@ static void lcd_snapshot_switches(void)
     if (lcd_skip_forced_snapshot < 0) {
         const char *skip = getenv("LT_LCD_FORCED_SNAPSHOT_SKIP");
         const char *prof = getenv("LT_LCD_SNAPSHOT_PROF");
+        const char *stages = getenv("LT_LCD_SNAPSHOT_STAGES");
 
         lcd_skip_forced_snapshot = skip && strcmp(skip, "off") && strcmp(skip, "0");
         lcd_snapshot_prof = prof && strcmp(prof, "off") && strcmp(prof, "0");
+        lcd_snapshot_stages = stages && strcmp(stages, "off") &&
+                              strcmp(stages, "0");
+        lcd_snapshot_prof |= lcd_snapshot_stages;
         fprintf(stderr, "[lcd] forced-snapshot-skip=%s snapshot-prof=%s\n",
                 lcd_skip_forced_snapshot ? "on" : "off",
                 lcd_snapshot_prof ? "on" : "off");
+        fprintf(stderr, "[lcd] snapshot-stages=%s\n",
+                lcd_snapshot_stages ? "on" : "off");
     }
 }
 
@@ -888,11 +897,18 @@ static void lcd_update_display(IPodTouchLCDState *lcd, DisplaySurface *ds,
      * them set may cause a later redundant repaint or GL surface upload,
      * but cannot hide a write. Keep this default-off until measured. */
     bool skip_snapshot = lcd_skip_forced_snapshot && invalidate;
+    DirtySnapshotTimings stages = { 0 };
     uint64_t t0 = lcd_snapshot_prof ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
-    g_autofree DirtyBitmapSnapshot *snap = skip_snapshot ? NULL :
-        memory_region_snapshot_and_clear_dirty(mem, addr,
-                                               (hwaddr)src_width * rows,
-                                               DIRTY_MEMORY_VGA);
+    g_autofree DirtyBitmapSnapshot *snap = NULL;
+    if (!skip_snapshot) {
+        if (lcd_snapshot_stages) {
+            snap = memory_region_snapshot_and_clear_dirty_profiled(
+                mem, addr, (hwaddr)src_width * rows, DIRTY_MEMORY_VGA, &stages);
+        } else {
+            snap = memory_region_snapshot_and_clear_dirty(
+                mem, addr, (hwaddr)src_width * rows, DIRTY_MEMORY_VGA);
+        }
+    }
     uint64_t snapshot_end = lcd_snapshot_prof ?
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
     if (lcd_snapshot_prof) {
@@ -904,6 +920,16 @@ static void lcd_update_display(IPodTouchLCDState *lcd, DisplaySurface *ds,
         lcd_snapshot_times.ns += ns;
         lcd_snapshot_times.forced_ns += invalidate ? ns : 0;
         lcd_snapshot_times.max_ns = MAX(lcd_snapshot_times.max_ns, ns);
+        if (lcd_snapshot_stages && !skip_snapshot) {
+            lcd_snapshot_times.empty += stages.dirty_pages == 0;
+            lcd_snapshot_times.dirty_pages += stages.dirty_pages;
+            lcd_snapshot_times.stages.presync_ns += stages.presync_ns;
+            lcd_snapshot_times.stages.setup_ns += stages.setup_ns;
+            lcd_snapshot_times.stages.bitmap_ns += stages.bitmap_ns;
+            lcd_snapshot_times.stages.reset_ns += stages.reset_ns;
+            lcd_snapshot_times.stages.clear_ns += stages.clear_ns;
+            lcd_snapshot_times.stages.barrier_ns += stages.barrier_ns;
+        }
     }
     bool unlocked = lcd_blit_unlock(lcd);
 
@@ -918,6 +944,24 @@ static void lcd_update_display(IPodTouchLCDState *lcd, DisplaySurface *ds,
                     lcd_snapshot_times.n, lcd_snapshot_times.forced,
                     lcd_snapshot_times.skipped, lcd_snapshot_times.ns,
                     lcd_snapshot_times.forced_ns, lcd_snapshot_times.max_ns);
+            if (lcd_snapshot_stages) {
+                fprintf(stderr, "[lcd-stages] begin-ns %" PRIu64
+                        " end-ns %" PRIu64 " n %" PRIu64
+                        " skipped %" PRIu64 " empty %" PRIu64
+                        " dirty-pages %" PRIu64 " presync-ns %" PRIu64
+                        " setup-ns %" PRIu64 " bitmap-ns %" PRIu64
+                        " reset-ns %" PRIu64 " clear-ns %" PRIu64
+                        " barrier-ns %" PRIu64 "\n",
+                        lcd_snapshot_times.begin_ns, snapshot_end,
+                        lcd_snapshot_times.n, lcd_snapshot_times.skipped,
+                        lcd_snapshot_times.empty, lcd_snapshot_times.dirty_pages,
+                        lcd_snapshot_times.stages.presync_ns,
+                        lcd_snapshot_times.stages.setup_ns,
+                        lcd_snapshot_times.stages.bitmap_ns,
+                        lcd_snapshot_times.stages.reset_ns,
+                        lcd_snapshot_times.stages.clear_ns,
+                        lcd_snapshot_times.stages.barrier_ns);
+            }
         }
         memset(&lcd_snapshot_times, 0, sizeof(lcd_snapshot_times));
         lcd_snapshot_times.begin_ns = snapshot_end;
