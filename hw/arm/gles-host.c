@@ -1731,6 +1731,50 @@ bool gles_host_debug(void)
     return gles_debug;
 }
 
+/*
+ * The guest shims' log text (GLES_OP_LOG), which arrives a fragment at a time. Lines
+ * are assembled and a line already printed 3 times is dropped after that, with a
+ * count at each power of ten: mbxshim reports the same surface on every frame (two
+ * lines a frame, ~55K a session and most of a 5 MB engine log on Android).
+ * IT_GLES_VERBOSE prints everything.
+ */
+static void gles_guest_log(const char *text)
+{
+    static GString *line;
+    static GHashTable *seen;
+    static int verbose = -1;
+
+    if (verbose < 0) {
+        verbose = getenv("IT_GLES_VERBOSE") != NULL;
+    }
+    if (verbose) {
+        fputs(text, stderr);
+        return;
+    }
+    if (!line) {
+        line = g_string_new(NULL);
+        seen = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    }
+    for (const char *p = text; *p; p++) {
+        g_string_append_c(line, *p);
+        if (*p != '\n' && line->len < 1024) {
+            continue;
+        }
+        uint64_t count = GPOINTER_TO_SIZE(g_hash_table_lookup(seen, line->str)) + 1;
+        if (count <= 3) {
+            fputs(line->str, stderr);
+        } else if (count == 10 || count == 100 || count == 1000 || count == 10000 ||
+                   count == 100000 || count == 1000000) {
+            fprintf(stderr, "[gles] (the guest line below, %" PRIu64 " times)\n%s",
+                    count, line->str);
+        }
+        if (g_hash_table_size(seen) < 4096 || count > 1) {
+            g_hash_table_replace(seen, g_strdup(line->str), GSIZE_TO_POINTER(count));
+        }
+        g_string_truncate(line, 0);
+    }
+}
+
 /* A guest shim's "[gles-reject] NAME COUNT" line (GLES_OP_LOG): the shim counts its own
  * refusals and reports each name at 1, 2, 4, 8... calls, so COUNT is a floor. */
 static bool gles_shim_reject_line(const char *line)
@@ -5414,7 +5458,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         }
         buf[n] = 0;
         if (!gles_shim_reject_line(buf)) {
-            fputs(buf, stderr);
+            gles_guest_log(buf);
         }
         return 0;
     }
