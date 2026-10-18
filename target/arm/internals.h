@@ -1486,6 +1486,11 @@ typedef struct GetPhysAddrResult {
      * with the stage1 protection.
      */
     int s2prot;
+    /*
+     * The short-descriptor walk found a global mapping (nG clear), one that
+     * stays valid across an ASID change. False whenever that is not known.
+     */
+    bool global;
 } GetPhysAddrResult;
 
 /**

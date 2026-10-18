@@ -144,6 +144,15 @@ void tlb_flush(CPUState *cpu);
 void tlb_flush_switch_context(CPUState *cpu, uint64_t key);
 
 /**
+ * tlb_flush_switch_context_keep:
+ * Like tlb_flush_switch_context(), but the TLB index @keep_idx keeps its
+ * entries except the @n pages listed: for a guest whose global mappings
+ * outlive the switch. A negative @keep_idx flushes everything.
+ */
+void tlb_flush_switch_context_keep(CPUState *cpu, uint64_t key, int keep_idx,
+                                   const vaddr *pages, unsigned n);
+
+/**
  * tlb_flush_context:
  * @cpu: CPU whose TLB should be flushed, which must be the current CPU
  * @key: the address space to invalidate, as given to tlb_flush_switch_context
@@ -266,6 +275,10 @@ static inline void tlb_flush(CPUState *cpu)
 {
 }
 static inline void tlb_flush_switch_context(CPUState *cpu, uint64_t key)
+{
+}
+static inline void tlb_flush_switch_context_keep(CPUState *cpu, uint64_t key, int keep_idx,
+                                                 const vaddr *pages, unsigned n)
 {
 }
 static inline void tlb_flush_context(CPUState *cpu, uint64_t key)

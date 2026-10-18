@@ -1235,6 +1235,7 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
         xn = desc & (1 << 4);
         pxn = desc & 1;
         ns = extract32(desc, 19, 1);
+        result->global = !(desc & (1 << 17));
     } else {
         if (cpu_isar_feature(aa32_pxn, cpu)) {
             pxn = (desc >> 2) & 1;
@@ -1250,6 +1251,7 @@ static bool get_phys_addr_v6(CPUARMState *env, S1Translate *ptw,
             goto do_fault;
         }
         ap = ((desc >> 4) & 3) | ((desc >> 7) & 4);
+        result->global = !(desc & (1 << 11));
         switch (desc & 3) {
         case 0: /* Page translation fault.  */
             fi->type = ARMFault_Translation;

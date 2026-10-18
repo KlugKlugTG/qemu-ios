@@ -398,7 +398,18 @@ static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
          * The TB jump cache is kept per ASID, as the hardware TLB is
          * tagged: the guest must TLBI an ASID before reusing it.
          */
-        tlb_flush_switch_context(CPU(cpu), extract64(value, 0, 8));
+        /*
+         * iOS switches ASID ~1.5K times a second, and flushing the EL1 index
+         * with the rest threw away the kernel's global mappings each time:
+         * about half of all TLB refills. Keep them, as the hardware does, and
+         * drop only the non-global pages that index picked up.
+         */
+        bool keep = cpu->ng_el1_count <= ARRAY_SIZE(cpu->ng_el1_pages);
+
+        tlb_flush_switch_context_keep(CPU(cpu), extract64(value, 0, 8),
+                                      keep ? arm_to_core_mmu_idx(ARMMMUIdx_E10_1) : -1,
+                                      cpu->ng_el1_pages, keep ? cpu->ng_el1_count : 0);
+        cpu->ng_el1_count = 0;
     }
     raw_write(env, ri, value);
 }
