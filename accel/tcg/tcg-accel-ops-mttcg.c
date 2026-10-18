@@ -122,6 +122,7 @@ static void mttcg_request_performance_core(void)
  * halted, which is what lets the two be told apart from out here.
  */
 extern bool it_acct_on;
+extern bool it_profile_on;
 extern uint64_t it_acct_insns, it_acct_blocks, it_acct_irqs, it_acct_exits;
 extern uint64_t it_acct_lookups, it_acct_jc_misses, it_acct_jc_empty, it_acct_jc_other_pc;
 extern uint64_t it_acct_flagbit[3][32];
@@ -165,6 +166,9 @@ static void mttcg_acct_init(void)
 {
     const char *v = getenv("IT_VCPU_ACCT");
 
+#if !defined(CONFIG_DARWIN) && !defined(_WIN32) /* no pthread_getcpuclockid */
+    acct_cpu_clock_ok = !pthread_getcpuclockid(pthread_self(), &acct_cpu_clock);
+#endif
     if (!v) {
         return;
     }
@@ -172,9 +176,6 @@ static void mttcg_acct_init(void)
     acct_interval_ns = (int64_t)(atof(v) > 0 ? atof(v) : 5.0) * 1000000000LL;
     acct_t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     acct_next_dump = acct_t0 + acct_interval_ns;
-#if !defined(CONFIG_DARWIN) && !defined(_WIN32) /* no pthread_getcpuclockid */
-    acct_cpu_clock_ok = !pthread_getcpuclockid(pthread_self(), &acct_cpu_clock);
-#endif
     it_acct_cb_enable();
 }
 
@@ -315,9 +316,14 @@ static void *mttcg_cpu_thread_fn(void *arg)
     qemu_guest_random_seed_thread_part2(cpu->random_seed);
 
     do {
+        /* Keep one timing decision across exec and relock, including stop races. */
+        bool timing = it_acct_on || qatomic_read(&it_profile_on);
+        if (!timing) {
+            qatomic_set(&acct_io_mark, 0);
+        }
         qemu_process_cpu_events(cpu);
 
-        if (it_acct_on) {
+        if (timing) {
             int64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
             if (acct_io_mark) {
                 if (acct_halted) {
@@ -342,7 +348,7 @@ static void *mttcg_cpu_thread_fn(void *arg)
                 }
                 acct_io_mark = 0;
             }
-            if (now >= acct_next_dump) {
+            if (it_acct_on && now >= acct_next_dump) {
                 acct_next_dump = now + acct_interval_ns;
                 mttcg_acct_dump(now);
 #ifdef QEMU_EXPERIMENTAL_TB_CACHE_STATS
@@ -357,12 +363,12 @@ static void *mttcg_cpu_thread_fn(void *arg)
             int r;
             int64_t a = 0, b;
             bql_unlock();
-            if (it_acct_on) {
+            if (timing) {
                 a = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
                 qatomic_set(&acct_run_since, a);
             }
             r = tcg_cpu_exec(cpu);
-            if (it_acct_on) {
+            if (timing) {
                 b = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
                 qatomic_set(&acct_run_since, 0);
                 /*
@@ -384,7 +390,7 @@ static void *mttcg_cpu_thread_fn(void *arg)
              * waiting in the main loop itself. Only the first is contention,
              * and only the first is fixable here, so time it separately.
              */
-            if (it_acct_on) {
+            if (timing) {
                 acct_bql_ns += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - b;
             }
             switch (r) {

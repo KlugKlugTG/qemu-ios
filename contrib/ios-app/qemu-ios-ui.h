@@ -80,6 +80,17 @@ void qemu_ios_ui_vm_started(void);
  * the AioContext is NULL, and after the main loop returns nothing services it.
  */
 bool qemu_ios_ui_ready(void);
+/* Optional bounded profiling capture. Thread safe; paths are host paths.
+ * status: 1 recording, 0 idle, negative errno on write/limit failure.
+ * LT_PROFILE=off disables capture. No guest instruction instrumentation. */
+int qemu_ios_profile_start(const char *path);
+int qemu_ios_profile_stop(void);
+int qemu_ios_profile_status(void);
+/* Engine instrumentation only; begin/end use QEMU_CLOCK_REALTIME ns. */
+uint64_t qemu_ios_profile_begin(void);
+void qemu_ios_profile_gl(uint64_t start, uint32_t slot, uint32_t context);
+void qemu_ios_profile_lock(uint64_t start, uint64_t end, bool wait,
+                           const char *file, int line);
 /* Session-latched host NAND I/O failure; thread-safe to poll from the UI. */
 bool qemu_ios_ui_storage_failed(void);
 

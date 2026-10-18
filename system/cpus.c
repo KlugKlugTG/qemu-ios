@@ -572,6 +572,9 @@ void rust_bql_mock_lock(void)
  * callers directly, instead of funneling them all through a single function.
  */
 extern bool it_acct_on;
+bool it_profile_on;
+/* The standalone QEMU executable has no embedded UI bridge. */
+void qemu_ios_profile_lock(uint64_t, uint64_t, bool, const char *, int) __attribute__((weak));
 uint64_t it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow;
 extern void *it_acct_mmio_mr;
 struct it_acct_mr { void *mr; uint64_t n, ns; char *name; } it_acct_mrs[256];
@@ -619,12 +622,15 @@ void bql_lock_impl(const char *file, int line)
     QemuMutexLockFunc bql_lock_fn = qatomic_read(&bql_mutex_lock_func);
 
     g_assert(!bql_locked());
-    if (unlikely(it_acct_on) && current_cpu) {
+    if (unlikely(it_acct_on || qatomic_read(&it_profile_on)) && current_cpu) {
         /* How long a vCPU waits for the BQL, MMIO accesses included. */
         int64_t t0 = get_clock(), dt;
 
         bql_lock_fn(&bql, file, line);
         dt = get_clock() - t0;
+        if (qemu_ios_profile_lock) {
+            qemu_ios_profile_lock(t0, t0 + dt, true, file, line);
+        }
         it_acct_vcpu_bql_n++;
         it_acct_vcpu_bql_ns += dt;
         it_acct_vcpu_bql_slow += dt > 100000;
@@ -652,7 +658,7 @@ void bql_lock_impl(const char *file, int line)
         return;
     }
     bql_lock_fn(&bql, file, line);
-    if (unlikely(it_acct_on)) {
+    if (unlikely(it_acct_on || qatomic_read(&it_profile_on))) {
         it_acct_held_since = get_clock();
         it_acct_held_file = file;
         it_acct_held_line = line;
@@ -667,6 +673,10 @@ void bql_unlock(void)
         /* How long threads other than the vCPU hold the BQL, by taker. */
         int64_t dt = get_clock() - it_acct_held_since;
 
+        if (qemu_ios_profile_lock) {
+            qemu_ios_profile_lock(it_acct_held_since, it_acct_held_since + dt,
+                                  false, it_acct_held_file, it_acct_held_line);
+        }
         it_acct_held_since = 0;
         it_acct_hold_hist[it_acct_bucket(dt)][0]++;
         it_acct_hold_hist[it_acct_bucket(dt)][1] += dt;

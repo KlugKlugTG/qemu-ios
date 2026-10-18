@@ -26,6 +26,9 @@
  */
 
 #include "qemu/osdep.h"
+uint64_t qemu_ios_profile_begin(void) __attribute__((weak));
+void qemu_ios_profile_gl(uint64_t, uint32_t, uint32_t) __attribute__((weak));
+extern bool it_profile_on;
 #include "powervr/pvrtc.h"
 #include "migration/blocker.h"
 #include "migration/vmstate.h"
@@ -7873,7 +7876,7 @@ void gles_host_reset(void)
 #endif
 }
 
-int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
+static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
                        uint32_t argc, const uint32_t *a)
 {
     uint64_t t0;
@@ -8008,6 +8011,18 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
         qatomic_set(&gles_prof_call_ns, gles_prof_call_ns + dt);
     }
     return r;
+}
+
+int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
+                       uint32_t argc, const uint32_t *a)
+{
+    uint64_t start = qatomic_read(&it_profile_on) && qemu_ios_profile_begin ?
+                     qemu_ios_profile_begin() : 0;
+    int64_t result = gles_host_call_impl(cpu, slot, ctx, argc, a);
+    if (start) {
+        qemu_ios_profile_gl(start, slot, ctx);
+    }
+    return result;
 }
 
 void gles_host_stats(uint64_t *draws, uint64_t *presents)

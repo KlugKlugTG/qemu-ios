@@ -280,6 +280,185 @@ static void ios_report_first_lit_frame(const uint8_t *bgra, int w, int h)
  * the GL ones IT_GLES_PROF.
  */
 void it_acct_frame_snapshot(int64_t v[6]);
+/* Capture writes are buffered and bounded. This mutex never acquires the BQL.
+ * Completed GL calls are grouped by publication interval; S rows retain slow
+ * call intervals, including calls spanning a publication boundary. */
+extern bool it_profile_on;
+static GMutex profile_mutex;
+static FILE *profile_file;
+static int profile_error;
+static uint64_t profile_started, profile_gl_ns, profile_present_ns;
+static struct { uint64_t count, total, max; } profile_slots[0x1010];
+static uint32_t profile_touched[0x1010], profile_ntouched;
+
+static void profile_check_locked(void)
+{
+    if (ferror(profile_file) || ftell(profile_file) >= 128 * 1024 * 1024 ||
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - profile_started >= 900000000000ULL) {
+        profile_error = ferror(profile_file) ? EIO : EFBIG;
+        qatomic_set(&it_profile_on, false);
+    }
+}
+
+static const char *profile_gl_name(uint32_t slot)
+{
+    switch (slot) {
+#define GLES_FN(n, f, id, argc, fl) case id: return #n;
+#include "hw/arm/guest-services/gles-names.h"
+#undef GLES_FN
+    case 0x1000: return "present";
+    case 0x1001: return "presentSurface";
+    case 0x1002: return "log";
+    case 0x1003: return "bindSurface";
+    case 0x1004: return "newSharegroup";
+    case 0x1005: return "deleteSharegroup";
+    case 0x1006: return "newContext";
+    case 0x1007: return "deleteContext";
+    case 0x1008: return "drawableStorage";
+    default: return "unknown";
+    }
+}
+
+static void profile_flush_gl_locked(uint64_t now)
+{
+    for (uint32_t i = 0; i < profile_ntouched; i++) {
+        uint32_t slot = profile_touched[i];
+        fprintf(profile_file, "G %" PRIu64 " %u %" PRIu64 " %" PRIu64 " %" PRIu64 " %s\n",
+                now, slot, profile_slots[slot].count, profile_slots[slot].total,
+                profile_slots[slot].max, profile_gl_name(slot));
+        memset(&profile_slots[slot], 0, sizeof(profile_slots[slot]));
+    }
+    profile_ntouched = 0;
+}
+
+int qemu_ios_profile_start(const char *path)
+{
+    int result = 0;
+    const char *enabled = getenv("LT_PROFILE");
+    g_mutex_lock(&profile_mutex);
+    if (!qemu_ios_ui_ready()) {
+        result = -EAGAIN;
+    } else if (enabled && (!strcmp(enabled, "off") || !strcmp(enabled, "0"))) {
+        result = -ENOTSUP;
+    } else if (profile_file) {
+        result = -EBUSY;
+    } else if (!path || !*path) {
+        result = -EINVAL;
+    } else if (!(profile_file = fopen(path, "wx"))) {
+        result = -errno;
+    } else {
+        setvbuf(profile_file, NULL, _IOFBF, 65536);
+        profile_error = 0;
+        profile_gl_ns = profile_present_ns = 0;
+        profile_started = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        fprintf(profile_file, "# LightTouch profile v1; monotonic ns; no GL arguments\n"
+                "# F ns serial run outside bql-outside bql-inside vcpu-cpu insns gl present main-cpu due-ns\n"
+                "# G end-ns slot count total-ns max-ns name (completed calls since preceding F)\n"
+                "# S start-ns end-ns slot context (GL calls >=500us)\n"
+                "# W/H start-ns end-ns file line (BQL wait/hold >=500us)\n"
+                "# begin %" PRIu64 "; instruction counters require IT_VCPU_ACCT\n", profile_started);
+        qatomic_set(&it_profile_on, true);
+    }
+    g_mutex_unlock(&profile_mutex);
+    return result;
+}
+
+int qemu_ios_profile_stop(void)
+{
+    int result;
+    g_mutex_lock(&profile_mutex);
+    qatomic_set(&it_profile_on, false);
+    if (profile_file) {
+        uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        profile_flush_gl_locked(now);
+        fprintf(profile_file, "# end %" PRIu64 " error %d\n", now, profile_error);
+        if (fclose(profile_file) && !profile_error) {
+            profile_error = EIO;
+        }
+        profile_file = NULL;
+    }
+    result = -profile_error;
+    g_mutex_unlock(&profile_mutex);
+    return result;
+}
+
+int qemu_ios_profile_status(void)
+{
+    int result;
+    g_mutex_lock(&profile_mutex);
+    result = profile_error ? -profile_error : profile_file ? 1 : 0;
+    g_mutex_unlock(&profile_mutex);
+    return result;
+}
+
+uint64_t qemu_ios_profile_begin(void)
+{
+    return qatomic_read(&it_profile_on) ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
+}
+
+void qemu_ios_profile_gl(uint64_t start, uint32_t slot, uint32_t context)
+{
+    uint64_t end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME), dt = end - start;
+    g_mutex_lock(&profile_mutex);
+    if (qatomic_read(&it_profile_on) && start >= profile_started) {
+        profile_gl_ns += dt;
+        if (slot == 0x1000 || slot == 0x1001) {
+            profile_present_ns += dt;
+        }
+        if (slot < G_N_ELEMENTS(profile_slots)) {
+            if (!profile_slots[slot].count) {
+                profile_touched[profile_ntouched++] = slot;
+            }
+            profile_slots[slot].count++;
+            profile_slots[slot].total += dt;
+            profile_slots[slot].max = MAX(profile_slots[slot].max, dt);
+        }
+        if (dt >= 500000) {
+            fprintf(profile_file, "S %" PRIu64 " %" PRIu64 " %u %u\n", start, end, slot, context);
+            profile_check_locked();
+        }
+    }
+    g_mutex_unlock(&profile_mutex);
+}
+
+void qemu_ios_profile_lock(uint64_t start, uint64_t end, bool wait,
+                           const char *file, int line)
+{
+    if (end - start < 500000 || !qatomic_read(&it_profile_on)) {
+        return;
+    }
+    g_mutex_lock(&profile_mutex);
+    if (qatomic_read(&it_profile_on) && start >= profile_started) {
+        fprintf(profile_file, "%c %" PRIu64 " %" PRIu64 " %s %d\n",
+                wait ? 'W' : 'H', start, end, file, line);
+        profile_check_locked();
+    }
+    g_mutex_unlock(&profile_mutex);
+}
+
+static void ios_profile_frame(uint64_t due, uint64_t serial)
+{
+    int64_t v[6];
+    struct timespec ts = { 0 };
+    if (!qatomic_read(&it_profile_on)) {
+        return;
+    }
+    it_acct_frame_snapshot(v);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    g_mutex_lock(&profile_mutex);
+    if (qatomic_read(&it_profile_on)) {
+        uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        profile_flush_gl_locked(now);
+        fprintf(profile_file, "F %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64
+                " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRIu64
+                " %" PRIu64 " %" PRId64 " %" PRIu64 "\n", now, serial,
+                v[0], v[1], v[2], MAX((int64_t)0, v[3] - v[2]), v[4], v[5], profile_gl_ns, profile_present_ns,
+                (int64_t)ts.tv_sec * (int64_t)1000000000 + (int64_t)ts.tv_nsec, due);
+        profile_check_locked();
+    }
+    g_mutex_unlock(&profile_mutex);
+}
+
 static void ios_frame_trace(uint64_t ns, uint64_t serial)
 {
     static FILE *trace;
@@ -403,6 +582,7 @@ static void ios_capture(DisplaySurface *surface)
     qemu_mutex_unlock(&ios.frame_lock);
 
     ios_frame_trace(ios.timestamp_ns, ios.serial);
+    ios_profile_frame(ios.timestamp_ns, ios.serial);
     ios_report_first_lit_frame(dst, w, h);
 
     if (ios.cb) {
