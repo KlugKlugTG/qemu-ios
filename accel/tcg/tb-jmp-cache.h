@@ -12,7 +12,9 @@
 #include "qemu/rcu.h"
 #include "exec/cpu-common.h"
 
+#ifndef TB_JMP_CACHE_BITS
 #define TB_JMP_CACHE_BITS 12
+#endif
 #define TB_JMP_CACHE_SIZE (1 << TB_JMP_CACHE_BITS)
 
 /*
@@ -22,12 +24,53 @@
  * non-NULL value of 'tb'.  Strictly speaking pc is only needed for
  * CF_PCREL, but it's used always for simplicity.
  */
+typedef struct CPUJumpCacheBank CPUJumpCacheBank;
+
 typedef struct CPUJumpCache {
-    struct rcu_head rcu;
+    CPUJumpCacheBank *bank;
+    /* The bank epoch this cache was last emptied in; stale if behind. */
+    uint64_t epoch;
     struct {
         TranslationBlock *tb;
         vaddr pc;
     } array[TB_JMP_CACHE_SIZE];
 } CPUJumpCache;
+
+/*
+ * One jump cache per guest address space (an ARM ASID), so that a context
+ * switch, which must flush the softmmu TLB, can switch caches instead of
+ * emptying the only one. A guest switching processes hundreds of times a
+ * second otherwise sends every indirect branch after each switch to the QHT.
+ *
+ * Entries map a virtual PC to a TB, so a cache is valid only for its own
+ * address space, and only until a mapping in it changes. Every operation
+ * that may change mappings still clears: a page flush clears that page in
+ * every cache, and a full flush (TLBIALL, tb_flush, reset, a CF_PCREL
+ * invalidation) bumps @epoch, empties the current cache now and the others
+ * when they are next switched to. Like the TLB, this relies on the guest
+ * invalidating an ASID (or the page, or everything) before reusing it.
+ *
+ * cpu->tb_jmp_cache always points at the current member. Only the owning
+ * vCPU switches; other threads use the pointer only to reach the bank, and
+ * a stale entry they miss is harmless: an invalidated TB has CF_INVALID in
+ * its cflags, so tb_lookup never matches it.
+ */
+#define TB_JMP_CACHE_CONTEXTS 16
+
+struct CPUJumpCacheBank {
+    struct rcu_head rcu;
+    uint64_t epoch;                         /* atomic */
+    uint64_t clock;                         /* owner vCPU only */
+    uint64_t key[TB_JMP_CACHE_CONTEXTS];    /* owner vCPU only */
+    uint64_t used[TB_JMP_CACHE_CONTEXTS];   /* owner vCPU only; 0: unkeyed */
+    CPUJumpCache cache[TB_JMP_CACHE_CONTEXTS];
+};
+
+static inline void tb_jmp_cache_empty(CPUJumpCache *jc)
+{
+    for (int i = 0; i < TB_JMP_CACHE_SIZE; i++) {
+        qatomic_set(&jc->array[i].tb, NULL);
+    }
+}
 
 #endif /* ACCEL_TCG_TB_JMP_CACHE_H */

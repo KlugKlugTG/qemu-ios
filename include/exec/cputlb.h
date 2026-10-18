@@ -131,6 +131,19 @@ void tlb_flush_page_all_cpus_synced(CPUState *src, vaddr addr);
 void tlb_flush(CPUState *cpu);
 
 /**
+ * tlb_flush_switch_context:
+ * @cpu: CPU whose TLB should be flushed, which must be the current CPU
+ * @key: identifies the guest address space being switched to (e.g. ASID)
+ *
+ * Like tlb_flush(), for a guest switching to another address space: the
+ * TLB is flushed in full, but the TB jump cache is swapped for the one
+ * kept for @key rather than emptied. Use it only where the architecture
+ * requires the guest to invalidate an address-space identifier before
+ * reusing it, as for TLB entries tagged by that identifier.
+ */
+void tlb_flush_switch_context(CPUState *cpu, uint64_t key);
+
+/**
  * tlb_flush_all_cpus_synced:
  * @cpu: src CPU of the flush
  *
@@ -238,6 +251,9 @@ static inline void tlb_flush_page_all_cpus_synced(CPUState *src, vaddr addr)
 {
 }
 static inline void tlb_flush(CPUState *cpu)
+{
+}
+static inline void tlb_flush_switch_context(CPUState *cpu, uint64_t key)
 {
 }
 static inline void tlb_flush_all_cpus_synced(CPUState *src_cpu)

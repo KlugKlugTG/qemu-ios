@@ -395,8 +395,10 @@ static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
          * For VMSA (when not using the LPAE long descriptor page table
          * format) this register includes the ASID, so do a TLB flush.
          * For PMSA it is purely a process ID and no action is needed.
+         * The TB jump cache is kept per ASID, as the hardware TLB is
+         * tagged: the guest must TLBI an ASID before reusing it.
          */
-        tlb_flush(CPU(cpu));
+        tlb_flush_switch_context(CPU(cpu), extract64(value, 0, 8));
     }
     raw_write(env, ri, value);
 }
