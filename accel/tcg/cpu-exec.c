@@ -227,8 +227,9 @@ static TranslationBlock *tb_htable_lookup(CPUState *cpu, TCGTBCPUState s)
 extern bool it_acct_on;
 extern uint64_t it_acct_lookups, it_acct_jc_misses, it_acct_jc_empty, it_acct_jc_other_pc;
 extern uint64_t it_acct_flagbit[3][32];
+extern bool tcg_inline_tb_lookup;
 
-static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
+static TranslationBlock *tb_lookup_legacy(CPUState *cpu, TCGTBCPUState s)
 {
     TranslationBlock *tb;
     CPUJumpCache *jc;
@@ -285,6 +286,30 @@ hit:
      */
     assert((tb_cflags(tb) & CF_PCREL) || tb->pc == s.pc);
     return tb;
+}
+
+/* Keep the common jump-cache hit in the caller. The existing lookup owns
+ * misses and accounting, including every QHT/page validation and cache fill.
+ * A miss repeats the inexpensive probe before entering that slow path. */
+static inline QEMU_ALWAYS_INLINE
+TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
+{
+    if (tcg_inline_tb_lookup && likely(!it_acct_on)) {
+        CPUJumpCache *jc = cpu->tb_jmp_cache;
+        uint32_t hash = tb_jmp_cache_hash_func(s.pc, s.cs_base);
+        TranslationBlock *tb = qatomic_read(&jc->array[hash].tb);
+
+        tcg_debug_assert(!(s.cflags & CF_INVALID));
+        if (likely(tb &&
+                   jc->array[hash].pc == s.pc &&
+                   tb->cs_base == s.cs_base &&
+                   tb->flags == s.flags &&
+                   tb_cflags(tb) == s.cflags)) {
+            assert((tb_cflags(tb) & CF_PCREL) || tb->pc == s.pc);
+            return tb;
+        }
+    }
+    return tb_lookup_legacy(cpu, s);
 }
 
 static void log_cpu_exec(vaddr pc, CPUState *cpu,
