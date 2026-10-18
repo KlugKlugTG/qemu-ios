@@ -113,6 +113,7 @@ static void gles_native_bind_texture(GLenum target, GLuint name)
     gles_native_texture_reference(binding,texture);
     if (rectangle) state->rectangle=name;
     else if (target==GL_TEXTURE_2D) state->texture_2d=name;
+    if (rectangle || target==GL_TEXTURE_2D) state->host_rectangle=rectangle;
 }
 static void gles_native_gen_textures(GLsizei n, GLuint *names)
 {
@@ -243,9 +244,22 @@ static unsigned gles_native_rectangle_begin(GLfloat matrices[8][16], GLint bindi
 {
     if (gles_egl_current->api!=1) return 0;
     GLint units=gles_native_fixed_units();
+    /*
+     * With no rectangle texture enabled or bound on any unit, every unit's
+     * native binding and GL_TEXTURE_2D enable already are what this would set
+     * (object_2d, enabled_2d), so there is nothing to set or restore. Doing it
+     * anyway cost ~10 driver calls per unit per draw and made the driver
+     * revalidate its texture state on every draw.
+     */
+    unsigned unit=0;
+    for (;unit<8 && unit<(unsigned)units;unit++) {
+        GLESEGLTextureUnit *state=&gles_egl_current->texture_units[unit];
+        if (state->enabled_rectangle || state->host_rectangle) break;
+    }
+    if (unit==8 || unit>=(unsigned)units) return 0;   /* *saved_active stays 0: nothing to end */
     glGetIntegerv(GL_ACTIVE_TEXTURE,saved_active); glGetIntegerv(GL_MATRIX_MODE,saved_mode);
     unsigned mask=0;
-    for (unsigned unit=0;unit<8 && unit<(unsigned)units;unit++) {
+    for (unit=0;unit<8 && unit<(unsigned)units;unit++) {
         glActiveTexture(GL_TEXTURE0+unit);
         glGetIntegerv(GL_TEXTURE_BINDING_2D,&bindings[unit]);
         GLESEGLTextureUnit *state=&gles_egl_current->texture_units[unit];
@@ -268,7 +282,7 @@ static unsigned gles_native_rectangle_begin(GLfloat matrices[8][16], GLint bindi
 static void gles_native_rectangle_end(unsigned mask, GLfloat matrices[8][16],
                                       GLint bindings[8], GLint active, GLint mode)
 {
-    if (gles_egl_current->api!=1) return;
+    if (gles_egl_current->api!=1 || !active) return;
     GLint units=gles_native_fixed_units();
     for (unsigned unit=0;unit<8 && unit<(unsigned)units;unit++) {
         glActiveTexture(GL_TEXTURE0+unit);
