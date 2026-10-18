@@ -87,6 +87,7 @@ static void tcg_accel_instance_init(Object *obj)
 bool one_insn_per_tb;
 bool tcg_cross_page_chain;
 bool tcg_indirect_cache;
+bool tcg_ibtc_indexed;
 
 #ifndef CONFIG_USER_ONLY
 static void tcg_vm_change_state(void *opaque, bool running, RunState state)
@@ -109,6 +110,11 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
 {
     TCGState *s = TCG_STATE(as);
     unsigned max_threads = 1;
+    const char *indexed = getenv("LT_IBTC_INDEXED");
+
+    tcg_ibtc_indexed = indexed && strcmp(indexed, "off") && strcmp(indexed, "0");
+    fprintf(stderr, "[tcg] indirect-site-indexed=%s slot-bytes=%zu\n",
+            tcg_ibtc_indexed ? "on" : "off", sizeof(TCGIndirectSlot));
 
 #ifndef CONFIG_USER_ONLY
     CPUClass *cc = CPU_CLASS(object_class_by_name(target_cpu_type()));

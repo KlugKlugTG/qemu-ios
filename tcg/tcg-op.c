@@ -2593,19 +2593,46 @@ void tcg_gen_lookup_and_goto_ptr_cached(TCGv_i32 site_key)
     tcg_temp_free_i64(cached);
 
     miss = gen_new_label();
-    for (int i = 0; i < ARRAY_SIZE(tb->ibtc.e); i++) {
-        TCGLabel *next = i + 1 < ARRAY_SIZE(tb->ibtc.e) ? gen_new_label() : miss;
+    if (tcg_ibtc_indexed) {
+        TCGv_i32 index = tcg_temp_ebb_new_i32();
+        TCGv_i32 high = tcg_temp_ebb_new_i32();
+        TCGv_ptr entry = tcg_temp_ebb_new_ptr();
 
+        /* Same hash as tcg_ibtc_index: one indexed probe for up to eight
+         * targets, retaining the full PC/state/context key for validity. */
+        tcg_gen_shri_i32(index, site_key, 2);
+        tcg_gen_shri_i32(high, site_key, 5);
+        tcg_gen_xor_i32(index, index, high);
+        tcg_gen_andi_i32(index, index, 7);
+        tcg_gen_muli_i32(index, index, sizeof(TCGIndirectEntry));
+        tcg_gen_ext_i32_ptr(entry, index);
+        tcg_gen_add_ptr(entry, entry, slot);
+        tcg_temp_free_i32(index);
+        tcg_temp_free_i32(high);
         cached = tcg_temp_ebb_new_i64();
-        tcg_gen_ld_i64(cached, slot, offsetof(TCGIndirectSlot, e[i].key));
-        tcg_gen_brcond_i64(TCG_COND_NE, key, cached, next);
+        tcg_gen_ld_i64(cached, entry, offsetof(TCGIndirectEntry, key));
+        tcg_gen_brcond_i64(TCG_COND_NE, key, cached, miss);
         tcg_temp_free_i64(cached);
         ptr = tcg_temp_ebb_new_ptr();
-        tcg_gen_ld_ptr(ptr, slot, offsetof(TCGIndirectSlot, e[i].host));
+        tcg_gen_ld_ptr(ptr, entry, offsetof(TCGIndirectEntry, host));
         tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
         tcg_temp_free_ptr(ptr);
-        if (next != miss) {
-            gen_set_label(next);
+        tcg_temp_free_ptr(entry);
+    } else {
+        for (int i = 0; i < ARRAY_SIZE(tb->ibtc.e); i++) {
+            TCGLabel *next = i + 1 < ARRAY_SIZE(tb->ibtc.e) ? gen_new_label() : miss;
+
+            cached = tcg_temp_ebb_new_i64();
+            tcg_gen_ld_i64(cached, slot, offsetof(TCGIndirectSlot, e[i].key));
+            tcg_gen_brcond_i64(TCG_COND_NE, key, cached, next);
+            tcg_temp_free_i64(cached);
+            ptr = tcg_temp_ebb_new_ptr();
+            tcg_gen_ld_ptr(ptr, slot, offsetof(TCGIndirectSlot, e[i].host));
+            tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+            tcg_temp_free_ptr(ptr);
+            if (next != miss) {
+                gen_set_label(next);
+            }
         }
     }
 

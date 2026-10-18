@@ -48,7 +48,9 @@ struct tb_tc {
  * exit has a cache (tcg_gen_lookup_and_goto_ptr_cached): @key, a
  * target-specific value for the target PC and state with the context id
  * (cpu->neg.ibtc_ctx) in its high 32 bits, and the host code to run for it.
- * A key of 0 matches nothing.
+ * A key of 0 matches nothing. LT_IBTC_INDEXED uses an eight-bucket table
+ * indexed by the target instead of the two recent targets. The full key,
+ * including the context generation, must still match before a host jump.
  */
 typedef struct TCGIndirectEntry {
     uint64_t key;
@@ -56,8 +58,18 @@ typedef struct TCGIndirectEntry {
 } TCGIndirectEntry;
 
 typedef struct TCGIndirectSlot {
-    TCGIndirectEntry e[2];
+    union {
+        TCGIndirectEntry e[2];
+        TCGIndirectEntry indexed[8];
+    };
 } TCGIndirectSlot;
+
+/* Fixed for the lifetime of a TCG instance; default off. */
+extern bool tcg_ibtc_indexed;
+static inline unsigned tcg_ibtc_index(uint32_t key)
+{
+    return ((key >> 2) ^ (key >> 5)) & 7;
+}
 
 struct TranslationBlock {
     /*
