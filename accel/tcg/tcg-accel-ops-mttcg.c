@@ -24,7 +24,9 @@
  */
 
 #include "qemu/osdep.h"
+#ifndef _WIN32
 #include <dlfcn.h>
+#endif
 #include "system/memory.h"
 #include "exec/cpu-common.h"
 #include "system/tcg.h"
@@ -170,7 +172,9 @@ static void mttcg_acct_init(void)
     acct_interval_ns = (int64_t)(atof(v) > 0 ? atof(v) : 5.0) * 1000000000LL;
     acct_t0 = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     acct_next_dump = acct_t0 + acct_interval_ns;
+#if !defined(CONFIG_DARWIN) && !defined(_WIN32) /* no pthread_getcpuclockid */
     acct_cpu_clock_ok = !pthread_getcpuclockid(pthread_self(), &acct_cpu_clock);
+#endif
     it_acct_cb_enable();
 }
 
@@ -233,6 +237,11 @@ static void mttcg_acct_dump(int64_t now)
             it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow);
     for (int i = 0; i < 64 && it_acct_cbs[i].fn; i++) {
         struct it_acct_cb *c = &it_acct_cbs[i];
+#ifdef _WIN32
+        fprintf(stderr, "[acct]   main-cb ?+0x%" PRIxPTR " - n %" PRIu64 " ns %" PRIu64
+                " long %" PRIu64 " long-ns %" PRIu64 " max %" PRIu64 "\n",
+                (uintptr_t)c->fn, c->n, c->ns, c->long_n, c->long_ns, c->max);
+#else
         Dl_info di = { 0 };
 
         /* Symbolize offline from the library's offset (static functions have no dynamic name). */
@@ -242,6 +251,7 @@ static void mttcg_acct_dump(int64_t now)
                 di.dli_fname ? strrchr(di.dli_fname, '/') ? strrchr(di.dli_fname, '/') + 1 : di.dli_fname : "?",
                 (uintptr_t)c->fn - (uintptr_t)di.dli_fbase, di.dli_sname ? di.dli_sname : "-",
                 c->n, c->ns, c->long_n, c->long_ns, c->max);
+#endif
     }
     fprintf(stderr, "[acct]   ctxsw %" PRIu64 " tlb-fills", it_acct_ctxsw);
     for (int i = 0; i < 16; i++) {
