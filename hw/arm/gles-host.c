@@ -659,6 +659,12 @@ static int gles_strict = -1;
 /* LT_GLES_ARRAY_CACHE=off restores per-draw enable/pointer/check/disable for
  * same-binary A/B runs. Strict checks still guard every changed pointer. */
 static bool gles_array_cache;
+/* Focused wall timings, independent of per-draw and live capture timers. */
+static bool gles_context_prof;
+static struct {
+    uint64_t count, switches, init, current, dispatch, max_current, max_dispatch;
+} gles_context_times[3];
+static uint64_t gles_context_next;
 /*
  * IT_GLES_SWIZZLE=1 restores the old readback -- RGBA plus a per-pixel byte
  * swap -- and =2 alternates between old and new every 300 frames. Alternating
@@ -693,6 +699,8 @@ static void gles_read_switches(void)
     gles_strict = v ? atoi(v) : 1;
     v = getenv("LT_GLES_ARRAY_CACHE");
     gles_array_cache = !v || (strcmp(v, "off") && strcmp(v, "0"));
+    v = getenv("LT_GLES_CONTEXT_PROF");
+    gles_context_prof = v && strcmp(v, "off") && strcmp(v, "0");
     fprintf(stderr, "[gles] client-array-cache=%s strict=%d\n",
             gles_array_cache ? "on" : "off", gles_strict);
     v = getenv("IT_GLES_SWIZZLE");
@@ -7881,6 +7889,9 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
 {
     uint64_t t0;
     int64_t r;
+    GLESHost *previous = gh_current;
+    int stage_slot = -1;
+    uint64_t stage_begin = 0, stage_init = 0, stage_current = 0;
 
     if (!gles_allowed) {
         return -1;
@@ -7904,14 +7915,28 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
     gh_current = state ? state : &gh_legacy;
 #endif
     gles_read_switches();
+    if (gles_context_prof) {
+        stage_slot = slot == GLES_SLOT_VIEWPORT ? 0 :
+                     slot == GLES_SLOT_BIND_FRAMEBUFFER ? 1 :
+                     slot == GLES_OP_PRESENT_SURFACE ? 2 : -1;
+        if (stage_slot >= 0) {
+            stage_begin = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        }
+    }
     if (!gles_host_init()) {
         gles_refuse("host:no-context");
         return -1;
     }
 
+    if (stage_slot >= 0) {
+        stage_init = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
     if (!gles_platform_make_current()) {
         gles_refuse("host:make-current");
         return -1;
+    }
+    if (stage_slot >= 0) {
+        stage_current = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     }
 
     gh.calls++;
@@ -7944,6 +7969,37 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
         }
     } else {
         r = gles_host_call_1(cpu, slot, ctx, argc, a);
+    }
+    if (stage_slot >= 0) {
+        uint64_t end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        uint64_t current_ns = stage_current - stage_init;
+        uint64_t dispatch_ns = end - stage_current;
+        gles_context_times[stage_slot].count++;
+        gles_context_times[stage_slot].switches += previous != gh_current;
+        gles_context_times[stage_slot].init += stage_init - stage_begin;
+        gles_context_times[stage_slot].current += current_ns;
+        gles_context_times[stage_slot].dispatch += dispatch_ns;
+        gles_context_times[stage_slot].max_current = MAX(
+            gles_context_times[stage_slot].max_current, current_ns);
+        gles_context_times[stage_slot].max_dispatch = MAX(
+            gles_context_times[stage_slot].max_dispatch, dispatch_ns);
+        if (!gles_context_next) {
+            gles_context_next = end + 5000000000ULL;
+        } else if (end >= gles_context_next) {
+            static const char *names[] = { "viewport", "bind-fbo", "present-surface" };
+            for (int i = 0; i < G_N_ELEMENTS(gles_context_times); i++) {
+                fprintf(stderr, "[gles-context] %s n=%" PRIu64 " switches=%" PRIu64
+                        " init-ns=%" PRIu64 " current-ns=%" PRIu64
+                        " dispatch-ns=%" PRIu64 " max-current-ns=%" PRIu64
+                        " max-dispatch-ns=%" PRIu64 "\n", names[i],
+                        gles_context_times[i].count, gles_context_times[i].switches,
+                        gles_context_times[i].init, gles_context_times[i].current,
+                        gles_context_times[i].dispatch, gles_context_times[i].max_current,
+                        gles_context_times[i].max_dispatch);
+            }
+            memset(gles_context_times, 0, sizeof(gles_context_times));
+            gles_context_next = end + 5000000000ULL;
+        }
     }
     {
         /* IT_GLES_CALL_TRACE=N: the first N calls, with arguments and result. */
