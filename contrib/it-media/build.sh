@@ -4,7 +4,11 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../armv6-toolchain/armv6.sh"
 cc6 "$HERE/itmedia.c" "$HERE/itmedia.o" -Wall -Wextra \
     -isystem "$(xcrun clang -print-resource-dir)/include"
-link6 -execute "$HERE/itmedia" "$HERE/itmedia.o" -e __start
+# The embedded Info.plist names the process Music (com.apple.mobileipod): 4.x MusicLibrary opens the library for
+# writing only in Music, iPod Out and itdbprepserver (MLProcessHasDatabaseWritePermissions, by bundle identifier
+# or process name), the processes that add store purchases and synced changes on the device. Elsewhere its inserts
+# hit a read-only database and post-processing drops the half-written item.
+link6 -execute "$HERE/itmedia" "$HERE/itmedia.o" -e __start -sectcreate __TEXT __info_plist "$HERE/itmedia-Info.plist"
 rm -f "$HERE/itmedia.o"
 # 3.2+ AMFI runs only signed executables; 3.1 ignores the signature. 5.x's importer signs each track's
 # integrity through FairPlay, which answers only fairplay-client processes: the entitlement carries 9B206 atc's
@@ -13,4 +17,5 @@ rm -f "$HERE/itmedia.o"
 cc6 "$HERE/itphoto.c" "$HERE/itphoto.o" -Wall -Wextra
 link6 -execute "$HERE/itphoto" "$HERE/itphoto.o" -e __start
 rm -f "$HERE/itphoto.o"
-"${LDID:-ldid}" -S "$HERE/itphoto"
+# From 6.0 Photos access goes through TCC; atc, the sync agent, is allowed it with the same key.
+"${LDID:-ldid}" -S"$HERE/itphoto.entitlements" "$HERE/itphoto"

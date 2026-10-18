@@ -306,9 +306,14 @@ static sqlite3_int64 ml3_import(void *music, ID input, const char *folder, const
     static const struct block_descriptor descriptor = {0, sizeof(struct block)};
     void **global = dlsym(RTLD_DEFAULT,"_NSConcreteGlobalBlock");
     ID track = m0(m0(getclass("MLTrackImport"),"alloc"),"init");
-    /* sharedLibrary is read-only outside the system's writers; this process opens its own writer. */
-    ID writer = CALL(ID,(ID,ID,ID,signed char))(m0(getclass("ML3MusicLibrary"),"alloc"),selector("initWithPath:enableWrites:"),
-                                                string(ML3_LIBRARY),1);
+    /* sharedLibrary is read-only outside the system's writers; this process opens its own writer (5.x and 6.x
+     * initWithPath:enableWrites:, 7.x initWithPath:readOnly:populateUnitTestTablesBlock:). */
+    ID writer = m0(getclass("ML3MusicLibrary"),"alloc"), library = string(ML3_LIBRARY);
+    if (CALL(int,(ID,ID,ID))(writer,selector("respondsToSelector:"),selector("initWithPath:enableWrites:")))
+        writer = CALL(ID,(ID,ID,ID,signed char))(writer,selector("initWithPath:enableWrites:"),library,1);
+    else
+        writer = CALL(ID,(ID,ID,ID,signed char,void *))(writer,selector("initWithPath:readOnly:populateUnitTestTablesBlock:"),
+                                                        library,0,NULL);
     ID importer = writer ? m1(m0(getclass("ML3TrackImporter"),"alloc"),"initWithMusicLibrary:",writer) : NULL;
     if (!global || !track || !importer) fail("ML3 importer unavailable");
     const char *source[] = {"title","artist","album","album_artist","composer","genre","track_number","track_count",
@@ -329,8 +334,9 @@ static sqlite3_int64 ml3_import(void *music, ID input, const char *folder, const
     CALL(void,(ID,ID,ID,ID))(track,selector("setValue:forEntityProperty:"),number((unsigned)fmax(1.0,floor(ms+0.5))),*total);
     /* ML3's media types are not MPMediaType's: 9B206 MusicLibrary's MLMediaType description names bit 8 "Song",
      * and Music's song queries select item.media_type & 8. With 1 the row is counted (Music shows its tabs) but
-     * never listed. */
-    CALL(void,(ID,ID,unsigned))(track,selector("setMediaType:"),8);
+     * never listed. A movie is 0x800, what 9B206's MLMediaTypeForITMediaKind makes of iTunes' kind 2 (feature-movie). */
+    ID kind = field(input,"kind");
+    CALL(void,(ID,ID,unsigned))(track,selector("setMediaType:"),kind && !strcmp(utf8(kind),"feature-movie") ? 0x800 : 8);
     char path[512];
     snprintf(path,sizeof(path),MEDIA "%s/%s",folder,filename);
     m1(track,"setAssetFilePath:",string(path));
@@ -340,7 +346,7 @@ static sqlite3_int64 ml3_import(void *music, ID input, const char *folder, const
         if (!data) fail("cannot read artwork");
         m1(track,"setArtworkData:",data);
     }
-    struct block done = {*global, 1<<28, 0, (void *)ml3_finished, &descriptor};
+    struct block done = {global, 1<<28, 0, (void *)ml3_finished, &descriptor};  /* the class is the symbol itself */
     CALL(void,(ID,ID,ID,void *))(importer,selector("importTrack:withCompletionBlock:"),track,&done);
     if (!ml3_result.done || !ml3_result.ok || !ml3_result.pid)
         fail("MusicLibrary declined import; retain staged media for reconciliation");
@@ -407,15 +413,32 @@ int main(int argc, char **argv) {
     if (!sql_open || !sql_timeout || !sql_exec || !sql_prepare || !sql_bind ||
         !sql_column ||
         !sql_step || !sql_finalize || !sql_close || !sql_error) fail("SQLite API unavailable");
+    int fresh = access(LIBRARY "Library.itdb",F_OK) != 0;
     ID library = m0(getclass("MusicLibrary"),"sharedMusicLibrary");
     const char *insert = "insertItemFromPurchaseFolder:withItemProperties:";
-    /* The capability, not a build list: 3.1 through 4.x answer this insert over the
-     * iTunes Library.itlp SQLite library the queries below read; 5.x has ML3's importer instead. */
-    if (!library || !CALL(int,(ID,ID,ID))(library,selector("respondsToSelector:"),selector(insert))) {
+    /* The capability, not a build list: 3.1 through 4.2.1 answer this insert over the iTunes Library.itlp SQLite
+     * library the queries below read; 5.x on have ML3's importer over MediaLibrary.sqlitedb instead. 4.3 has
+     * neither the insert nor ML3's library (its importer writes the itlp library, see README.md). */
+    int purchase = library && CALL(int,(ID,ID,ID))(library,selector("respondsToSelector:"),selector(insert));
+    if (!purchase) {
         ml3 = getclass("ML3TrackImporter") && getclass("MLTrackImport") && getclass("ML3MusicLibrary");
         if (!ml3) fail("unsupported firmware: no MusicLibrary import service");
-        if (field(input,"kind") && strcmp(utf8(field(input,"kind")),"song")) fail("unsupported firmware: movies need 4.x or earlier");
         m0(getclass("ML3MusicLibrary"),"sharedLibrary");   /* creates the library on a device that has none */
+    }
+    /* A library this process has just created is committed and the import starts over in a fresh process:
+     * 4.2.1's library signs each database file (Locations.itdb.cbk and the rest), and the process that created
+     * them failed its own size check against them at the next open ("ERROR-cbk: filesize mismatch"), so the
+     * insert was refused; a second process imports into the same library. */
+    if (fresh && purchase) {
+        if (getenv("ITMEDIA_CREATED")) fail("MusicLibrary did not create the music library");
+        m0(getclass("MusicLibrary"),"commitAllDeferredWork");
+        m0(getclass("MusicLibrary"),"flush");
+        close(lock);
+        setenv("ITMEDIA_CREATED","1",1);
+        execv(argv[0],argv);
+        fail("cannot start the import after creating the music library");
+    }
+    if (!purchase) {
         unsigned artwork_id = 0;
         sqlite3_int64 pid = existing(folder,filename,&artwork_id);
         int was_present = pid != 0;

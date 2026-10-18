@@ -1,6 +1,7 @@
-/* A bounded native Saved Photos client for 3.1 and 3.2 (PLCameraAlbum). A persistent
+/* A bounded native Saved Photos client: PLCameraAlbum on 3.1 and 3.2, ALAssetsLibrary from 4.0. A persistent
  * receipt prevents replay when a previous process died during an async save.
- * Native Photos supplies the saved DCIM path for deletion reconciliation. */
+ * Native Photos supplies the saved photo's identity for deletion reconciliation: the DCIM path (3.x) or the
+ * asset's assets-library URL (4.0 on). */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,6 +59,17 @@ static int asset_path(const char *path) {
     const char *name = slash+1;
     if (strlen(name)!=12 || strncmp(name,"IMG_",4) || strcmp(name+8,".JPG")) return 0;
     for (int i=4; i<8; ++i) if (name[i]<'0' || name[i]>'9') return 0;
+    return 1;
+}
+/* 4.0 on: ALAssetsLibrary's URL for a saved photo, assets-library://asset/asset.JPG?id=…&ext=JPG. */
+#define ASSET_URL "assets-library://asset/asset.JPG?id="
+static int asset_url(const char *url) {
+    if (!url || strncmp(url,ASSET_URL,strlen(ASSET_URL))) return 0;
+    const char *id = url + strlen(ASSET_URL), *end = strchr(id,'&');
+    if (!end || end == id || end-id > 64 || strcmp(end,"&ext=JPG")) return 0;
+    for (; id < end; ++id)
+        if (!((*id >= 'a' && *id <= 'z') || (*id >= 'A' && *id <= 'Z') || (*id >= '0' && *id <= '9') || *id == '-'))
+            return 0;
     return 1;
 }
 /* Check the directories as well as the original before reconciling deletion.
@@ -126,6 +138,15 @@ static int jpeg_size(FILE *file) {
         if (fseek(file,length-2,SEEK_CUR)) return 0;
     }
 }
+static void staged_photo(void) {
+    int fd = open(photo_path,O_RDONLY|O_NOFOLLOW|O_NONBLOCK);
+    struct stat st;
+    if (fd < 0 || fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > 16*1024*1024)
+        fail("staged photo must be a regular JPEG of at most 16 MiB");
+    FILE *file = fdopen(fd,"rb");
+    if (!file || !jpeg_size(file)) fail("expected an 8-bit baseline JPEG no larger than 2048 pixels per side");
+    fclose(file);
+}
 static void saved(ID self, ID cmd, ID image, ID error, void *context) {
     (void)self; (void)cmd; (void)image;
     if (error) {
@@ -143,6 +164,38 @@ static void saved(ID self, ID cmd, ID image, ID error, void *context) {
     puts("imported");
     fflush(stdout);
     _exit(0);
+}
+/* 4.0 on: ALAssetsLibrary's completion blocks, as global block literals; it calls them on the main run loop. */
+struct block_descriptor { unsigned long reserved, size; };
+struct block { void *isa; int flags, reserved; void *invoke; const struct block_descriptor *descriptor; };
+static struct block global_block(void *invoke) {
+    static const struct block_descriptor descriptor = {0, sizeof(struct block)};
+    struct block b = {dlsym(RTLD_DEFAULT,"_NSConcreteGlobalBlock"), 1<<28, 0, invoke, &descriptor};
+    if (!b.isa) fail("cannot create photo callback");
+    return b;
+}
+static void written(struct block *b, ID url, ID error) {
+    (void)b;
+    if (error) {
+        const char *reason = utf8(m0(error,"localizedDescription"));
+        fail(reason ? reason : "Photos did not confirm the save; outcome may be unknown");
+    }
+    const char *identity = url ? utf8(m0(url,"absoluteString")) : NULL;
+    if (!asset_url(identity)) fail("Photos returned no valid asset identity; outcome may be unknown");
+    snprintf(saved_path,sizeof(saved_path),"%s",identity);
+    receipt(0);
+    unlink(photo_path);
+    puts("imported");
+    fflush(stdout);
+    _exit(0);
+}
+static int lookup;  /* 0 pending, 1 the asset exists, 2 deleted, 3 the library refused the lookup */
+static void looked_up(struct block *b, ID asset) { (void)b; lookup = asset ? 1 : 2; }
+static void lookup_failed(struct block *b, ID error) { (void)b; (void)error; lookup = 3; }
+static void run_until(int *flag, double seconds) {
+    ID loop = m0(getclass("NSRunLoop"),"currentRunLoop");
+    for (int i = 0; !*flag && i < seconds * 4; ++i)
+        m1(loop,"runUntilDate:",CALL(ID,(ID,ID,double))(getclass("NSDate"),selector("dateWithTimeIntervalSinceNow:"),0.25));
 }
 __attribute__((naked)) void _start(void) {
     __asm__ volatile("ldr r0, [sp]\n\tadd r1, sp, #4\n\tb _main");
@@ -171,19 +224,19 @@ int main(int argc, char **argv) {
         if (count <= 6 || count >= (ssize_t)sizeof(state) || memcmp(state,"done\n",5) || state[count-1]!='\n')
             fail("previous photo import has an uncertain outcome; inspect Saved Photos before importing again");
         state[count-1] = 0;
-        if (strlen(state+5) != (size_t)count-6 || !asset_path(state+5)) fail("invalid saved photo identity");
-        if (asset_exists(state+5)) complete();
-        /* Only a confirmed completed import whose original is gone may replay. */
-        if (unlink(receipt_path)) fail("cannot replace deleted photo receipt");
+        if (strlen(state+5) != (size_t)count-6 || !(asset_path(state+5) || asset_url(state+5)))
+            fail("invalid saved photo identity");
+        /* An asset URL is checked through the library once it is loaded, below. */
+        if (asset_url(state+5)) snprintf(saved_path,sizeof(saved_path),"%s",state+5);
+        else {
+            if (asset_exists(state+5)) complete();
+            /* Only a confirmed completed import whose original is gone may replay. */
+            if (unlink(receipt_path)) fail("cannot replace deleted photo receipt");
+        }
     }
     else if (errno != ENOENT) fail("cannot read import receipt");
-    fd = open(photo_path,O_RDONLY|O_NOFOLLOW|O_NONBLOCK);
-    struct stat st;
-    if (fd < 0 || fstat(fd,&st) || !S_ISREG(st.st_mode) || st.st_size <= 0 || st.st_size > 16*1024*1024)
-        fail("staged photo must be a regular JPEG of at most 16 MiB");
-    FILE *file = fdopen(fd,"rb");
-    if (!file || !jpeg_size(file)) fail("expected an 8-bit baseline JPEG no larger than 2048 pixels per side");
-    fclose(file);
+    /* A recorded asset may be in the library with its staged copy gone: the photo is checked after the lookup. */
+    if (!*saved_path) staged_photo();
 
     void *objc = dlopen("/usr/lib/libobjc.A.dylib",RTLD_NOW);
     if (!objc) fail("cannot load Objective-C runtime");
@@ -197,8 +250,44 @@ int main(int argc, char **argv) {
         !dlopen("/System/Library/Frameworks/Foundation.framework/Foundation",RTLD_NOW))
         fail("cannot load Foundation");
     m0(m0(getclass("NSAutoreleasePool"),"alloc"),"init");
-    if (!dlopen("/System/Library/Frameworks/UIKit.framework/UIKit",RTLD_NOW) ||
-        !dlopen("/System/Library/PrivateFrameworks/PhotoLibrary.framework/PhotoLibrary",RTLD_NOW))
+    if (!dlopen("/System/Library/Frameworks/UIKit.framework/UIKit",RTLD_NOW))
+        fail("cannot load the native photo-saving API");
+    /* 4.0 on: the public save, whose completion names the new asset, and its lookup for a recorded one. */
+    ID assets = dlopen("/System/Library/Frameworks/AssetsLibrary.framework/AssetsLibrary",RTLD_NOW)
+        ? getclass("ALAssetsLibrary") : NULL;
+    if (assets) {
+        ID library = m0(m0(assets,"alloc"),"init");
+        if (!library) fail("cannot open the photo library");
+        if (*saved_path) {
+            struct block found = global_block(looked_up), refused = global_block(lookup_failed);
+            ID url = m1(getclass("NSURL"),"URLWithString:",string(saved_path));
+            CALL(void,(ID,ID,ID,void *,void *))(library,selector("assetForURL:resultBlock:failureBlock:"),url,&found,&refused);
+            run_until(&lookup,20);
+            if (lookup == 1) complete();
+            if (lookup != 2) fail("cannot inspect the saved photo; inspect Saved Photos before importing again");
+            if (unlink(receipt_path)) fail("cannot replace deleted photo receipt");
+            staged_photo();
+        }
+        ID jpeg = m1(getclass("NSData"),"dataWithContentsOfFile:",string(photo_path));
+        if (!jpeg) fail("cannot read staged photo");
+        /* 4.1 on saves the JPEG's own bytes; 4.0 only a decoded image (the JPEG is upright: orientation 0, Up). */
+        const char *data_save = "writeImageDataToSavedPhotosAlbum:metadata:completionBlock:";
+        void *cg = NULL;
+        if (!CALL(int,(ID,ID,ID))(library,selector("respondsToSelector:"),selector(data_save))) {
+            ID image = m1(getclass("UIImage"),"imageWithContentsOfFile:",string(photo_path));
+            if (!image || !(cg = (void *)m0(image,"CGImage"))) fail("UIKit could not decode the photo");
+        }
+        receipt(1);  /* After input preparation, before submitting the mutation. */
+        struct block done = global_block(written);
+        if (!cg) CALL(void,(ID,ID,ID,ID,void *))(library,selector(data_save),jpeg,NULL,&done);
+        else CALL(void,(ID,ID,void *,int,void *))(library,selector("writeImageToSavedPhotosAlbum:orientation:completionBlock:"),
+                                                  cg,0,&done);
+        int never = 0;
+        run_until(&never,40);
+        fail("photo save timed out; inspect Saved Photos before importing again");
+    }
+    if (*saved_path) fail("invalid saved photo identity");
+    if (!dlopen("/System/Library/PrivateFrameworks/PhotoLibrary.framework/PhotoLibrary",RTLD_NOW))
         fail("cannot load the native photo-saving API");
     ID album = m0(getclass("PLCameraAlbum"),"sharedInstance");
     /* The camera's save with the saved path as context: 3.1's, or 3.2's with a zoom factor
