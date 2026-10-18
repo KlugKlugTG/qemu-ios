@@ -280,22 +280,104 @@ static void ios_report_first_lit_frame(const uint8_t *bgra, int w, int h)
  * the GL ones IT_GLES_PROF.
  */
 void it_acct_frame_snapshot(int64_t v[6]);
-/* Capture writes are buffered and bounded. This mutex never acquires the BQL.
+/* Capture producers only format and enqueue bounded records. The writer never
+ * holds this mutex during file I/O, and this mutex never acquires the BQL.
  * Completed GL calls are grouped by publication interval; S rows retain slow
  * call intervals, including calls spanning a publication boundary. */
 extern bool it_profile_on;
 static GMutex profile_mutex;
 static FILE *profile_file;
 static int profile_error;
+#define PROFILE_QUEUE_BYTES (8 * 1024 * 1024)
+static GCond profile_cond;
+static GThread *profile_thread;
+static char *profile_queue;
+static size_t profile_head, profile_queued;
+static uint64_t profile_bytes;
+static bool profile_closing, profile_sync;
+
+/* Called with profile_mutex. LT_PROFILE_SYNC=on restores synchronous writes
+ * for controlled comparisons; ordinary producers never perform storage I/O. */
+static void profile_printf_locked(const char *format, ...) G_GNUC_PRINTF(1, 2);
+static void profile_printf_locked(const char *format, ...)
+{
+    char line[1024];
+    va_list ap;
+    va_start(ap, format);
+    if (profile_sync) {
+        int n = vfprintf(profile_file, format, ap);
+        va_end(ap);
+        if (n < 0) {
+            profile_error = EIO;
+            qatomic_set(&it_profile_on, false);
+        } else {
+            profile_bytes += n;
+        }
+        return;
+    }
+    int n = vsnprintf(line, sizeof(line), format, ap);
+    va_end(ap);
+    if (n < 0 || (size_t)n >= sizeof(line) || (size_t)n > PROFILE_QUEUE_BYTES - profile_queued) {
+        profile_error = ENOBUFS;
+        qatomic_set(&it_profile_on, false);
+        return;
+    }
+    size_t tail = (profile_head + profile_queued) % PROFILE_QUEUE_BYTES;
+    size_t first = MIN((size_t)n, PROFILE_QUEUE_BYTES - tail);
+    memcpy(profile_queue + tail, line, first);
+    memcpy(profile_queue, line + first, n - first);
+    profile_queued += n;
+    profile_bytes += n;
+    g_cond_signal(&profile_cond);
+}
+
+static gpointer profile_write_thread(gpointer unused)
+{
+    char buffer[65536];
+    int error = 0;
+    for (;;) {
+        g_mutex_lock(&profile_mutex);
+        while (!profile_queued && !profile_closing) {
+            g_cond_wait(&profile_cond, &profile_mutex);
+        }
+        size_t n = MIN(profile_queued, sizeof(buffer));
+        size_t first = MIN(n, PROFILE_QUEUE_BYTES - profile_head);
+        memcpy(buffer, profile_queue + profile_head, first);
+        memcpy(buffer + first, profile_queue, n - first);
+        profile_head = (profile_head + n) % PROFILE_QUEUE_BYTES;
+        profile_queued -= n;
+        bool done = !n && profile_closing;
+        g_mutex_unlock(&profile_mutex);
+        if (done) {
+            break;
+        }
+        if (!error && fwrite(buffer, 1, n, profile_file) != n) {
+            error = EIO;
+            g_mutex_lock(&profile_mutex);
+            profile_error = error;
+            qatomic_set(&it_profile_on, false);
+            g_mutex_unlock(&profile_mutex);
+        }
+    }
+    if (fclose(profile_file)) {
+        error = EIO;
+    }
+    if (error) {
+        g_mutex_lock(&profile_mutex);
+        profile_error = error;
+        g_mutex_unlock(&profile_mutex);
+    }
+    return NULL;
+}
 static uint64_t profile_started, profile_gl_ns, profile_present_ns;
 static struct { uint64_t count, total, max; } profile_slots[0x1010];
 static uint32_t profile_touched[0x1010], profile_ntouched;
 
 static void profile_check_locked(void)
 {
-    if (ferror(profile_file) || ftell(profile_file) >= 128 * 1024 * 1024 ||
+    if (profile_bytes >= 128 * 1024 * 1024 ||
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - profile_started >= 900000000000ULL) {
-        profile_error = ferror(profile_file) ? EIO : EFBIG;
+        profile_error = profile_error ? profile_error : EFBIG;
         qatomic_set(&it_profile_on, false);
     }
 }
@@ -323,7 +405,7 @@ static void profile_flush_gl_locked(uint64_t now)
 {
     for (uint32_t i = 0; i < profile_ntouched; i++) {
         uint32_t slot = profile_touched[i];
-        fprintf(profile_file, "G %" PRIu64 " %u %" PRIu64 " %" PRIu64 " %" PRIu64 " %s\n",
+        profile_printf_locked("G %" PRIu64 " %u %" PRIu64 " %" PRIu64 " %" PRIu64 " %s\n",
                 now, slot, profile_slots[slot].count, profile_slots[slot].total,
                 profile_slots[slot].max, profile_gl_name(slot));
         memset(&profile_slots[slot], 0, sizeof(profile_slots[slot]));
@@ -349,9 +431,17 @@ int qemu_ios_profile_start(const char *path)
     } else {
         setvbuf(profile_file, NULL, _IOFBF, 65536);
         profile_error = 0;
+        profile_head = profile_queued = profile_bytes = 0;
+        profile_closing = false;
+        const char *sync = getenv("LT_PROFILE_SYNC");
+        profile_sync = sync && strcmp(sync, "off") && strcmp(sync, "0");
+        if (!profile_sync) {
+            profile_queue = g_malloc(PROFILE_QUEUE_BYTES);
+            profile_thread = g_thread_new("profile-writer", profile_write_thread, NULL);
+        }
         profile_gl_ns = profile_present_ns = 0;
         profile_started = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-        fprintf(profile_file, "# LightTouch profile v1; monotonic ns; no GL arguments\n"
+        profile_printf_locked("# LightTouch profile v1; monotonic ns; no GL arguments\n"
                 "# F ns serial run outside bql-outside bql-inside vcpu-cpu insns gl present main-cpu due-ns\n"
                 "# G end-ns slot count total-ns max-ns name (completed calls since preceding F)\n"
                 "# S start-ns end-ns slot context (GL calls >=500us)\n"
@@ -367,15 +457,30 @@ int qemu_ios_profile_stop(void)
 {
     int result;
     g_mutex_lock(&profile_mutex);
+    if (profile_closing) {
+        g_mutex_unlock(&profile_mutex);
+        return -EBUSY;
+    }
     qatomic_set(&it_profile_on, false);
     if (profile_file) {
         uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         profile_flush_gl_locked(now);
-        fprintf(profile_file, "# end %" PRIu64 " error %d\n", now, profile_error);
-        if (fclose(profile_file) && !profile_error) {
+        profile_printf_locked("# end %" PRIu64 " error %d\n", now, profile_error);
+        profile_closing = true;
+        g_cond_signal(&profile_cond);
+        GThread *writer = profile_thread;
+        if (writer) {
+            g_mutex_unlock(&profile_mutex);
+            /* Producers are disabled; the writer drains without holding the BQL. */
+            g_thread_join(writer);
+            g_mutex_lock(&profile_mutex);
+        } else if (fclose(profile_file)) {
             profile_error = EIO;
         }
         profile_file = NULL;
+        profile_thread = NULL;
+        g_clear_pointer(&profile_queue, g_free);
+        profile_closing = false;
     }
     result = -profile_error;
     g_mutex_unlock(&profile_mutex);
@@ -414,7 +519,7 @@ void qemu_ios_profile_gl(uint64_t start, uint32_t slot, uint32_t context)
             profile_slots[slot].max = MAX(profile_slots[slot].max, dt);
         }
         if (dt >= 500000) {
-            fprintf(profile_file, "S %" PRIu64 " %" PRIu64 " %u %u\n", start, end, slot, context);
+            profile_printf_locked("S %" PRIu64 " %" PRIu64 " %u %u\n", start, end, slot, context);
             profile_check_locked();
         }
     }
@@ -429,7 +534,7 @@ void qemu_ios_profile_lock(uint64_t start, uint64_t end, bool wait,
     }
     g_mutex_lock(&profile_mutex);
     if (qatomic_read(&it_profile_on) && start >= profile_started) {
-        fprintf(profile_file, "%c %" PRIu64 " %" PRIu64 " %s %d\n",
+        profile_printf_locked("%c %" PRIu64 " %" PRIu64 " %s %d\n",
                 wait ? 'W' : 'H', start, end, file, line);
         profile_check_locked();
     }
@@ -449,7 +554,7 @@ static void ios_profile_frame(uint64_t due, uint64_t serial)
     if (qatomic_read(&it_profile_on)) {
         uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         profile_flush_gl_locked(now);
-        fprintf(profile_file, "F %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64
+        profile_printf_locked("F %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64
                 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRIu64
                 " %" PRIu64 " %" PRId64 " %" PRIu64 "\n", now, serial,
                 v[0], v[1], v[2], MAX((int64_t)0, v[3] - v[2]), v[4], v[5], profile_gl_ns, profile_present_ns,

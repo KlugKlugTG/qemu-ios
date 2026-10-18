@@ -634,24 +634,28 @@ void bql_lock_impl(const char *file, int line)
         it_acct_vcpu_bql_n++;
         it_acct_vcpu_bql_ns += dt;
         it_acct_vcpu_bql_slow += dt > 100000;
-        it_acct_wait_hist[it_acct_bucket(dt)][0]++;
-        it_acct_wait_hist[it_acct_bucket(dt)][1] += dt;
-        /* Non-MMIO takers are keyed by call site (file is a literal). */
-        void *key = it_acct_mmio_mr ? it_acct_mmio_mr
-                                    : (void *)((uintptr_t)file ^ ((uintptr_t)line << 48));
-        for (int i = 0; i < 256; i++) {
-            if (!it_acct_mrs[i].mr || it_acct_mrs[i].mr == key) {
-                if (!it_acct_mrs[i].mr) {
-                    /* Copy now: some regions are transient and freed later. */
-                    MemoryRegion *r = it_acct_mmio_mr;
-                    it_acct_mrs[i].name = r ? g_strdup_printf("%s@0x%" PRIx64 "+0x%" PRIx64,
-                        memory_region_name(r) ?: "?", (uint64_t)r->addr,
-                        (uint64_t)int128_get64(r->size)) : g_strdup_printf("%s:%d", file, line);
+        /* Live captures need the totals and slow intervals, not the full
+         * accounting tables or allocations while holding the BQL. */
+        if (it_acct_on) {
+            it_acct_wait_hist[it_acct_bucket(dt)][0]++;
+            it_acct_wait_hist[it_acct_bucket(dt)][1] += dt;
+            /* Non-MMIO takers are keyed by call site (file is a literal). */
+            void *key = it_acct_mmio_mr ? it_acct_mmio_mr
+                                        : (void *)((uintptr_t)file ^ ((uintptr_t)line << 48));
+            for (int i = 0; i < 256; i++) {
+                if (!it_acct_mrs[i].mr || it_acct_mrs[i].mr == key) {
+                    if (!it_acct_mrs[i].mr) {
+                        /* Copy now: some regions are transient and freed later. */
+                        MemoryRegion *r = it_acct_mmio_mr;
+                        it_acct_mrs[i].name = r ? g_strdup_printf("%s@0x%" PRIx64 "+0x%" PRIx64,
+                            memory_region_name(r) ?: "?", (uint64_t)r->addr,
+                            (uint64_t)int128_get64(r->size)) : g_strdup_printf("%s:%d", file, line);
+                    }
+                    it_acct_mrs[i].mr = key;
+                    it_acct_mrs[i].n++;
+                    it_acct_mrs[i].ns += dt;
+                    break;
                 }
-                it_acct_mrs[i].mr = key;
-                it_acct_mrs[i].n++;
-                it_acct_mrs[i].ns += dt;
-                break;
             }
         }
         it_acct_mmio_mr = NULL;
@@ -678,18 +682,20 @@ void bql_unlock(void)
                                   false, it_acct_held_file, it_acct_held_line);
         }
         it_acct_held_since = 0;
-        it_acct_hold_hist[it_acct_bucket(dt)][0]++;
-        it_acct_hold_hist[it_acct_bucket(dt)][1] += dt;
-        for (int i = 0; i < 64; i++) {
-            struct it_acct_holder *h = &it_acct_holders[i];
-            if (!h->file || (h->file == it_acct_held_file && h->line == it_acct_held_line)) {
-                h->file = it_acct_held_file;
-                h->line = it_acct_held_line;
-                h->n++;
-                h->ns += dt;
-                h->long_n += dt >= 100000;
-                h->long_ns += dt >= 100000 ? dt : 0;
-                break;
+        if (it_acct_on) {
+            it_acct_hold_hist[it_acct_bucket(dt)][0]++;
+            it_acct_hold_hist[it_acct_bucket(dt)][1] += dt;
+            for (int i = 0; i < 64; i++) {
+                struct it_acct_holder *h = &it_acct_holders[i];
+                if (!h->file || (h->file == it_acct_held_file && h->line == it_acct_held_line)) {
+                    h->file = it_acct_held_file;
+                    h->line = it_acct_held_line;
+                    h->n++;
+                    h->ns += dt;
+                    h->long_n += dt >= 100000;
+                    h->long_ns += dt >= 100000 ? dt : 0;
+                    break;
+                }
             }
         }
     }
