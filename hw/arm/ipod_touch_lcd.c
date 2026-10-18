@@ -846,7 +846,7 @@ static bool lcd_blit_unlock(IPodTouchLCDState *lcd)
 static int lcd_skip_forced_snapshot = -1;
 static bool lcd_snapshot_prof;
 static struct {
-    uint64_t n, forced, skipped, ns, forced_ns, max_ns, next_ns;
+    uint64_t n, forced, skipped, ns, forced_ns, max_ns, begin_ns, next_ns;
 } lcd_snapshot_times;
 
 static void lcd_snapshot_switches(void)
@@ -909,15 +909,18 @@ static void lcd_update_display(IPodTouchLCDState *lcd, DisplaySurface *ds,
 
     if (lcd_snapshot_prof && snapshot_end >= lcd_snapshot_times.next_ns) {
         if (lcd_snapshot_times.next_ns) {
-            fprintf(stderr, "[lcd-snapshot] skip-forced=%s n %" PRIu64
+            fprintf(stderr, "[lcd-snapshot] skip-forced=%s begin-ns %" PRIu64
+                    " end-ns %" PRIu64 " n %" PRIu64
                     " forced %" PRIu64 " skipped %" PRIu64 " ns %" PRIu64
                     " forced-ns %" PRIu64 " max-ns %" PRIu64 "\n",
                     lcd_skip_forced_snapshot ? "on" : "off",
+                    lcd_snapshot_times.begin_ns, snapshot_end,
                     lcd_snapshot_times.n, lcd_snapshot_times.forced,
                     lcd_snapshot_times.skipped, lcd_snapshot_times.ns,
                     lcd_snapshot_times.forced_ns, lcd_snapshot_times.max_ns);
         }
         memset(&lcd_snapshot_times, 0, sizeof(lcd_snapshot_times));
+        lcd_snapshot_times.begin_ns = snapshot_end;
         lcd_snapshot_times.next_ns = snapshot_end + 5000000000ULL;
     }
 
