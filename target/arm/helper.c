@@ -9556,11 +9556,125 @@ bool arm_cpu_do_interrupt_needs_bql(CPUState *cs)
            arm_is_psci_call(cpu, cs->exception_index);
 }
 
+/* Default-off, CPU 0 AArch32 diagnostic. Counters belong to that vCPU only.
+ * SVC r12 is recorded raw: its interpretation depends on the guest's ABI.
+ * Under iOS 3, -31/-32 are mach_msg traps; option bits count attempts, not
+ * messages successfully delivered. Host setup timing excludes guest handlers
+ * and lock waits before entry. Logging time is excluded from the totals too. */
+static int arm_exception_prof_enabled = -1;
+static struct {
+    uint64_t first_ns, next_ns;
+    struct {
+        uint64_t n, ns, max_ns;
+    } exception[32];
+    uint64_t svc[1024], svc_other;
+    uint64_t abort_status[32];
+    uint64_t mach_send, mach_receive;
+} arm_exception_prof;
+
+static inline QEMU_ALWAYS_INLINE uint64_t arm_exception_prof_begin(CPUState *cs)
+{
+    CPUARMState *env = cpu_env(cs);
+    uint64_t now;
+    int exc = cs->exception_index;
+
+    if (cs->cpu_index != 0 || env->aarch64) {
+        return 0;
+    }
+    if (unlikely(arm_exception_prof_enabled < 0)) {
+        const char *v = getenv("LT_EXCEPTION_PROF");
+        arm_exception_prof_enabled = v && strcmp(v, "off") && strcmp(v, "0");
+    }
+    if (!arm_exception_prof_enabled) {
+        return 0;
+    }
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (!arm_exception_prof.first_ns) {
+        arm_exception_prof.first_ns = now;
+        arm_exception_prof.next_ns = now + 5000000000ULL;
+    }
+    if (exc >= 0 && exc < ARRAY_SIZE(arm_exception_prof.exception)) {
+        arm_exception_prof.exception[exc].n++;
+    }
+    if (exc == EXCP_SWI) {
+        int32_t nr = env->regs[12];
+
+        if (nr >= -512 && nr < 512) {
+            arm_exception_prof.svc[nr + 512]++;
+        } else {
+            arm_exception_prof.svc_other++;
+        }
+        if (nr == -31 || nr == -32) {
+            arm_exception_prof.mach_send += !!(env->regs[1] & 1);
+            arm_exception_prof.mach_receive += !!(env->regs[1] & 2);
+        }
+    } else if (exc == EXCP_DATA_ABORT) {
+        /* Short-descriptor FSR status encoding used by the iPod ARM1176. */
+        unsigned fsr = env->exception.fsr;
+        unsigned status = (fsr & 15) | ((fsr >> 6) & 16);
+
+        arm_exception_prof.abort_status[status]++;
+    }
+    return now;
+}
+
+static void arm_exception_prof_end(int exc, uint64_t start)
+{
+    uint64_t now, ns;
+
+    if (!start) {
+        return;
+    }
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    ns = now - start;
+    if (exc >= 0 && exc < ARRAY_SIZE(arm_exception_prof.exception)) {
+        arm_exception_prof.exception[exc].ns += ns;
+        arm_exception_prof.exception[exc].max_ns = MAX(
+            arm_exception_prof.exception[exc].max_ns, ns);
+    }
+    if (now < arm_exception_prof.next_ns) {
+        return;
+    }
+    arm_exception_prof.next_ns = now + 5000000000ULL;
+    fprintf(stderr, "[exception-prof] snapshot now-ns %" PRIu64
+            " elapsed-ns %" PRIu64 " cpu 0\n", now,
+            now - arm_exception_prof.first_ns);
+    for (int i = 0; i < ARRAY_SIZE(arm_exception_prof.exception); i++) {
+        if (arm_exception_prof.exception[i].n) {
+            fprintf(stderr, "[exception-prof] exception id %d n %" PRIu64
+                    " ns %" PRIu64 " max-ns %" PRIu64 "\n", i,
+                    arm_exception_prof.exception[i].n,
+                    arm_exception_prof.exception[i].ns,
+                    arm_exception_prof.exception[i].max_ns);
+        }
+    }
+    for (int i = 0; i < ARRAY_SIZE(arm_exception_prof.svc); i++) {
+        if (arm_exception_prof.svc[i]) {
+            fprintf(stderr, "[exception-prof] svc r12 %d n %" PRIu64 "\n",
+                    i - 512, arm_exception_prof.svc[i]);
+        }
+    }
+    fprintf(stderr, "[exception-prof] svc r12 other n %" PRIu64 "\n",
+            arm_exception_prof.svc_other);
+    fprintf(stderr, "[exception-prof] mach-msg send-attempts %" PRIu64
+            " receive-attempts %" PRIu64 "\n",
+            arm_exception_prof.mach_send, arm_exception_prof.mach_receive);
+    for (int i = 0; i < ARRAY_SIZE(arm_exception_prof.abort_status); i++) {
+        if (arm_exception_prof.abort_status[i]) {
+            fprintf(stderr, "[exception-prof] data-abort status %d n %" PRIu64
+                    "\n", i, arm_exception_prof.abort_status[i]);
+        }
+    }
+    fprintf(stderr, "[exception-prof] end now-ns %" PRIu64 "\n", now);
+}
+
 void arm_cpu_do_interrupt(CPUState *cs)
 {
     ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
     unsigned int new_el = env->exception.target_el;
+    int profile_exception = cs->exception_index;
+    uint64_t profile_start = arm_exception_prof_begin(cs);
     uint64_t last_pc = cs->cc->get_pc(cs);
 
     assert(!arm_feature(env, ARM_FEATURE_M));
@@ -9582,6 +9696,9 @@ void arm_cpu_do_interrupt(CPUState *cs)
         arm_handle_psci_call(cpu);
         qemu_log_mask(CPU_LOG_INT, "...handled as PSCI call\n");
         qemu_plugin_vcpu_hostcall_cb(cs, last_pc);
+        if (unlikely(profile_start)) {
+            arm_exception_prof_end(profile_exception, profile_start);
+        }
         return;
     }
 
@@ -9594,6 +9711,9 @@ void arm_cpu_do_interrupt(CPUState *cs)
     if (cs->exception_index == EXCP_SEMIHOST) {
         tcg_handle_semihosting(cs);
         qemu_plugin_vcpu_hostcall_cb(cs, last_pc);
+        if (unlikely(profile_start)) {
+            arm_exception_prof_end(profile_exception, profile_start);
+        }
         return;
     }
 #endif
@@ -9621,6 +9741,9 @@ void arm_cpu_do_interrupt(CPUState *cs)
     }
 
     arm_do_plugin_vcpu_discon_cb(cs, last_pc);
+    if (unlikely(profile_start)) {
+        arm_exception_prof_end(profile_exception, profile_start);
+    }
 }
 #endif /* !CONFIG_USER_ONLY */
 
