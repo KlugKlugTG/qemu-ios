@@ -16,6 +16,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/timer.h"
 #include "cpu.h"
 #include "accel/tcg/probe.h"
 #include "accel/tcg/cpu-mmu-index.h"
@@ -175,6 +176,43 @@ static uint64_t gles_slot_calls[GLES_MAX_SLOTS];
 static uint64_t gles_total_calls;
 static uint64_t gles_bad_slots;
 
+/* The command buffer was just written by the caller. Like QEMU_CALL's
+ * request block, plain RAM can be read through its TLB host pointer. Keep
+ * the debug access as the fallback; batches are not armed for guest faults.
+ * LT_GLES_BATCH_FAST=on opts into this experiment in the same binary. */
+static int gles_batch_read(CPUState *cpu, vaddr va, void *buf, size_t len)
+{
+    static int fast = -1, prof;
+    static uint64_t calls, bytes, ns, ram_hits;
+    uint64_t t0;
+    bool ram;
+    int result;
+
+    if (fast < 0) {
+        const char *v = getenv("LT_GLES_BATCH_FAST");
+        fast = v && strcmp(v, "off") && strcmp(v, "0");
+        v = getenv("IT_GLES_PROF");
+        prof = v && atoi(v);
+        fprintf(stderr, "[gles] batch-ram=%s\n", fast ? "on" : "off");
+    }
+    t0 = prof ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
+    ram = fast && len && guest_rw_ram(cpu, va, buf, len, false);
+    result = ram ? 0 : cpu_memory_rw_debug(cpu, va, buf, len, false);
+    if (prof) {
+        ns += qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - t0;
+        bytes += len;
+        ram_hits += ram;
+        if (++calls == 4096) {
+            fprintf(stderr, "[gles] batch-read: %.3f us, %.1f bytes per batch; "
+                    "RAM hits %" PRIu64 "/%" PRIu64 "\n",
+                    ns / (double)calls / 1000, bytes / (double)calls,
+                    ram_hits, calls);
+            calls = bytes = ns = ram_hits = 0;
+        }
+    }
+    return result;
+}
+
 /* GLES_OP_BATCH: run a guest command buffer, one record per queued call. */
 static int64_t gles_run_batch(CPUState *cpu, qc_gles_args_t *a)
 {
@@ -182,7 +220,7 @@ static int64_t gles_run_batch(CPUState *cpu, qc_gles_args_t *a)
     uint32_t n = a->args[1], i = 0;
 
     if (a->argc != 2 || n > GLES_BATCH_MAX_WORDS ||
-        cpu_memory_rw_debug(cpu, a->args[0], (uint8_t *)buf, n * 4, 0) != 0) {
+        gles_batch_read(cpu, a->args[0], buf, n * 4) != 0) {
         gles_bad_slots++;
         gles_host_refuse("bad-call:batch");
         return -1;
