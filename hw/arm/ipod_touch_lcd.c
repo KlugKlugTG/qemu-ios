@@ -843,6 +843,26 @@ static bool lcd_blit_unlock(IPodTouchLCDState *lcd)
     return true;
 }
 
+static int lcd_skip_forced_snapshot = -1;
+static bool lcd_snapshot_prof;
+static struct {
+    uint64_t n, forced, skipped, ns, forced_ns, max_ns, next_ns;
+} lcd_snapshot_times;
+
+static void lcd_snapshot_switches(void)
+{
+    if (lcd_skip_forced_snapshot < 0) {
+        const char *skip = getenv("LT_LCD_FORCED_SNAPSHOT_SKIP");
+        const char *prof = getenv("LT_LCD_SNAPSHOT_PROF");
+
+        lcd_skip_forced_snapshot = skip && strcmp(skip, "off") && strcmp(skip, "0");
+        lcd_snapshot_prof = prof && strcmp(prof, "off") && strcmp(prof, "0");
+        fprintf(stderr, "[lcd] forced-snapshot-skip=%s snapshot-prof=%s\n",
+                lcd_skip_forced_snapshot ? "on" : "off",
+                lcd_snapshot_prof ? "on" : "off");
+    }
+}
+
 /*
  * framebuffer_update_display() for a top-to-bottom, left-to-right scanout,
  * with the conversion unlocked (lcd_blit_unlock). Taking the dirty snapshot
@@ -863,10 +883,43 @@ static void lcd_update_display(IPodTouchLCDState *lcd, DisplaySurface *ds,
     }
     uint8_t *src = (uint8_t *)memory_region_get_ram_ptr(mem) + addr;
     uint8_t *dest = surface_data(ds);
-    g_autofree DirtyBitmapSnapshot *snap =
-        memory_region_snapshot_and_clear_dirty(mem, addr, (hwaddr)src_width * rows,
+    lcd_snapshot_switches();
+    /* A forced repaint reads every line regardless of dirty bits. Leaving
+     * them set may cause a later redundant repaint or GL surface upload,
+     * but cannot hide a write. Keep this default-off until measured. */
+    bool skip_snapshot = lcd_skip_forced_snapshot && invalidate;
+    uint64_t t0 = lcd_snapshot_prof ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
+    g_autofree DirtyBitmapSnapshot *snap = skip_snapshot ? NULL :
+        memory_region_snapshot_and_clear_dirty(mem, addr,
+                                               (hwaddr)src_width * rows,
                                                DIRTY_MEMORY_VGA);
+    uint64_t snapshot_end = lcd_snapshot_prof ?
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
+    if (lcd_snapshot_prof) {
+        uint64_t ns = skip_snapshot ? 0 : snapshot_end - t0;
+
+        lcd_snapshot_times.n++;
+        lcd_snapshot_times.forced += !!invalidate;
+        lcd_snapshot_times.skipped += skip_snapshot;
+        lcd_snapshot_times.ns += ns;
+        lcd_snapshot_times.forced_ns += invalidate ? ns : 0;
+        lcd_snapshot_times.max_ns = MAX(lcd_snapshot_times.max_ns, ns);
+    }
     bool unlocked = lcd_blit_unlock(lcd);
+
+    if (lcd_snapshot_prof && snapshot_end >= lcd_snapshot_times.next_ns) {
+        if (lcd_snapshot_times.next_ns) {
+            fprintf(stderr, "[lcd-snapshot] skip-forced=%s n %" PRIu64
+                    " forced %" PRIu64 " skipped %" PRIu64 " ns %" PRIu64
+                    " forced-ns %" PRIu64 " max-ns %" PRIu64 "\n",
+                    lcd_skip_forced_snapshot ? "on" : "off",
+                    lcd_snapshot_times.n, lcd_snapshot_times.forced,
+                    lcd_snapshot_times.skipped, lcd_snapshot_times.ns,
+                    lcd_snapshot_times.forced_ns, lcd_snapshot_times.max_ns);
+        }
+        memset(&lcd_snapshot_times, 0, sizeof(lcd_snapshot_times));
+        lcd_snapshot_times.next_ns = snapshot_end + 5000000000ULL;
+    }
 
     for (int i = 0; i < rows; i++) {
         if (invalidate || memory_region_snapshot_get_dirty(mem, snap, addr, src_width)) {
