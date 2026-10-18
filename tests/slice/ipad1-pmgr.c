@@ -40,6 +40,7 @@ static void qemu_irq_raise(qemu_irq irq) {*irq=1;}
 static void qemu_irq_lower(qemu_irq irq) {*irq=0;}
 static void qemu_system_reset_request(int cause) {assert(cause==2);resets++;}
 static void qemu_log_mask(int mask,const char *fmt,...) {}
+#define BQL_LOCK_GUARD() do { } while (0)   /* one thread here */
 #include "slice.h"
 static void wr(S5L8930PMGRState *s,hwaddr off,uint32_t v) {s5l8930_pmgr_write(s,off,v,4);}
 static uint32_t rd(S5L8930PMGRState *s,hwaddr off) {return s5l8930_pmgr_read(s,off,4);}
