@@ -278,6 +278,7 @@ struct S5L8920MachineState {
     MemoryRegion dram, dram_hi, dram_lo, sram, chipid, cpu_debug, audio_complex;
     DeviceState *vic[S5L8920_VIC_COUNT];
     DeviceState *gpio;
+    DeviceState *codec;                  /* the CS42L58 on i2s0 (the 3GS's CS42L61 as its register file) */
     DeviceState *iopcore;
     IPodTouchMultitouchState *mt;
     synopsys_usb_state *usb_otg;
@@ -596,6 +597,8 @@ static void s5l8920_i2c_create(S5L8920MachineState *s, int n)
              * (listed first) */
             object_property_add_alias(OBJECT(s), "compass-heading", OBJECT(slave), "heading");
             s5l8930_ak8973_set_accel(DEVICE(slave), s->accel);
+        } else if (!strcmp(d->type, TYPE_CS42L58)) {
+            s->codec = DEVICE(slave);
         }
     }
 }
@@ -1106,15 +1109,21 @@ static void s5l8920_init(MachineState *machine)
      * I2S0, the CS42L58 codec's port: the A4's controller (registers at
      * +0x400, as AppleS5L8920XI2SController writes them), its TX FIFO at
      * the block's base where CDMA channel 0x15 streams PCM. Without it
-     * mediaserverd's stop path never sees the FIFO drain. Its frame rate is
-     * the audio complex's MCLK (the NCO above, from PLL1) over its own
-     * dividers, so the 22.05 kHz 6.x switches to for VoiceOver plays as such.
+     * mediaserverd's stop path never sees the FIFO drain. On the 3GS the port
+     * masters the frame clock and its rate is the audio complex's MCLK (the
+     * NCO above, from PLL1) over its own dividers; on the iPod touch 3G the
+     * CS42L58 masters it from a fixed 6 MHz MCLK and its register 05 picks
+     * the rate (0x0b 44.1 kHz, 0x13 the 22.05 kHz VoiceOver's speech runs at),
+     * which the port follows while its config says it is the slave.
      */
     dev = qdev_new(TYPE_S5L8930_I2S);
     qdev_prop_set_bit(dev, "audio-out", true);
     qdev_prop_set_bit(dev, "ctrl-run", true);   /* AppleS5L8920XI2SController starts TX with CTRL bit 0 */
     qdev_prop_set_uint64(dev, "nco-base", S5L8920_AUDIO_COMPLEX);
     qdev_prop_set_uint32(dev, "nco-ref-hz", S5L8920_NCOREF_HZ);
+    if (s->codec) {
+        qdev_connect_clock_in(dev, "lrclk", qdev_get_clock_out(s->codec, "lrclk"));
+    }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, S5L8920_I2S0_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 1, S5L8920_I2S0_FIFO);

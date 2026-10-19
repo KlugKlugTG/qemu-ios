@@ -6,7 +6,12 @@
  * VoiceOver speaks at, with the active dividers 0x20f and 0xc3200020 (its stop config, 0xf and 0x13000040, has
  * none). Before this the port read the A4's PMGR NCO address and played everything at 44.1 kHz.
  *
- * SLICE hw/arm/s5l8930_i2s.c define I2S_(MCLK_DIV|FRAME_BITS)[[:space:]]
+ * The iPod touch 3G's port is the slave of its CS42L58, which makes the frame clock from a fixed 6 MHz MCLK (NCO
+ * 0xb71b00/0xf70f2e80) at the rate in its register 05; its config, 0x20000040 with the dividers 0x20f, has bits
+ * 30-31 clear and divides that MCLK into 46875 Hz, which everything played at (VoiceOver's 22.05 kHz speech 2.13
+ * times fast). The port follows the codec's LRCLK while it is the slave, and only then.
+ *
+ * SLICE hw/arm/s5l8930_i2s.c define I2S_(MCLK_DIV|FRAME_BITS|FRAME_MASTER)[[:space:]]
  * SLICE hw/arm/s5l8930_i2s.c range static S5L8930I2SState *i2s_ports | static void i2s_in_cb
  * CFLAGS -Wall -Werror
  */
@@ -64,6 +69,24 @@ int main(void)
     /* The output is ncoref A / (A - B) / 2, not A / 2: a reference off PLL1 moves it. */
     i2s0.nco_ref_hz = 81000000;
     assert(s5l8930_i2s_rate(0) == 24000);
-    puts("PASS: S5L8920 i2s0 runs at the audio complex's MCLK over its dividers");
+    i2s0.nco_ref_hz = 162000000;
+
+    /* The iPod touch 3G: the CS42L58's LRCLK, not the dividers' 46875 Hz. */
+    Clock lrclk = 0;
+    i2s0.lrclk = &lrclk;
+    program(&i2s0, 0xb71b00, 0xf70f2e80, 0x20f, 0x20000040);
+    assert(s5l8930_i2s_rate(0) == 46875);   /* before the codec has a rate */
+    lrclk = 44100;
+    assert(s5l8930_i2s_rate(0) == 44100);
+    lrclk = 22050;
+    assert(s5l8930_i2s_rate(0) == 22050);
+    lrclk = 16000;
+    assert(s5l8930_i2s_rate(0) == 16000);
+    /* The 3GS's port masters the clock: its codec's register file has no say. */
+    program(&i2s0, 0x2b1100, 0xf6832480, 0x20f, 0xc3200020);
+    assert(s5l8930_i2s_rate(0) == 22050);
+    lrclk = 44100;
+    assert(s5l8930_i2s_rate(0) == 22050);
+    puts("PASS: S5L8920 i2s0 runs at its MCLK over its dividers as master, at the codec's LRCLK as slave");
     return 0;
 }

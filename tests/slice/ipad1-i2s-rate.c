@@ -6,7 +6,7 @@
  * codec drives the clock. The CS42L58's rate stays in register 05.
  *
  * SLICE hw/arm/ipod_touch_cs42l58.c fn cs42l58_sample_rate cs42l58_send
- * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|TXCOM|CMD_RUN|MCLK_DIV|FRAME_BITS)[[:space:]]
+ * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|TXCOM|CMD_RUN|MCLK_DIV|FRAME_BITS|FRAME_MASTER)[[:space:]]
  * SLICE hw/arm/s5l8930_i2s.c range static S5L8930I2SState *i2s_ports | static void i2s_in_cb
  * SLICE hw/arm/s5l8930_i2s.c fn i2s_set_rate i2s_tx_running i2s_lrclk_update
  * CFLAGS -Wall -Werror
@@ -97,6 +97,7 @@ int main(void)
     i2s_ports[0] = &i2s0;
     i2s0 = (S5L8930I2SState) { .lrclk = &lrclk, .rate = 44100, .voice = &i2s0 };
     i2s0.regs[I2S_TXCOM >> 2] = I2S_CMD_RUN;
+    i2s0.regs[I2S_FRAME_BITS >> 2] = 0x28000300;   /* 10B500's config: the codec's slave */
 
     /* Before the kernel has set either clock: 44.1 kHz. */
     assert(s5l8930_i2s_rate(0) == 44100);

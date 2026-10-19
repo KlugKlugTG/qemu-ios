@@ -50,6 +50,13 @@ OBJECT_DECLARE_SIMPLE_TYPE(S5L8930I2SState, S5L8930_I2S)
 #define I2S_CMD_RUN     6
 #define I2S_MCLK_DIV    0x408   /* S5L8920: bits 8-15, MCLK per BCLK */
 #define I2S_FRAME_BITS  0x410   /* S5L8920: bits 0-7, BCLK per frame */
+/*
+ * +0x410 bits 30-31: the port drives BCLK and LRCLK. Set where the I2S masters the frame clock (the 3GS's
+ * 0xc3200020, the iPad's 0xc8000300), clear where the codec does (the iPod touch 3G's CS42L58, 0x20000040; the
+ * iPod touch 4's CS42L59, 0x28000300), as each board's driver writes it from its DT. ponytail: inferred from
+ * those four values, not from a datasheet.
+ */
+#define I2S_FRAME_MASTER 0xc0000000u
 #define TONE_AMPLITUDE  8000
 
 /* ~370 ms at 44.1 kHz stereo: absorbs host scheduling jitter only; the CDMA
@@ -129,7 +136,8 @@ unsigned s5l8930_i2s_rate(unsigned port)
     unsigned lrclk = s ? clock_get_hz(s->lrclk) : 0;
     uint32_t bclk;
 
-    if (lrclk) {
+    /* A codec's frame clock only while the port is its slave: on a master port its dividers make the rate. */
+    if (lrclk && !(s->regs[I2S_FRAME_BITS >> 2] & I2S_FRAME_MASTER)) {
         return lrclk;
     }
     if (s && s->nco_ref_hz) {
