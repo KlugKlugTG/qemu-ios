@@ -97,7 +97,8 @@ arm_ss.add(when: 'CONFIG_IPAD1', if_true: files('ipad1.c', 's5l8930_dmc.c', 's5l
 arm_ss.add(when: 'CONFIG_IPAD1', if_true: files('s5l8920.c', 's5l8920_pmgr.c', 's5l8920_dart.c', 's5l8920_pwm.c', 's5l8920_vxd.c', 's5l8920_vxd_h264.c', 's5l8920_jpeg.c'))
 # Synopsys DWC OTG device core, PHY register file and host TCP bridge: shared by the S5L8720 and S5L8930 machines.
 arm_ss.add(when: 'CONFIG_IPOD_TOUCH_1G', if_true: files('ipod_touch_1g.c', 's5l8900_fmc.c', 's5l8900_nand_ecc.c', 's5l8900_adm.c', 's5l8900_lcd_panel.c', 's5l8900_multitouch_z1.c', 'ipod_touch_wm8758.c', 'ipod_touch_piezo.c'))
-# The NAND image store: the S5L8720 FMSS's and the S5L8930 IOP's files.
+# The NAND image store: the S5L8900 FMC's, the S5L8720 FMSS's and the S5L8930 IOP's files.
+arm_ss.add(when: 'CONFIG_IPOD_TOUCH_1G', if_true: files('nand-image.c'))
 arm_ss.add(when: 'CONFIG_IPOD_TOUCH_2G', if_true: files('nand-image.c'))
 arm_ss.add(when: 'CONFIG_IPAD1', if_true: files('nand-image.c'))
 arm_ss.add(when: 'CONFIG_IPOD_TOUCH_USB', if_true: files('ipod_touch_usb_otg.c', 'ipod_touch_tcp_usb.c', 'ipod_touch_usb_phys.c'))

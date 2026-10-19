@@ -4,20 +4,24 @@
 /*
  * S5L8900 FMC: the iPod touch 1G's raw NAND controller (eight 2048+64-byte
  * page banks behind one FIFO), fed page lists by the ADM. Ported from
- * devos50's ipod_touch_nand.c; the page store is a base directory of
- * bank<N>/<page>.page files plus an optional page-level copy-on-write overlay
- * directory that guest programs and block erases land in (see fmc.c).
+ * devos50's ipod_touch_nand.c. The store is a NAND image store written in
+ * place (nand-image.h: a cs<N>.pages chip file per bank, blank "ff"), or a base
+ * directory of bank<N>/<page>.page files plus an optional page-level
+ * copy-on-write overlay directory that guest programs and block erases land
+ * in (see fmc.c).
  */
 
 #include "qemu/osdep.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "hw/arm/nand-image.h"
 
 #define FMC_NUM_BANKS 8
 #define FMC_BYTES_PER_PAGE 2048
 #define FMC_BYTES_PER_SPARE 64
 #define FMC_META_BYTES 12          /* FTL metadata the ADM reports/takes in data3 */
 #define FMC_PAGES_PER_BLOCK 128    /* 256 KiB erase blocks (ID byte 4 = 0xA5) */
+#define FMC_BLOCKS_PER_BANK 4096   /* 8 Gbit a chip (ID byte 2 = 0xD3) */
 #define FMC_PROGRAM_PAD 16         /* pad descriptor after each programmed page */
 
 #define FMC_CHIP_ID 0xA514D3AD
@@ -77,6 +81,8 @@ typedef struct S5L8900FMCState {
     char *nand_path;      /* "nand" property: base directory */
     char *nand_overlay;   /* "nand-overlay" property: writable directory, or NULL */
     uint32_t banks;       /* "banks": chip enables with a chip (ID reads), default all 8 */
+    /* nand_path as a NAND image store (nand-image.h), written in place: no overlay. */
+    NANDImage *image;
 } S5L8900FMCState;
 
 /* Select the active bank (FMCTRL0 bit 1+bank). */

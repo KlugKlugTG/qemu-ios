@@ -1343,7 +1343,7 @@ static void n45_machine_class_init(ObjectClass *klass, const void *data)
     object_class_property_add_str(klass, "iboot", n45_get_iboot_path, n45_set_iboot_path);
     object_class_property_set_description(klass, "iboot", "decrypted iBoot-204 (entered at 0x18000000)");
     object_class_property_add_str(klass, "nand", n45_get_nand_path, n45_set_nand_path);
-    object_class_property_set_description(klass, "nand", "NAND directory: bank<N>/<page>.page");
+    object_class_property_set_description(klass, "nand", "NAND directory: an image store (geometry.json, cs<N>.pages) or bank<N>/<page>.page");
     object_class_property_add_str(klass, "nand-overlay", n45_get_nand_overlay, n45_set_nand_overlay);
     object_class_property_set_description(klass, "nand-overlay", "writable directory guest NAND programs land in");
     object_class_property_add_str(klass, "usb-tcp-addr", n45_get_usb_tcp_addr, n45_set_usb_tcp_addr);

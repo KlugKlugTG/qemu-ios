@@ -5,10 +5,11 @@
 #include "hw/core/qdev-properties.h"
 #include "qemu/log.h"
 #include "qemu/error-report.h"
+#include "qapi/error.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
 
-/* ---- page store: overlay directory over a read-only base directory ---- */
+/* ---- page store: a NAND image, or an overlay directory over a read-only base directory ---- */
 
 static int fmc_active_bank(S5L8900FMCState *s)
 {
@@ -85,6 +86,22 @@ void s5l8900_fmc_load_page(S5L8900FMCState *s, uint32_t bank, uint32_t page,
 {
     char path[PATH_MAX];
 
+    if (s->image) {
+        uint8_t record[FMC_BYTES_PER_PAGE + FMC_BYTES_PER_SPARE];
+        int result = nand_image_read(s->image, bank, page, record);
+        if (result < 0) {
+            /* A bank or page past the chips reads erased, as a page with no file did; an I/O error says so. */
+            if (result != -EINVAL) {
+                error_report("FMC: cannot read bank %u page %u of %s: %s", bank, page, s->nand_path,
+                             strerror(-result));
+            }
+            fmc_erased_page(data, spare);
+            return;
+        }
+        memcpy(data, record, FMC_BYTES_PER_PAGE);
+        memcpy(spare, record + FMC_BYTES_PER_PAGE, FMC_BYTES_PER_SPARE);
+        return;
+    }
     if (s->nand_overlay) {
         snprintf(path, sizeof(path), "%s/bank%u/%u.page", s->nand_overlay, bank, page);
         if (fmc_read_file(path, data, spare)) {
@@ -118,7 +135,7 @@ static bool fmc_program_page(S5L8900FMCState *s, uint32_t bank, uint32_t page,
     uint8_t cell[FMC_BYTES_PER_PAGE], cell_spare[FMC_BYTES_PER_SPARE];
 
     s->buffered_page = -1;
-    if (!s->nand_overlay) {
+    if (!s->nand_overlay && !s->image) {
         qemu_log_mask(LOG_UNIMP, "[fmc] program bank %u page %u dropped: no nand-overlay\n",
                       bank, page);
         return true;
@@ -136,6 +153,17 @@ static bool fmc_program_page(S5L8900FMCState *s, uint32_t bank, uint32_t page,
     }
     for (int i = 0; i < FMC_BYTES_PER_SPARE; i++) {
         cell_spare[i] &= spare[i];
+    }
+    if (s->image) {
+        /* One write of the whole record, in place: the page cache keeps it through a killed process. */
+        uint8_t record[FMC_BYTES_PER_PAGE + FMC_BYTES_PER_SPARE];
+        memcpy(record, cell, FMC_BYTES_PER_PAGE);
+        memcpy(record + FMC_BYTES_PER_PAGE, cell_spare, FMC_BYTES_PER_SPARE);
+        int result = nand_image_write(s->image, bank, page, record);
+        if (result < 0) {
+            error_report("FMC: cannot write bank %u page %u of %s: %s", bank, page, s->nand_path, strerror(-result));
+        }
+        return result == 0;
     }
     snprintf(dir, sizeof(dir), "%s/bank%u", s->nand_overlay, bank);
     if (g_mkdir_with_parents(dir, 0755) != 0) {
@@ -162,6 +190,15 @@ bool s5l8900_fmc_erase_block(S5L8900FMCState *s, uint32_t bank, uint32_t block)
     char path[PATH_MAX];
 
     s->buffered_page = -1;
+    if (s->image) {
+        /* One zeroing of the block's records (unmapped where the host can), which read erased. */
+        int result = nand_image_erase(s->image, bank, block);
+        if (result < 0) {
+            error_report("FMC: cannot erase bank %u block %u of %s: %s", bank, block, s->nand_path,
+                         strerror(-result));
+        }
+        return result == 0;
+    }
     if (!s->nand_overlay) {
         qemu_log_mask(LOG_UNIMP, "[fmc] erase bank %u block %u dropped: no nand-overlay\n",
                       bank, block);
@@ -368,6 +405,25 @@ static void s5l8900_fmc_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
 }
 
+/* A nand= directory whose geometry.json names the image format opens as the store, written in place. */
+static void s5l8900_fmc_realize(DeviceState *dev, Error **errp)
+{
+    S5L8900FMCState *s = S5L8900_FMC(dev);
+    const NANDImageGeometry geo = {
+        .chips = s->banks, .page_bytes = FMC_BYTES_PER_PAGE, .spare_bytes = FMC_BYTES_PER_SPARE,
+        .pages_per_block = FMC_PAGES_PER_BLOCK, .blocks_per_chip = FMC_BLOCKS_PER_BANK,
+    };
+
+    if (!s->nand_path || !nand_image_is_store(s->nand_path)) {
+        return;
+    }
+    if (s->nand_overlay) {
+        error_setg(errp, "%s is a NAND image store, written in place: it takes no nand-overlay", s->nand_path);
+        return;
+    }
+    s->image = nand_image_open(dev, s->nand_path, &geo, errp);
+}
+
 static void s5l8900_fmc_reset(DeviceState *d)
 {
     S5L8900FMCState *s = S5L8900_FMC(d);
@@ -399,6 +455,7 @@ static const Property s5l8900_fmc_properties[] = {
 static void s5l8900_fmc_class_init(ObjectClass *oc, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(oc);
+    dc->realize = s5l8900_fmc_realize;
     device_class_set_legacy_reset(dc, s5l8900_fmc_reset);
     device_class_set_props(dc, s5l8900_fmc_properties);
 }
