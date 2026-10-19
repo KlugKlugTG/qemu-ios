@@ -1952,6 +1952,8 @@ int compare_u64(const void *a, const void *b);
  * Bit 0 records faults; bit 1 samples matching EL0 ARM exception returns. */
 unsigned arm_alignment_path_mode(void);
 void arm_alignment_path_return(CPUARMState *env);
+/* LT_GUEST_TRACE_PC selection at translation time; bit 0 selects Thumb. */
+bool arm_guest_pc_selected(uint32_t pc);
 
 /* Used in FEAT_MEC to set the MECIDWidthm1 field in the MECIDR_EL2 register. */
 #define MECID_WIDTH 16
