@@ -2,7 +2,7 @@
 #ifndef QEMU_IOS_FRAME_PATH_H
 #define QEMU_IOS_FRAME_PATH_H
 
-/* Optional embedding diagnostic; only frame boundaries, no draw tracing. */
+/* Optional embedding diagnostic; frame boundaries and selected focused paths. */
 enum IOSFramePathEvent {
     IOS_FP_PRESENT_BEGIN = 1,
     IOS_FP_PRESENT_END,
@@ -16,6 +16,9 @@ enum IOSFramePathEvent {
     IOS_FP_PUBLISH,
     IOS_FP_CONTEXT_SWITCH,
     IOS_FP_TTBR0,
+    IOS_FP_VFP_SAMPLE,
+    IOS_FP_VFP_RESULT,
+    IOS_FP_ALIGNMENT,
 };
 
 void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b,

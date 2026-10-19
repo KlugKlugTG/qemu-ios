@@ -70,7 +70,8 @@ void qemu_ios_frame_path_finish(void)
     static const char *const names[] = {
         "invalid", "present-begin", "present-end", "lcd-flip", "vsync-begin",
         "vsync-end", "scan-begin", "scan-end", "capture-begin", "capture-same",
-        "publish", "context-switch", "ttbr0",
+        "publish", "context-switch", "ttbr0", "vfp-sample", "vfp-result",
+        "alignment",
     };
     qatomic_store_release(&ios_fp_on, false);
     if (!ios_fp_file) {

@@ -11,6 +11,7 @@
 #include "internals.h"
 #include "exec/target_page.h"
 #include "cpu-features.h"
+#include "qemu/ios-frame-path.h"
 
 /*
  * Returns true if the stage 1 translation regime is using LPAE format page
@@ -284,6 +285,21 @@ void arm_cpu_do_unaligned_access(CPUState *cs, vaddr vaddr,
     /* now we have a real cpu fault */
     cpu_restore_state(cs, retaddr);
 
+    /* Record fault PCs without bypassing the guest's alignment handler. */
+    if (!cpu->env.aarch64 && cs->cpu_index == 0) {
+        static gsize mode;
+
+        if (g_once_init_enter(&mode)) {
+            const char *v = getenv("LT_AUDIO_PATH_PROF");
+            bool on = v && strcmp(v, "off") && strcmp(v, "0");
+
+            g_once_init_leave(&mode, 1 + on);
+        }
+        if (mode == 2) {
+            ios_frame_path(IOS_FP_ALIGNMENT, cpu->env.regs[15], vaddr,
+                           ((uint64_t)access_type << 32) | (uint32_t)mmu_idx);
+        }
+    }
     fi.type = ARMFault_Alignment;
     arm_deliver_fault(cpu, vaddr, access_type, mmu_idx, &fi);
 }
