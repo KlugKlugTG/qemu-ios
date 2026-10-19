@@ -228,8 +228,9 @@ static void prepare_short_control_response(IPodTouchMultitouchState *s, uint8_t 
         s->out_buffer[3] = MT_ENDIANNESS;
         s->out_buffer[4] = s->profile->rows;
         s->out_buffer[5] = s->profile->cols;
-        s->out_buffer[6] = (s->profile->bcd_version & 0xFF);
-        s->out_buffer[7] = (s->profile->bcd_version >> 8) & 0xFF;
+        /* big-endian, as the Z1 model sends it: the drivers read 0x0146 and 0x0079 off the real k48 and n90 */
+        s->out_buffer[6] = (s->profile->bcd_version >> 8) & 0xFF;
+        s->out_buffer[7] = (s->profile->bcd_version & 0xFF);
     }
     else if(report_id == MT_REPORT_SENSOR_REGION_DESC) {
         memcpy(&s->out_buffer[3], s->profile->region_desc,
