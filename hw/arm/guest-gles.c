@@ -262,7 +262,7 @@ int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a)
 
     if (a->slot == GLES_OP_TALLY_POLICY) {
         static gsize initialized;
-        static bool quiet;
+        static unsigned policy;
 
         if (a->argc != 2) {
             gles_bad_slots++;
@@ -271,14 +271,21 @@ int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a)
         }
         if (g_once_init_enter(&initialized)) {
             const char *setting = getenv("LT_GLES_TALLY_QUIET");
+            const char *batch = getenv("LT_GLES_TALLY_BATCH");
 
-            quiet = setting && !strcmp(setting, "on");
-            fprintf(stderr, "[gles-tally] quiet=%s\n", quiet ? "on" : "off");
+            if (setting && !strcmp(setting, "on")) {
+                policy = 1;
+            } else if (batch && !strcmp(batch, "on")) {
+                policy = 2;
+            }
+            fprintf(stderr, "[gles-tally] quiet=%s batch=%s policy=%u\n",
+                    policy == 1 ? "on" : "off",
+                    policy == 2 ? "on" : "off", policy);
             g_once_init_leave(&initialized, 1);
         }
         /* Rare guest log candidates only, before their stderr writes. */
-        ios_frame_path(IOS_FP_SHIM_TALLY, a->args[0], a->args[1], quiet);
-        return quiet ? 1 : 0;
+        ios_frame_path(IOS_FP_SHIM_TALLY, a->args[0], a->args[1], policy);
+        return policy;
     }
 
     /* Trace only the first sighting of each slot. A GL stream is tens of
