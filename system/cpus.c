@@ -72,6 +72,7 @@
 static QemuMutex bql;
 
 #include "cpus-native-wait.c.inc"
+#include "cpus-bql-spin.c.inc"
 
 /*
  * The chosen accelerator is supposed to register this.
@@ -434,6 +435,7 @@ void qemu_init_cpu_loop(void)
     qemu_cond_init(&qemu_cpu_cond);
     qemu_cond_init(&qemu_pause_cond);
     qemu_mutex_init(&bql);
+    bql_spin_init();
 
     qemu_thread_get_self(&io_thread);
 }

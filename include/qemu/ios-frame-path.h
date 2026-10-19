@@ -33,6 +33,7 @@ enum IOSFramePathEvent {
 
 void qemu_ios_native_wait_init(void) __attribute__((weak));
 void qemu_ios_native_wait_finish(void) __attribute__((weak));
+void qemu_ios_bql_spin_finish(void) __attribute__((weak));
 
 void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b,
                                uint64_t c) __attribute__((weak));
