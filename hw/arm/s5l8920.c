@@ -620,7 +620,7 @@ static void s5l8920_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t
     qemu_call_t q;
     int32_t err = 0;
 
-    if (cpu_memory_rw_debug(cs, value, (uint8_t *)&q, sizeof(q), 0)) {
+    if (qemu_call_rw(cs, value, &q, false)) {
         return;
     }
     switch (q.call_number) {
@@ -657,7 +657,7 @@ static void s5l8920_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t
         }
     }
     q.error = err;
-    cpu_memory_rw_debug(cs, value, (uint8_t *)&q, sizeof(q), 1);
+    qemu_call_rw(cs, value, &q, true);
 }
 
 static const ARMCPRegInfo s5l8920_cp_reginfo[] = {

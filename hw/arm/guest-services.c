@@ -51,6 +51,20 @@ static int agent_copy(void *opaque, uint32_t address, uint8_t *data,
     return cpu_memory_rw_debug(opaque, address, data, length, write);
 }
 
+/*
+ * The request block, read and its reply written back once per call (every GL call is one): through the host pointers
+ * in the vCPU's TLB, as the GL bridge reaches client arrays, instead of a debug access that walks the page tables and
+ * dispatches through the address space each time. A page that isn't plain RAM in the TLB, is unmapped or doesn't
+ * allow the access at the caller's level takes the debug access as before, which redoes the whole block.
+ */
+int qemu_call_rw(CPUState *cpu, uint64_t va, qemu_call_t *q, bool write)
+{
+    if (guest_rw_ram(cpu, va, (uint8_t *)q, sizeof(*q), write)) {
+        return 0;
+    }
+    return cpu_memory_rw_debug(cpu, va, q, sizeof(*q), write);
+}
+
 void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
 {
     CPUState *cpu = qemu_get_cpu(0);
@@ -98,7 +112,7 @@ void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
     }
     */
     // Read the request
-    if (cpu_memory_rw_debug(cpu, value, (uint8_t *)&qcall, sizeof(qcall), 0)) {
+    if (qemu_call_rw(cpu, value, &qcall, false)) {
         return;
     }
 
@@ -188,5 +202,5 @@ void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
     qcall.error = guest_svcs_errno;
 
     // Write the response
-    cpu_memory_rw_debug(cpu, value, (uint8_t*) &qcall, sizeof(qcall), 1);
+    qemu_call_rw(cpu, value, &qcall, true);
 }
