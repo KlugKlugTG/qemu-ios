@@ -6,7 +6,7 @@
  * codec drives the clock. The CS42L58's rate stays in register 05.
  *
  * SLICE hw/arm/ipod_touch_cs42l58.c fn cs42l58_sample_rate cs42l58_send
- * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|TXCOM|CMD_RUN)[[:space:]]
+ * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|TXCOM|CMD_RUN|MCLK_DIV|FRAME_BITS)[[:space:]]
  * SLICE hw/arm/s5l8930_i2s.c range static S5L8930I2SState *i2s_ports | static void i2s_in_cb
  * SLICE hw/arm/s5l8930_i2s.c fn i2s_set_rate i2s_tx_running i2s_lrclk_update
  * CFLAGS -Wall -Werror
@@ -29,6 +29,8 @@ typedef struct S5L8930I2SState {
     bool ctrl_run;
     uint8_t port;
     Clock *lrclk;
+    uint64_t nco_base;
+    uint32_t nco_ref_hz;   /* 0: the A4's PMGR NCO */
     unsigned rate;
     void *voice, *audio_be;
 } S5L8930I2SState;

@@ -96,6 +96,7 @@
 #define S5L8920_SWI_BASE        0x89100000
 #define S5L8920_DART_BASE(n)    (0xbfe00000 + (n) * 0x100000)
 #define S5L8920_AUDIO_COMPLEX   0x84300000      /* DT audio-complex reg[0]: its NCOs */
+#define S5L8920_NCOREF_HZ       162000000       /* their reference, PLL1 (DT ncoref-frequency) */
 #define S5L8920_AUDIO_COMPLEX_SIZE 0x5000
 #define S5L8920_I2S0_FIFO       0x84500000      /* DT i2s0 reg; what the CDMA writes */
 #define S5L8920_I2S0_BASE       0x84500400      /* its registers, the A4's i2s layout */
@@ -1105,11 +1106,15 @@ static void s5l8920_init(MachineState *machine)
      * I2S0, the CS42L58 codec's port: the A4's controller (registers at
      * +0x400, as AppleS5L8920XI2SController writes them), its TX FIFO at
      * the block's base where CDMA channel 0x15 streams PCM. Without it
-     * mediaserverd's stop path never sees the FIFO drain.
+     * mediaserverd's stop path never sees the FIFO drain. Its frame rate is
+     * the audio complex's MCLK (the NCO above, from PLL1) over its own
+     * dividers, so the 22.05 kHz 6.x switches to for VoiceOver plays as such.
      */
     dev = qdev_new(TYPE_S5L8930_I2S);
     qdev_prop_set_bit(dev, "audio-out", true);
     qdev_prop_set_bit(dev, "ctrl-run", true);   /* AppleS5L8920XI2SController starts TX with CTRL bit 0 */
+    qdev_prop_set_uint64(dev, "nco-base", S5L8920_AUDIO_COMPLEX);
+    qdev_prop_set_uint32(dev, "nco-ref-hz", S5L8920_NCOREF_HZ);
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, S5L8920_I2S0_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 1, S5L8920_I2S0_FIFO);

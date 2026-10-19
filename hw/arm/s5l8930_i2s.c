@@ -11,9 +11,10 @@
  * paced by the CDMA model at this block's frame rate (s5l8930_cdma.c), so the
  * FIFO just appends to a ring the audio backend drains. Stereo S16LE at the
  * port's frame rate (s5l8930_i2s_rate()): the codec's LRCLK where the codec
- * masters the frame clock ("lrclk", the iPod touch 4), else the port's PMGR
- * NCO bit clock; read each time the TX side is started and whenever the
- * codec's LRCLK changes.
+ * masters the frame clock ("lrclk", the iPod touch 4), on the S5L8920 the
+ * audio complex's MCLK over this block's dividers ("nco-ref-hz"), else the
+ * port's PMGR NCO bit clock; read each time the TX side is started and
+ * whenever the codec's LRCLK changes.
  *
  * Capture is the mirror image: CDMA channel 0x1b reads the RX FIFO (+0x38) at
  * the same paced rate and the FIFO hands out bytes a QEMU input voice (the
@@ -47,6 +48,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(S5L8930I2SState, S5L8930_I2S)
 #define I2S_RXCOM       0x34
 #define I2S_RXFIFO      0x38
 #define I2S_CMD_RUN     6
+#define I2S_MCLK_DIV    0x408   /* S5L8920: bits 8-15, MCLK per BCLK */
+#define I2S_FRAME_BITS  0x410   /* S5L8920: bits 0-7, BCLK per frame */
 #define TONE_AMPLITUDE  8000
 
 /* ~370 ms at 44.1 kHz stereo: absorbs host scheduling jitter only; the CDMA
@@ -66,6 +69,8 @@ struct S5L8930I2SState {
     bool ctrl_run;
     uint8_t port;                   /* property: i2s<port>, selects its NCO */
     Clock *lrclk;                   /* in: the codec's frame clock, where the codec is master */
+    uint64_t nco_base;              /* property, S5L8920: the audio complex's NCO for MCLK */
+    uint32_t nco_ref_hz;            /* property, S5L8920: that NCO's reference; 0 = the A4's PMGR NCO */
     unsigned rate;                  /* the voice's current frame rate */
 
     uint8_t ring[I2S_RING];
@@ -89,6 +94,35 @@ struct S5L8930I2SState {
  * a link property from the CDMA if that ever changes. */
 static S5L8930I2SState *i2s_ports[3];
 
+/*
+ * The S5L8920's frame rate: the audio complex's NCO makes MCLK from its
+ * reference, ncoref * A / (A - B) / 2 for A = +0x18 and B = +0x1c
+ * (AppleS5L8920XAudioComplex writes A = 2 MCLK, B = 2 MCLK - ncoref), and the
+ * I2S divides MCLK by +0x408 bits 8-15 into BCLK and BCLK by the +0x410 low
+ * byte's bit clocks per frame. 6.1.6 AppleS5L8920XI2SController::setSampleRate
+ * (0x8078aab8) asks for MCLK = those two (its DT audio-data words 7 and 5,
+ * 0x20f and 0xc3200020: 2 and 32) times the rate, so 64 fs: 2.8224 MHz for
+ * 44.1 kHz, 1.4112 MHz for the 22.05 kHz VoiceOver's speech runs at.
+ * 44.1 kHz until the guest has programmed a rate in range.
+ */
+static unsigned i2s_nco_mclk_rate(S5L8930I2SState *s)
+{
+    uint32_t a = address_space_ldl_le(&address_space_memory, s->nco_base + 0x18,
+                                      MEMTXATTRS_UNSPECIFIED, NULL);
+    uint32_t b = address_space_ldl_le(&address_space_memory, s->nco_base + 0x1c,
+                                      MEMTXATTRS_UNSPECIFIED, NULL);
+    unsigned per_frame = (s->regs[I2S_MCLK_DIV >> 2] >> 8 & 0xff) *
+                         (s->regs[I2S_FRAME_BITS >> 2] & 0xff);
+    uint64_t mclk, rate;
+
+    if (!a || a == b || !per_frame) {
+        return 44100;
+    }
+    mclk = (uint64_t)s->nco_ref_hz * a / (uint32_t)(a - b) / 2;
+    rate = mclk / per_frame;
+    return rate >= 8000 && rate <= 192000 ? rate : 44100;
+}
+
 unsigned s5l8930_i2s_rate(unsigned port)
 {
     S5L8930I2SState *s = port < ARRAY_SIZE(i2s_ports) ? i2s_ports[port] : NULL;
@@ -97,6 +131,9 @@ unsigned s5l8930_i2s_rate(unsigned port)
 
     if (lrclk) {
         return lrclk;
+    }
+    if (s && s->nco_ref_hz) {
+        return i2s_nco_mclk_rate(s);
     }
     bclk = address_space_ldl_le(&address_space_memory, S5L8930_NCO_BCLK(port),
                                 MEMTXATTRS_UNSPECIFIED, NULL);
@@ -387,6 +424,8 @@ static const Property s5l8930_i2s_properties[] = {
     DEFINE_PROP_BOOL("audio-out", S5L8930I2SState, audio_out, false),
     DEFINE_PROP_BOOL("ctrl-run", S5L8930I2SState, ctrl_run, false),
     DEFINE_PROP_UINT8("port", S5L8930I2SState, port, 0),
+    DEFINE_PROP_UINT64("nco-base", S5L8930I2SState, nco_base, 0),
+    DEFINE_PROP_UINT32("nco-ref-hz", S5L8930I2SState, nco_ref_hz, 0),
     DEFINE_PROP_UINT32("tone-hz", S5L8930I2SState, tone_hz, 0),
 };
 
