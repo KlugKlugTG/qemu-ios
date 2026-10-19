@@ -19,6 +19,7 @@
 #include "qemu/timer.h"
 #include "qemu/seqlock.h"
 #include "qemu/cutils.h"
+#include "qemu/ios-frame-path.h"
 #include "hw/arm/ipod_touch_lis302dl.h"
 #include "qemu/aio.h"
 #include "system/runstate.h"
@@ -84,6 +85,8 @@ static void ios_sequence_reset(void *opaque)
 #include "system/reset.h"
 
 #define IOS_MAX_SLOTS 8
+
+#include "qemu-ios-frame-path.c.inc"
 
 /*
  * Frames rotate through a ring rather than a single buffer so the app can wrap
@@ -631,6 +634,7 @@ static void ios_capture(DisplaySurface *surface)
     uint8_t *dst;
 
     ios_init_frame_lock();
+    ios_frame_path(IOS_FP_CAPTURE_BEGIN, ios.serial, 0, 0);
     qemu_mutex_lock(&ios.frame_lock);
     ios_frame_count(&ios_frame_counters.capture_attempts);
 
@@ -668,6 +672,7 @@ static void ios_capture(DisplaySurface *surface)
         if (y == h) {
             ios_frame_count(&ios_frame_counters.identical_suppressed);
             qemu_mutex_unlock(&ios.frame_lock);
+            ios_frame_path(IOS_FP_CAPTURE_SAME, ios.serial, 0, 0);
             return;
         }
     }
@@ -686,6 +691,7 @@ static void ios_capture(DisplaySurface *surface)
     ios.timestamp_ns = ios_frame_due(qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
     qemu_mutex_unlock(&ios.frame_lock);
 
+    ios_frame_path(IOS_FP_PUBLISH, ios.serial, ios.timestamp_ns, 0);
     ios_frame_trace(ios.timestamp_ns, ios.serial);
     ios_profile_frame(ios.timestamp_ns, ios.serial);
     ios_report_first_lit_frame(dst, w, h);

@@ -1,0 +1,97 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+
+/* Bounded one-shot diagnostic, independent of user profiling. Producers perform
+ * no file I/O/allocation/locks. Dump only after qemu_cleanup has stopped vCPU
+ * and device activity. A killed worker leaves a header without the footer. */
+#define IOS_FP_CAPACITY 131072
+static struct IOSFramePathRecord {
+    uint64_t ns, a, b, c;
+    unsigned event;
+    unsigned ready;
+} *ios_fp_records;
+static FILE *ios_fp_file;
+static uint64_t ios_fp_count;
+static bool ios_fp_on;
+
+void qemu_ios_frame_path_init(void)
+{
+    const char *path = getenv("LT_FRAME_PATH");
+    if (!path || !*path || !strcmp(path, "off") || !strcmp(path, "0")) {
+        return;
+    }
+    ios_fp_file = fopen(path, "w");
+    if (!ios_fp_file) {
+        fprintf(stderr, "[frame-path] open failed: %s\n", strerror(errno));
+        return;
+    }
+    ios_fp_records = g_try_new0(struct IOSFramePathRecord, IOS_FP_CAPACITY);
+    if (!ios_fp_records) {
+        fprintf(stderr, "[frame-path] allocation failed\n");
+        fclose(ios_fp_file);
+        ios_fp_file = NULL;
+        return;
+    }
+    fprintf(ios_fp_file, "# LT_FRAME_PATH 1 capacity=%u begin-ns=%" PRId64 "\n",
+            IOS_FP_CAPACITY, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+    fflush(ios_fp_file);
+    qatomic_store_release(&ios_fp_on, true);
+    fprintf(stderr, "[frame-path] on capacity=%u; writes deferred until cleanup\n",
+            IOS_FP_CAPACITY);
+}
+
+void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b, uint64_t c)
+{
+    if (!qatomic_load_acquire(&ios_fp_on)) {
+        return;
+    }
+    uint64_t index = qatomic_fetch_inc(&ios_fp_count);
+    if (index >= IOS_FP_CAPACITY) {
+        return;
+    }
+    struct IOSFramePathRecord *record = &ios_fp_records[index];
+    record->ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    record->a = a;
+    record->b = b;
+    record->c = c;
+    record->event = event;
+    qatomic_store_release(&record->ready, 1);
+}
+
+void qemu_ios_frame_path_finish(void)
+{
+    static const char *const names[] = {
+        "invalid", "present-begin", "present-end", "lcd-flip", "vsync-begin",
+        "vsync-end", "scan-begin", "scan-end", "capture-begin", "capture-same",
+        "publish",
+    };
+    qatomic_store_release(&ios_fp_on, false);
+    if (!ios_fp_file) {
+        return;
+    }
+    uint64_t count = qatomic_read(&ios_fp_count);
+    uint64_t retained = MIN(count, IOS_FP_CAPACITY), incomplete = 0;
+    for (uint64_t i = 0; i < retained; i++) {
+        struct IOSFramePathRecord *r = &ios_fp_records[i];
+        if (!qatomic_load_acquire(&r->ready)) {
+            incomplete++;
+            continue;
+        }
+        const char *name = r->event < ARRAY_SIZE(names) ? names[r->event] : "invalid";
+        fprintf(ios_fp_file, "%" PRIu64 " %s %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+                r->ns, name, r->a, r->b, r->c);
+    }
+    fprintf(ios_fp_file, "# end records=%" PRIu64 " dropped=%" PRIu64
+            " incomplete=%" PRIu64 " end-ns=%" PRId64 "\n",
+            retained - incomplete, count - retained, incomplete,
+            qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+    bool failed = ferror(ios_fp_file);
+    if (fclose(ios_fp_file)) {
+        failed = true;
+    }
+    fprintf(stderr, "[frame-path] finished records=%" PRIu64 " dropped=%" PRIu64
+            " incomplete=%" PRIu64 " write-error=%s\n",
+            retained - incomplete, count - retained, incomplete,
+            failed ? "yes" : "no");
+    ios_fp_file = NULL;
+    g_clear_pointer(&ios_fp_records, g_free);
+}

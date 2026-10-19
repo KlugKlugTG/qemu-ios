@@ -1,5 +1,6 @@
 #include "hw/arm/ipod_touch_lcd.h"
 #include "qemu/main-loop.h"
+#include "qemu/ios-frame-path.h"
 #include "hw/arm/panel-gamma.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
@@ -519,6 +520,7 @@ static void ipod_touch_lcd_write(void *opaque, hwaddr addr, uint64_t val, unsign
             break;
         case 0x24:
             if (val != s->w1_framebuffer_base) {
+                ios_frame_path(IOS_FP_LCD_FLIP, s->w1_framebuffer_base, val, 0);
                 lcd_ft("flip", (uint32_t)val);
             }
             s->w1_framebuffer_base = val;
@@ -1064,7 +1066,7 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
     lcd_frame_count(&lcd->frame_counters.rotated_updates);
 }
 
-static void lcd_refresh(void *opaque)
+static void lcd_refresh_impl(void *opaque)
 {
     // printf("%s: refreshing LCD screen\n", __func__);
 
@@ -1252,6 +1254,14 @@ static void lcd_refresh(void *opaque)
     }
 }
 
+static void lcd_refresh(void *opaque)
+{
+    IPodTouchLCDState *lcd = opaque;
+    ios_frame_path(IOS_FP_SCAN_BEGIN, lcd->scanout_base, lcd_in_vsync_present, 0);
+    lcd_refresh_impl(opaque);
+    ios_frame_path(IOS_FP_SCAN_END, lcd->scanout_base, lcd_in_vsync_present, 0);
+}
+
 static const MemoryRegionOps lcd_ops = {
     .read = ipod_touch_lcd_read,
     .write = ipod_touch_lcd_write,
@@ -1424,6 +1434,8 @@ static void refresh_timer_tick(void *opaque)
     IPodTouchLCDState *s = (IPodTouchLCDState *)opaque;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
+    ios_frame_path(IOS_FP_VSYNC_BEGIN, s->scanout_base, s->w1_framebuffer_base,
+                    now > s->next_vsync ? now - s->next_vsync : 0);
     /* The virtual clock is the host's less time spent paused, so the deadline
      * maps across by how late this tick runs. */
     if (ipod_lcd_vsync_due && !lcd_vsync_legacy() && s->next_vsync <= now) {
@@ -1473,6 +1485,7 @@ static void refresh_timer_tick(void *opaque)
     /* IT_LCD_VSYNC_LEGACY restores the old re-arm-from-now behavior, so the
      * two can be A/B'd from one binary. Bisecting only. */
     if (lcd_vsync_legacy()) {
+        ios_frame_path(IOS_FP_VSYNC_END, s->scanout_base, 0, 0);
         s->next_vsync = now + LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
         timer_mod(s->refresh_timer, s->next_vsync);
         return;
@@ -1489,6 +1502,7 @@ static void refresh_timer_tick(void *opaque)
         s->next_vsync = now + LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
     }
     timer_mod(s->refresh_timer, s->next_vsync);
+    ios_frame_path(IOS_FP_VSYNC_END, s->scanout_base, 0, 0);
 }
 
 /*

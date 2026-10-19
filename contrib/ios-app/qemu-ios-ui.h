@@ -73,6 +73,9 @@ void qemu_ios_ui_attach(qemu_ios_frame_cb cb, void *opaque);
 
 /* Called by qemu_ios_main() itself once the VM exists; not for app use. */
 void qemu_ios_ui_vm_started(void);
+/* Internal diagnostic lifecycle; called only by the embedded entry point. */
+void qemu_ios_frame_path_init(void);
+void qemu_ios_frame_path_finish(void);
 
 /*
  * True only while the emulator is initialized and its main loop is running.

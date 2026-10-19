@@ -41,6 +41,7 @@ int qemu_ios_main(int argc, char **argv)
 #endif
 
     qemu_init(argc, argv);
+    qemu_ios_frame_path_init();
 
     /*
      * Resume automatically when restoring a snapshot.
@@ -73,6 +74,7 @@ int qemu_ios_main(int argc, char **argv)
      * queued onto a context nobody services. */
     qemu_ios_ui_vm_stopped();
     qemu_cleanup(status);
+    qemu_ios_frame_path_finish();
 #ifdef CONFIG_TCG
     /* No vCPU/device activity remains. Retain final experimental cache totals
      * before the embedding host disposes its worker without running atexit.

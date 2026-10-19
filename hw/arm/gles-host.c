@@ -26,6 +26,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/ios-frame-path.h"
 uint64_t qemu_ios_profile_begin(void) __attribute__((weak));
 void qemu_ios_profile_gl(uint64_t, uint32_t, uint32_t) __attribute__((weak));
 extern bool it_profile_on;
@@ -5989,7 +5990,9 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
                         gh.presents);
             }
         }
+        ios_frame_path(IOS_FP_PRESENT_BEGIN, ctx, a[0], ((uint64_t)a[2] << 32) | a[3]);
         int64_t r = gles_present_to_surface(cpu, a[0], a[1], a[2], a[3], a[4]);
+        ios_frame_path(IOS_FP_PRESENT_END, ctx, a[0], r);
         {
             uint64_t dt = gles_t() - t0;
             gh.t_present += dt;
