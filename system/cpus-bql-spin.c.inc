@@ -1,8 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 
 /* A bounded alternative to immediately sleeping on a contended vCPU0 BQL.
- * Particularly useful to investigate hosts where a microsecond-scale sleep
- * incurs a millisecond-scale wakeup. Default off; no scheduler/affinity change.
+ * On hosts where a microsecond-scale sleep incurs a millisecond-scale wakeup
+ * (Android), most waits end within the budget. No scheduler/affinity change.
+ * On by default on Android with the 150us budget: Poco F3, Jetpack title,
+ * three interleaved pairs each, off -> 50us 53.42 -> 57.47 fps (hitches
+ * 30 -> 8 per 180 s), 50 -> 150us 57.16 -> 58.36 fps (hitches 16 -> 11).
+ * LT_BQL_SPIN=off/on and LT_BQL_SPIN_EXTENDED=off/on override the default.
  */
 #define BQL_SPIN_NS 50000
 #define BQL_SPIN_EXTENDED_NS 150000
@@ -46,14 +50,18 @@ static void bql_spin_lock(QemuMutex *mutex, const char *file, int line)
 
 static void bql_spin_init(void)
 {
+#ifdef __ANDROID__
+    const bool default_on = true;
+#else
+    const bool default_on = false;
+#endif
     const char *mode = getenv("LT_BQL_SPIN");
     const char *extended = getenv("LT_BQL_SPIN_EXTENDED");
-    bool requested = mode && !strcmp(mode, "on");
-    bool extended_requested = extended && !strcmp(extended, "on");
+    bool requested = mode ? !strcmp(mode, "on") : default_on;
+    bool extended_requested = extended ? !strcmp(extended, "on") : default_on;
 
-    /* Separate default-off comparison with the original 50us experiment.
-     * Residual short sleeps may still pay a millisecond-scale host wakeup.
-     * Keep the same bounded retry and original blocking fallback. */
+    /* The extended budget only lengthens the bounded retry; the blocking
+     * fallback after it is unchanged. */
     if (requested && extended_requested) {
         bql_spin_budget_ns = BQL_SPIN_EXTENDED_NS;
     }
