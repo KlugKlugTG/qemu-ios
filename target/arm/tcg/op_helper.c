@@ -27,6 +27,9 @@
 #include "accel/tcg/probe.h"
 #include "cpregs.h"
 #include "qemu/ios-frame-path.h"
+#include "qemu/timer.h"
+
+static int64_t guest_pc_begin_ns;
 
 /* Instruction-boundary register snapshots at an explicitly selected small set
  * of guest PCs. No guest memory access, breakpoints, or per-instruction runtime
@@ -47,6 +50,16 @@ bool arm_guest_pc_selected(uint32_t pc)
             g_auto(GStrv) fields = g_strsplit(setting, ",", 33);
             bool valid = true;
             unsigned n;
+            uint64_t delay_ms = 0;
+            const char *delay = getenv("LT_GUEST_TRACE_DELAY_MS");
+
+            if (delay && *delay) {
+                char *end;
+
+                errno = 0;
+                delay_ms = strtoull(delay, &end, 10);
+                valid = !errno && !*end && delay_ms <= 600000;
+            }
 
             for (n = 0; fields[n]; n++) {
                 char *end, *field = g_strstrip(fields[n]);
@@ -63,9 +76,14 @@ bool arm_guest_pc_selected(uint32_t pc)
             }
             if (valid) {
                 count = n;
+                if (delay_ms) {
+                    guest_pc_begin_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) +
+                                        delay_ms * 1000000;
+                }
             }
-            fprintf(stderr, "[guest-pc] points=%u config=%s before-instruction\n",
-                    count, valid ? "valid" : "invalid");
+            fprintf(stderr, "[guest-pc] points=%u config=%s before-instruction "
+                    "delay-ms=%" PRIu64 "\n", count,
+                    valid ? "valid" : "invalid", delay_ms);
         }
         g_once_init_leave(&initialized, 1);
     }
@@ -88,6 +106,14 @@ void HELPER(guest_pc_trace)(CPUARMState *env, uint32_t pc)
      * when this diagnostic is accidentally used on a larger machine. */
     if (env_cpu(env)->cpu_index != 0 || is_a64(env)) {
         return;
+    }
+    /* Drop whole observations before the requested diagnostic window. Keep
+     * triplets indivisible and IDs contiguous, even at the delay boundary. */
+    if (guest_pc_begin_ns) {
+        if (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) < guest_pc_begin_ns) {
+            return;
+        }
+        guest_pc_begin_ns = 0;
     }
     secure = arm_is_secure(env);
     thread = (secure ? env->cp15.tpidrprw_s : env->cp15.tpidrprw_ns) & ~3u;
