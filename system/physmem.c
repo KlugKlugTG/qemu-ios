@@ -97,9 +97,6 @@
  */
 RAMList ram_list = { .blocks = QLIST_HEAD_INITIALIZER(ram_list.blocks) };
 
-/* Initialized before vCPUs start; keep the ordinary path available for A/B. */
-static bool dirty_query_fast;
-
 static MemoryRegion *system_memory;
 static MemoryRegion *system_io;
 
@@ -925,42 +922,13 @@ static bool physical_memory_get_dirty(ram_addr_t start, ram_addr_t length,
     return dirty;
 }
 
-/* Caller holds RCU. A one-page query needs no general bitmap range scan. */
-static inline bool physical_memory_get_dirty_bit(ram_addr_t addr,
-                                                unsigned client)
-{
-    unsigned long page = addr >> TARGET_PAGE_BITS;
-    unsigned long idx = page / DIRTY_MEMORY_BLOCK_SIZE;
-    unsigned long offset = page % DIRTY_MEMORY_BLOCK_SIZE;
-    DirtyMemoryBlocks *blocks;
-
-    assert(client < DIRTY_MEMORY_NUM);
-    blocks = qatomic_rcu_read(&ram_list.dirty_memory[client]);
-    return test_bit(offset, blocks->blocks[idx]);
-}
-
 bool physical_memory_get_dirty_flag(ram_addr_t addr, unsigned client)
 {
-    if (dirty_query_fast) {
-        RCU_READ_LOCK_GUARD();
-        return physical_memory_get_dirty_bit(addr, client);
-    }
     return physical_memory_get_dirty(addr, 1, client);
 }
 
 bool physical_memory_is_clean(ram_addr_t addr)
 {
-    if (dirty_query_fast) {
-        bool vga, code, migration;
-
-        /* One guard protects all three arrays, including concurrent growth.
-         * Do not retain their pointers or a coroutine's TLS across calls. */
-        RCU_READ_LOCK_GUARD();
-        vga = physical_memory_get_dirty_bit(addr, DIRTY_MEMORY_VGA);
-        code = physical_memory_get_dirty_bit(addr, DIRTY_MEMORY_CODE);
-        migration = physical_memory_get_dirty_bit(addr, DIRTY_MEMORY_MIGRATION);
-        return !(vga && code && migration);
-    }
     bool vga = physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_VGA);
     bool code = physical_memory_get_dirty_flag(addr, DIRTY_MEMORY_CODE);
     bool migration =
@@ -3671,11 +3639,6 @@ void address_space_register_map_client(AddressSpace *as, QEMUBH *bh)
 
 void cpu_exec_init_all(void)
 {
-    const char *fast = getenv("LT_DIRTY_QUERY_FAST");
-
-    dirty_query_fast = fast && strcmp(fast, "off") && strcmp(fast, "0");
-    fprintf(stderr, "[memory] dirty-query-fast=%s\n",
-            dirty_query_fast ? "on" : "off");
     qemu_mutex_init(&ram_list.mutex);
     /* The data structures we set up here depend on knowing the page size,
      * so no more changes can be made after this point.
