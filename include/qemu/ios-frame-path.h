@@ -14,6 +14,8 @@ enum IOSFramePathEvent {
     IOS_FP_CAPTURE_BEGIN,
     IOS_FP_CAPTURE_SAME,
     IOS_FP_PUBLISH,
+    IOS_FP_CONTEXT_SWITCH,
+    IOS_FP_TTBR0,
 };
 
 void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b,

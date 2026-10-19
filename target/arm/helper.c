@@ -7,6 +7,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/ios-frame-path.h"
 #include "qemu/log.h"
 #include "trace.h"
 #include "cpu.h"
@@ -388,8 +389,9 @@ static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
                              uint64_t value)
 {
     ARMCPU *cpu = env_archcpu(env);
+    uint64_t previous = raw_read(env, ri);
 
-    if (raw_read(env, ri) != value && !arm_feature(env, ARM_FEATURE_PMSA)
+    if (previous != value && !arm_feature(env, ARM_FEATURE_PMSA)
         && !extended_addresses_enabled(env)) {
         /*
          * For VMSA (when not using the LPAE long descriptor page table
@@ -412,6 +414,10 @@ static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
         cpu->ng_el1_count = 0;
     }
     raw_write(env, ri, value);
+    if (previous != value && !is_a64(env)) {
+        uint64_t ttbr0 = arm_is_secure(env) ? env->cp15.ttbr0_s : env->cp15.ttbr0_ns;
+        ios_frame_path(IOS_FP_CONTEXT_SWITCH, value, ttbr0, previous);
+    }
 }
 
 int alle1_tlbmask(CPUARMState *env)
@@ -2795,13 +2801,21 @@ static void vmsa_tcr_el12_write(CPUARMState *env, const ARMCPRegInfo *ri,
 static void vmsa_ttbr_write(CPUARMState *env, const ARMCPRegInfo *ri,
                             uint64_t value)
 {
+    uint64_t previous = raw_read(env, ri);
     /* If the ASID changes (with a 64-bit write), we must flush the TLB.  */
     if (cpreg_field_type(ri) == MO_64 &&
-        extract64(raw_read(env, ri) ^ value, 48, 16) != 0) {
+        extract64(previous ^ value, 48, 16) != 0) {
         ARMCPU *cpu = env_archcpu(env);
         tlb_flush(CPU(cpu));
     }
     raw_write(env, ri, value);
+    if (previous != value && !is_a64(env) &&
+        (ri->fieldoffset == offsetof(CPUARMState, cp15.ttbr0_s) ||
+         ri->fieldoffset == offsetof(CPUARMState, cp15.ttbr0_ns))) {
+        uint64_t context = arm_is_secure(env) ? env->cp15.contextidr_s : env->cp15.contextidr_ns;
+        uint64_t ttbr0 = arm_is_secure(env) ? env->cp15.ttbr0_s : env->cp15.ttbr0_ns;
+        ios_frame_path(IOS_FP_TTBR0, context, ttbr0, previous);
+    }
 }
 
 static void vmsa_tcr_ttbr_el2_write(CPUARMState *env, const ARMCPRegInfo *ri,

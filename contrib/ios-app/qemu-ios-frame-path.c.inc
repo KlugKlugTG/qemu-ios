@@ -4,6 +4,7 @@
  * no file I/O/allocation/locks. Dump only after qemu_cleanup has stopped vCPU
  * and device activity. A killed worker leaves a header without the footer. */
 #define IOS_FP_CAPACITY 131072
+static unsigned ios_fp_capacity = IOS_FP_CAPACITY;
 static struct IOSFramePathRecord {
     uint64_t ns, a, b, c;
     unsigned event;
@@ -12,6 +13,7 @@ static struct IOSFramePathRecord {
 static FILE *ios_fp_file;
 static uint64_t ios_fp_count;
 static bool ios_fp_on;
+static bool ios_fp_context;
 
 void qemu_ios_frame_path_init(void)
 {
@@ -24,7 +26,10 @@ void qemu_ios_frame_path_init(void)
         fprintf(stderr, "[frame-path] open failed: %s\n", strerror(errno));
         return;
     }
-    ios_fp_records = g_try_new0(struct IOSFramePathRecord, IOS_FP_CAPACITY);
+    const char *context = getenv("LT_FRAME_PATH_CONTEXT");
+    ios_fp_context = context && strcmp(context, "off") && strcmp(context, "0");
+    ios_fp_capacity = ios_fp_context ? IOS_FP_CAPACITY * 8 : IOS_FP_CAPACITY;
+    ios_fp_records = g_try_new0(struct IOSFramePathRecord, ios_fp_capacity);
     if (!ios_fp_records) {
         fprintf(stderr, "[frame-path] allocation failed\n");
         fclose(ios_fp_file);
@@ -32,11 +37,11 @@ void qemu_ios_frame_path_init(void)
         return;
     }
     fprintf(ios_fp_file, "# LT_FRAME_PATH 1 capacity=%u begin-ns=%" PRId64 "\n",
-            IOS_FP_CAPACITY, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+            ios_fp_capacity, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
     fflush(ios_fp_file);
     qatomic_store_release(&ios_fp_on, true);
-    fprintf(stderr, "[frame-path] on capacity=%u; writes deferred until cleanup\n",
-            IOS_FP_CAPACITY);
+    fprintf(stderr, "[frame-path] on capacity=%u context=%s; writes deferred until cleanup\n",
+            ios_fp_capacity, ios_fp_context ? "on" : "off");
 }
 
 void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b, uint64_t c)
@@ -44,8 +49,11 @@ void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b, uint64_t 
     if (!qatomic_load_acquire(&ios_fp_on)) {
         return;
     }
+    if ((event == IOS_FP_CONTEXT_SWITCH || event == IOS_FP_TTBR0) && !ios_fp_context) {
+        return;
+    }
     uint64_t index = qatomic_fetch_inc(&ios_fp_count);
-    if (index >= IOS_FP_CAPACITY) {
+    if (index >= ios_fp_capacity) {
         return;
     }
     struct IOSFramePathRecord *record = &ios_fp_records[index];
@@ -62,14 +70,14 @@ void qemu_ios_frame_path_finish(void)
     static const char *const names[] = {
         "invalid", "present-begin", "present-end", "lcd-flip", "vsync-begin",
         "vsync-end", "scan-begin", "scan-end", "capture-begin", "capture-same",
-        "publish",
+        "publish", "context-switch", "ttbr0",
     };
     qatomic_store_release(&ios_fp_on, false);
     if (!ios_fp_file) {
         return;
     }
     uint64_t count = qatomic_read(&ios_fp_count);
-    uint64_t retained = MIN(count, IOS_FP_CAPACITY), incomplete = 0;
+    uint64_t retained = MIN(count, ios_fp_capacity), incomplete = 0;
     for (uint64_t i = 0; i < retained; i++) {
         struct IOSFramePathRecord *r = &ios_fp_records[i];
         if (!qatomic_load_acquire(&r->ready)) {
