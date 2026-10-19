@@ -36,7 +36,6 @@
 #include "exec/vaddr.h"
 #include "tcg/tcg.h"
 #include "qemu/error-report.h"
-#include "qemu/timer.h"
 #include "exec/log.h"
 #include "exec/helper-proto-common.h"
 #include "exec/tlb-flags.h"
@@ -333,78 +332,11 @@ static inline void tlb_n_used_entries_dec(CPUState *cpu, uintptr_t mmu_idx)
     cpu->neg.tlb.d[mmu_idx].n_used_entries--;
 }
 
-static bool tlb_ram_ptr_fast;
-static bool tlb_ram_ptr_prof;
-
-static void tlb_ram_ptr_init(void)
-{
-    static gsize initialized;
-
-    if (g_once_init_enter(&initialized)) {
-        const char *fast = getenv("LT_TLB_RAM_PTR_FAST");
-        const char *prof = getenv("LT_TLB_RAM_PTR_PROF");
-
-        tlb_ram_ptr_fast = fast && strcmp(fast, "off") && strcmp(fast, "0");
-        tlb_ram_ptr_prof = prof && strcmp(prof, "off") && strcmp(prof, "0");
-        fprintf(stderr, "[tlb-ram-ptr] fast=%s prof=%s\n",
-                tlb_ram_ptr_fast ? "on" : "off",
-                tlb_ram_ptr_prof ? "on" : "off");
-        g_once_init_leave(&initialized, 1);
-    }
-}
-
-/*
- * The TLB fill already uses an RCU-protected MemoryRegionSection (see
- * address_space_translate_for_iotlb). Avoid another RCU lock/unlock only for
- * an unaliased region; keep the same mapper, including its Xen handling.
- * Aliases retain the general helper's offset accumulation and checks.
- */
-static inline void *tlb_ram_ptr(const MemoryRegion *mr)
-{
-    if (tlb_ram_ptr_fast && !mr->alias) {
-        assert(mr->ram_block);
-        return qemu_map_ram_ptr(mr->ram_block, 0);
-    }
-    return memory_region_get_ram_ptr(mr);
-}
-
-/* CPU 0 owns these diagnostic counters. No clocks/counters when disabled. */
-static void *tlb_ram_ptr_profiled(const MemoryRegion *mr)
-{
-    static uint64_t calls, samples, ns, max_ns;
-    static int64_t begin_ns;
-    int64_t start, end;
-    void *ptr;
-
-    if (!begin_ns) {
-        begin_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    }
-    if (++calls % 256) {
-        return tlb_ram_ptr(mr);
-    }
-    start = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    ptr = tlb_ram_ptr(mr);
-    end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
-    samples++;
-    ns += end - start;
-    max_ns = MAX(max_ns, end - start);
-    if (end - begin_ns >= 5000000000LL) {
-        fprintf(stderr, "[tlb-ram-ptr] begin-ns=%" PRId64
-                " end-ns=%" PRId64 " calls=%" PRIu64
-                " samples=%" PRIu64 " ns=%" PRIu64 " max-ns=%" PRIu64 "\n",
-                begin_ns, end, calls, samples, ns, max_ns);
-        begin_ns = end;
-        calls = samples = ns = max_ns = 0;
-    }
-    return ptr;
-}
-
 void tlb_init(CPUState *cpu)
 {
     int64_t now = get_clock_realtime();
     int i;
 
-    tlb_ram_ptr_init();
     qemu_spin_init(&cpu->neg.tlb.c.lock);
 
     /* All tlbs are initialized flushed. */
@@ -1264,10 +1196,7 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
 
     if (is_ram || is_romd) {
         /* RAM and ROMD both have associated host memory. */
-        void *ptr = tlb_ram_ptr_prof && cpu->cpu_index == 0
-                    ? tlb_ram_ptr_profiled(section->mr)
-                    : tlb_ram_ptr(section->mr);
-        addend = (uintptr_t)ptr + xlat;
+        addend = (uintptr_t)memory_region_get_ram_ptr(section->mr) + xlat;
     } else {
         /* I/O does not; force the host address to NULL. */
         addend = 0;
