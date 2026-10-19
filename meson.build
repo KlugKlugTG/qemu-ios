@@ -849,6 +849,13 @@ elif host_os == 'darwin'
   host_dsosuf = '.dylib'
   pvg = dependency('appleframeworks', modules: ['ParavirtualizedGraphics', 'Metal'],
                    required: get_option('pvg'))
+  # qemu-ios front-end hooks, declared weak and defined only in the app library
+  # (contrib/ios-app/qemu-ios-ui.c). ELF and PE resolve a missing weak symbol to
+  # null; Apple's linker does so only for the symbols it is told may be missing.
+  foreach hook : ['qemu_ios_frame_path_event', 'qemu_ios_profile_begin',
+                  'qemu_ios_profile_gl', 'qemu_ios_profile_lock']
+    emulator_link_args += '-Wl,-U,_' + hook
+  endforeach
 elif host_os == 'sunos'
   socket = [cc.find_library('socket'),
             cc.find_library('nsl'),
