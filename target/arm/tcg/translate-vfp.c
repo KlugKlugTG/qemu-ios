@@ -66,33 +66,13 @@ static void gen_vfp_subs_selected(TCGv_i32 dst, TCGv_i32 a, TCGv_i32 b,
     }
 }
 
-/* Select helpers during translation, with no runtime switch branch in the
- * default path. Only AArch32 single-precision VFP multiplication is affected.
- * Both switches default off and are fixed for this engine process. */
 static void gen_vfp_muls_selected(TCGv_i32 dst, TCGv_i32 a, TCGv_i32 b,
                                   TCGv_ptr fpst)
 {
-    static gsize mode;
-
     if (vfp_audio_path_profile()) {
         gen_helper_vfp_muls_path(dst, tcg_env, a, b, fpst);
-        return;
-    }
-    if (g_once_init_enter(&mode)) {
-        const char *v = getenv("LT_VFP_MUL_ZERO_FAST");
-        bool fast = v && strcmp(v, "off") && strcmp(v, "0");
-        v = getenv("LT_VFP_MUL_ZERO_PROF");
-        bool prof = v && strcmp(v, "off") && strcmp(v, "0");
-        fprintf(stderr, "[vfp] mul-zero-fast=%s mul-zero-prof=%s\n",
-                fast ? "on" : "off", prof ? "on" : "off");
-        g_once_init_leave(&mode, 1 + fast + 2 * prof);
-    }
-    switch (mode) {
-    case 1: gen_helper_vfp_muls(dst, a, b, fpst); break;
-    case 2: gen_helper_vfp_muls_zero(dst, a, b, fpst); break;
-    case 3: gen_helper_vfp_muls_zero_prof_off(dst, a, b, fpst); break;
-    case 4: gen_helper_vfp_muls_zero_prof_on(dst, a, b, fpst); break;
-    default: g_assert_not_reached();
+    } else {
+        gen_helper_vfp_muls(dst, a, b, fpst);
     }
 }
 
