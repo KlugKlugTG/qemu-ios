@@ -16,6 +16,8 @@ static unsigned native_wait_site_count;
 static uint64_t native_wait_calls, native_wait_slow, native_wait_site_overflow;
 static int native_wait_tid;
 static bool native_wait_on;
+static bool native_wait_conditions_only;
+static QemuMutexLockFunc native_wait_bql_original, native_wait_mutex_original;
 
 static int64_t native_wait_begin(void)
 {
@@ -87,24 +89,35 @@ static bool native_wait_timedcond(QemuCond *cond, QemuMutex *mutex, int ms,
 void qemu_ios_native_wait_init(void)
 {
     const char *mode = getenv("LT_NATIVE_WAIT_PROF");
-    if (!mode || strcmp(mode, "on")) {
+    bool conditions = mode && !strcmp(mode, "conditions");
+    if (!conditions && (!mode || strcmp(mode, "on"))) {
         return;
     }
-    /* Do not replace an already active QSP or other interposer. */
-    if (qatomic_read(&bql_mutex_lock_func) != qemu_mutex_lock_impl ||
-        qatomic_read(&qemu_mutex_lock_func) != qemu_mutex_lock_impl ||
+    /* Conditions mode leaves both mutex hooks intact, so an existing BQL spin
+     * experiment remains effective. Never replace another condition profiler.
+     * Full mode retains the original refusal of any preexisting interposer. */
+    native_wait_bql_original = qatomic_read(&bql_mutex_lock_func);
+    native_wait_mutex_original = qatomic_read(&qemu_mutex_lock_func);
+    if ((!conditions && (native_wait_bql_original != qemu_mutex_lock_impl ||
+                         native_wait_mutex_original != qemu_mutex_lock_impl)) ||
         qatomic_read(&qemu_cond_wait_func) != qemu_cond_wait_impl ||
         qatomic_read(&qemu_cond_timedwait_func) != qemu_cond_timedwait_impl) {
         fprintf(stderr, "[native-wait] refused: wait hooks already replaced\n");
         return;
     }
-    qatomic_set(&bql_mutex_lock_func, native_wait_mutex);
-    qatomic_set(&qemu_mutex_lock_func, native_wait_mutex);
+    native_wait_conditions_only = conditions;
+    if (!conditions) {
+        qatomic_set(&bql_mutex_lock_func, native_wait_mutex);
+        qatomic_set(&qemu_mutex_lock_func, native_wait_mutex);
+    }
     qatomic_set(&qemu_cond_wait_func, native_wait_cond);
     qatomic_set(&qemu_cond_timedwait_func, native_wait_timedcond);
     native_wait_on = true;
     fprintf(stderr, "[native-wait] on cpu=0 threshold-ns=10000 sites=%u; "
             "site names deferred until cleanup\n", NATIVE_WAIT_SITES);
+    fprintf(stderr, "[native-wait] mode=%s mutex-hooks=%s\n",
+            conditions ? "conditions" : "full",
+            conditions ? "unchanged" : "instrumented");
 }
 
 void qemu_ios_native_wait_finish(void)
@@ -113,8 +126,12 @@ void qemu_ios_native_wait_finish(void)
         return;
     }
     /* The embedding calls this only after qemu_cleanup has joined vCPUs. */
-    bool hooks = qatomic_read(&bql_mutex_lock_func) == native_wait_mutex &&
-                 qatomic_read(&qemu_mutex_lock_func) == native_wait_mutex &&
+    bool hooks = qatomic_read(&bql_mutex_lock_func) ==
+                    (native_wait_conditions_only ? native_wait_bql_original :
+                                                  native_wait_mutex) &&
+                 qatomic_read(&qemu_mutex_lock_func) ==
+                    (native_wait_conditions_only ? native_wait_mutex_original :
+                                                  native_wait_mutex) &&
                  qatomic_read(&qemu_cond_wait_func) == native_wait_cond &&
                  qatomic_read(&qemu_cond_timedwait_func) == native_wait_timedcond;
     for (unsigned i = 0; i < native_wait_site_count; i++) {

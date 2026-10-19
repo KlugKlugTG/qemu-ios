@@ -33,7 +33,7 @@ void qemu_ios_frame_path_init(void)
     const char *ahb = getenv("LT_GLES_AHB_PATH");
     bool audio_on = audio && strcmp(audio, "off") && strcmp(audio, "0");
     bool guest_on = guest && *guest && strcmp(guest, "off") && strcmp(guest, "0");
-    bool wait_on = wait && !strcmp(wait, "on");
+    bool wait_on = wait && (!strcmp(wait, "on") || !strcmp(wait, "conditions"));
     bool ahb_on = ahb && !strcmp(ahb, "on");
     ios_fp_context = context && strcmp(context, "off") && strcmp(context, "0");
     ios_fp_capacity = IOS_FP_CAPACITY *
