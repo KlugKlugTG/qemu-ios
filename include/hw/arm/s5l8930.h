@@ -297,6 +297,8 @@ void s5l8930_cdma_sink_done(DeviceState *dev, uint32_t fifo_base, uint32_t size)
  */
 #define S5L8930_NCO_BCLK(n)      (S5L8930_PMGR_BASE + 0x104 + 0x10 * (n))
 unsigned s5l8930_i2s_rate(unsigned port);
+/* The same, with the port's output voice set to it while TX runs: a CDMA chain's start. */
+unsigned s5l8930_i2s_sync_rate(unsigned port);
 #define S5L8930_CDMA_CHANNELS    0x26
 
 /*

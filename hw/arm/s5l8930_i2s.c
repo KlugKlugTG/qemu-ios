@@ -249,6 +249,11 @@ static void i2s_out_cb(void *opaque, int free_bytes)
     }
 }
 
+static bool i2s_tx_running(S5L8930I2SState *s)
+{
+    return s->ctrl_run ? s->regs[I2S_CTRL >> 2] & 1 : s->regs[I2S_TXCOM >> 2] == I2S_CMD_RUN;
+}
+
 static void i2s_set_rate(S5L8930I2SState *s, unsigned rate)
 {
     struct audsettings as = {
@@ -262,6 +267,8 @@ static void i2s_set_rate(S5L8930I2SState *s, unsigned rate)
                             i2s_out_cb, &as);
     if (s->voice) {
         audio_be_set_volume_out_lr(s->audio_be, s->voice, 0, 255, 255);
+        /* Reopened, the voice is inactive: a change while TX runs left it silent. */
+        audio_be_set_active_out(s->audio_be, s->voice, i2s_tx_running(s));
         s->rate = rate;
     }
 }
@@ -284,11 +291,6 @@ static uint64_t i2s_read(void *opaque, hwaddr offset, unsigned size)
     return offset == I2S_TXFIFO ? 0 : s->regs[offset >> 2];
 }
 
-static bool i2s_tx_running(S5L8930I2SState *s)
-{
-    return s->ctrl_run ? s->regs[I2S_CTRL >> 2] & 1 : s->regs[I2S_TXCOM >> 2] == I2S_CMD_RUN;
-}
-
 /* The codec switched rates (the iPod touch 4 goes to 22.05 kHz for VoiceOver's speech). */
 static void i2s_lrclk_update(void *opaque, ClockEvent event)
 {
@@ -297,6 +299,24 @@ static void i2s_lrclk_update(void *opaque, ClockEvent event)
     if (s->voice && i2s_tx_running(s)) {
         i2s_set_rate(s, s5l8930_i2s_rate(s->port));
     }
+}
+
+/*
+ * The CDMA starts each chain at the port's rate as it is then, and the voice
+ * plays at that rate too. 5.x and 6.x's AppleARMIISAudio sets the PMGR NCO for
+ * VoiceOver's 22.05 kHz speech, and back, while TX runs: read only at TX
+ * start, the voice kept the old rate while the CDMA paced the new one, and the
+ * speech played twice as fast, then the next sounds half as fast.
+ */
+unsigned s5l8930_i2s_sync_rate(unsigned port)
+{
+    S5L8930I2SState *s = port < ARRAY_SIZE(i2s_ports) ? i2s_ports[port] : NULL;
+    unsigned rate = s5l8930_i2s_rate(port);
+
+    if (s && s->voice && i2s_tx_running(s)) {
+        i2s_set_rate(s, rate);
+    }
+    return rate;
 }
 
 static void i2s_write(void *opaque, hwaddr offset, uint64_t value,

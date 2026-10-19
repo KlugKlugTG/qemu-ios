@@ -5,10 +5,14 @@
  * output voice and the CDMA's pacing both use, must follow it while TX runs, and go back to the NCO's when no
  * codec drives the clock. The CS42L58's rate stays in register 05.
  *
+ * Where the port masters the clock (the iPad, the iPhone 4) its rate is PMGR NCO 0's, which 5.x and 6.x set for
+ * VoiceOver's 22.05 kHz, and back, while TX runs: each CDMA chain starts at the NCO's rate as it is then
+ * (s5l8930_i2s_sync_rate) and the voice must play at that rate too, not at the one TX started with.
+ *
  * SLICE hw/arm/ipod_touch_cs42l58.c fn cs42l58_sample_rate cs42l58_send
  * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|TXCOM|CMD_RUN|MCLK_DIV|FRAME_BITS|FRAME_MASTER)[[:space:]]
  * SLICE hw/arm/s5l8930_i2s.c range static S5L8930I2SState *i2s_ports | static void i2s_in_cb
- * SLICE hw/arm/s5l8930_i2s.c fn i2s_set_rate i2s_tx_running i2s_lrclk_update
+ * SLICE hw/arm/s5l8930_i2s.c fn i2s_tx_running i2s_set_rate i2s_lrclk_update s5l8930_i2s_sync_rate
  * CFLAGS -Wall -Werror
  */
 #include <assert.h>
@@ -69,17 +73,19 @@ static uint32_t address_space_ldl_le(int *as, hwaddr addr, int attrs, void *resu
 
 struct audsettings { int freq, nchannels, fmt; bool big_endian; };
 #define AUDIO_FORMAT_S16 1
-static int opened, voice_rate;
+static int opened, voice_rate, active = -1;
 static void i2s_out_cb(void *opaque, int free_bytes) {}
 static void *audio_be_open_out(void *be, void *old, const char *name, void *opaque,
                                void (*cb)(void *, int), struct audsettings *as)
 {
     assert(opaque == &i2s0 && cb == i2s_out_cb && as->nchannels == 2);
     opened++;
+    active = 0;   /* as QEMU's audio: a reopened voice is inactive */
     voice_rate = as->freq;
     return opaque;
 }
 static void audio_be_set_volume_out_lr(void *be, void *voice, int mute, int l, int r) {}
+static void __attribute__((unused)) audio_be_set_active_out(void *be, void *voice, int on) { active = on; }
 #include "slice.h"
 
 static void codec_write(CS42L58State *codec, uint8_t reg, uint8_t value)
@@ -110,7 +116,7 @@ int main(void)
     assert(lrclk == 44100 && s5l8930_i2s_rate(0) == 44100 && opened == 0);
     codec_write(&cs42l59, 0x0a, 0x13);
     assert(lrclk == 22050 && s5l8930_i2s_rate(0) == 22050);
-    assert(opened == 1 && voice_rate == 22050 && i2s0.rate == 22050);
+    assert(opened == 1 && voice_rate == 22050 && i2s0.rate == 22050 && active == 1);
     codec_write(&cs42l59, 0x0a, 0x0b);
     assert(s5l8930_i2s_rate(0) == 44100 && opened == 2 && voice_rate == 44100);
 
@@ -128,6 +134,21 @@ int main(void)
 
     /* A port no codec drives runs at its NCO. */
     assert(s5l8930_i2s_rate(1) == 44100);
-    puts("PASS: i2s0 runs at the CS42L59's LRCLK (register 0a), else at its NCO");
+
+    /* The iPad: master of its frame clock, at its NCO. TX starts at 44.1 kHz; the NCO goes to 22.05 kHz and back
+     * while it runs, and each chain's start takes the voice along. */
+    i2s0.regs[I2S_FRAME_BITS >> 2] = 0xc8000300;
+    i2s0.regs[I2S_TXCOM >> 2] = I2S_CMD_RUN;
+    nco_bclk = 64 * 44100;
+    assert(s5l8930_i2s_sync_rate(0) == 44100 && voice_rate == 44100);
+    nco_bclk = 64 * 22050;
+    assert(s5l8930_i2s_sync_rate(0) == 22050 && voice_rate == 22050 && i2s0.rate == 22050 && active == 1);
+    nco_bclk = 64 * 44100;
+    assert(s5l8930_i2s_sync_rate(0) == 44100 && voice_rate == 44100 && active == 1);
+    /* Stopped, nothing to follow. */
+    i2s0.regs[I2S_TXCOM >> 2] = 0;
+    nco_bclk = 64 * 16000;
+    assert(s5l8930_i2s_sync_rate(0) == 16000 && voice_rate == 44100);
+    puts("PASS: i2s0 runs at the CS42L59's LRCLK (register 0a), else at its NCO, and its voice follows either");
     return 0;
 }

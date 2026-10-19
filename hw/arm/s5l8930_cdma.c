@@ -782,7 +782,7 @@ static bool cdma_start_paced(S5L8930CDMAState *s, int ch)
     c->ctrl = (c->ctrl & ~ST_ERROR) | ST_RUNNING;
     s->paced_desc[ch] = c->desc;
     s->paced_sent[ch] = 0;
-    s->paced_bps[ch] = 4 * s5l8930_i2s_rate((c->fifo - CDMA_PACED_LO) >> 12);
+    s->paced_bps[ch] = 4 * s5l8930_i2s_sync_rate((c->fifo - CDMA_PACED_LO) >> 12);
     s->paced_start[ch] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     /*
      * A chain re-armed from the previous one's completion interrupt continues

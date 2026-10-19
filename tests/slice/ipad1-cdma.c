@@ -87,7 +87,7 @@ static void qcrypto_cipher_free(QCryptoCipher *c) { (void)c; }
 static void stl_le_p(void *p, uint32_t v) {
     uint8_t *b = p; b[0] = v; b[1] = v >> 8; b[2] = v >> 16; b[3] = v >> 24;
 }
-static uint32_t s5l8930_i2s_rate(int port) { (void)port; return 44100; }
+static uint32_t s5l8930_i2s_sync_rate(int port) { (void)port; return 44100; }
 static int64_t g_now;
 static int64_t qemu_clock_get_ns(int c) { (void)c; return g_now; }
 static void timer_mod(QEMUTimer *t, int64_t at) { (void)t; (void)at; }
