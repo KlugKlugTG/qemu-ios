@@ -87,7 +87,6 @@ static void tcg_accel_instance_init(Object *obj)
 bool one_insn_per_tb;
 bool tcg_cross_page_chain;
 bool tcg_indirect_cache;
-bool tcg_inline_tb_lookup;
 
 #ifndef CONFIG_USER_ONLY
 static void tcg_vm_change_state(void *opaque, bool running, RunState state)
@@ -110,12 +109,6 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
 {
     TCGState *s = TCG_STATE(as);
     unsigned max_threads = 1;
-
-    const char *inline_lookup = getenv("LT_TB_LOOKUP_INLINE");
-    tcg_inline_tb_lookup = inline_lookup && strcmp(inline_lookup, "off") &&
-                           strcmp(inline_lookup, "0");
-    fprintf(stderr, "[tcg] inline-tb-lookup=%s (accounting uses legacy path)\n",
-            tcg_inline_tb_lookup ? "on" : "off");
 
 #ifndef CONFIG_USER_ONLY
     CPUClass *cc = CPU_CLASS(object_class_by_name(target_cpu_type()));
