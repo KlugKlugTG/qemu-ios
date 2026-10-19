@@ -518,96 +518,9 @@ static CPUARMTBFlags rebuild_hflags_internal(CPUARMState *env)
     }
 }
 
-static bool hflags_v6_fast;
-static bool hflags_v6_verify;
-static uint64_t hflags_v6_verified;
-static gsize hflags_v6_initialized;
-
-/*
- * Pre-v7 VMSA without security or virtualization has only the EL1&0 regime.
- * Keep the same CPACR, alignment, endian, illegal-state and even raw CPSR.PAN
- * handling as the generic builder. The optional verifier compares both flag
- * words on every eligible rebuild; ordinary execution does no comparison.
- */
-static bool rebuild_hflags_v6(CPUARMState *env, CPUARMTBFlags *result)
-{
-#ifdef CONFIG_USER_ONLY
-    return false;
-#else
-    const uint64_t unsupported =
-        (1ULL << ARM_FEATURE_V7) | (1ULL << ARM_FEATURE_V8) |
-        (1ULL << ARM_FEATURE_AARCH64) | (1ULL << ARM_FEATURE_M) |
-        (1ULL << ARM_FEATURE_PMSA) | (1ULL << ARM_FEATURE_EL2) |
-        (1ULL << ARM_FEATURE_EL3);
-    CPUARMTBFlags flags = {};
-    ARMMMUIdx mmu_idx;
-    uint64_t sctlr;
-    int el, fpen, fp_el = 0;
-
-    if (!arm_feature(env, ARM_FEATURE_V6) || (env->features & unsupported) ||
-        is_a64(env)) {
-        return false;
-    }
-    el = arm_current_el(env);
-    if (el > 1) {
-        return false;
-    }
-    sctlr = env->cp15.sctlr_el[1];
-    fpen = FIELD_EX64(env->cp15.cpacr_el1, CPACR_EL1, FPEN);
-    if (!(fpen & 1) || (fpen == 1 && el == 0)) {
-        fp_el = 1;
-    } else if (FIELD_EX64(env->cp15.cptr_el[3], CPTR_EL3, TFP)) {
-        /* Preserve the generic calculation even for a raw debugger write. */
-        fp_el = 3;
-    }
-    mmu_idx = el == 0 ? ARMMMUIdx_E10_0 :
-        (env->uncached_cpsr & CPSR_PAN ? ARMMMUIdx_E10_1_PAN : ARMMMUIdx_E10_1);
-
-    DP_TBFLAG_ANY(flags, ALIGN_MEM, (sctlr & SCTLR_A) || !(sctlr & SCTLR_M));
-    DP_TBFLAG_ANY(flags, FPEXC_EL, fp_el);
-    DP_TBFLAG_ANY(flags, MMUIDX, arm_to_core_mmu_idx(mmu_idx));
-    DP_TBFLAG_A32(flags, SCTLR__B, !!(sctlr & SCTLR_B));
-    DP_TBFLAG_ANY(flags, BE_DATA,
-                  arm_cpu_data_is_big_endian_a32(env, sctlr & SCTLR_B));
-    DP_TBFLAG_A32(flags, NS, 1);
-    DP_TBFLAG_ANY(flags, PSTATE__IL, !!(env->uncached_cpsr & CPSR_IL));
-    /* SS_ACTIVE requires an AArch64 debug target, absent in this CPU class. */
-    *result = flags;
-    return true;
-#endif
-}
-
 void arm_rebuild_hflags(CPUARMState *env)
 {
-    CPUARMTBFlags flags;
-
-    if (g_once_init_enter(&hflags_v6_initialized)) {
-        const char *fast = getenv("LT_HFLAGS_V6_FAST");
-        const char *verify = getenv("LT_HFLAGS_V6_VERIFY");
-
-        hflags_v6_fast = fast && !strcmp(fast, "on");
-        hflags_v6_verify = verify && !strcmp(verify, "on");
-        fprintf(stderr, "[hflags-v6] fast=%s verify=%s\n",
-                hflags_v6_fast ? "on" : "off",
-                hflags_v6_verify ? "on" : "off");
-        g_once_init_leave(&hflags_v6_initialized, 1);
-    }
-    if ((hflags_v6_fast || hflags_v6_verify) && rebuild_hflags_v6(env, &flags)) {
-        if (hflags_v6_verify) {
-            CPUARMTBFlags original = rebuild_hflags_internal(env);
-            uint64_t n;
-
-            g_assert(flags.flags == original.flags &&
-                     flags.flags2 == original.flags2);
-            n = qatomic_fetch_inc(&hflags_v6_verified) + 1;
-            if ((n & ((1 << 20) - 1)) == 0) {
-                fprintf(stderr, "[hflags-v6] verified=%" PRIu64 "\n", n);
-            }
-        }
-        env->hflags = flags;
-    } else {
-        env->hflags = rebuild_hflags_internal(env);
-    }
+    env->hflags = rebuild_hflags_internal(env);
 }
 
 /*
