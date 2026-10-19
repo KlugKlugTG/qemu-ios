@@ -90,7 +90,6 @@ bool tcg_indirect_cache;
 bool tcg_inline_tb_lookup;
 bool tcg_masked_irq_fast;
 bool tcg_irq_check_prof;
-bool tcg_irq_delivery_fast;
 
 #ifndef CONFIG_USER_ONLY
 static void tcg_vm_change_state(void *opaque, bool running, RunState state)
@@ -129,13 +128,6 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
     fprintf(stderr, "[tcg] masked-irq-fast=%s irq-check-prof=%s\n",
             tcg_masked_irq_fast ? "on" : "off",
             tcg_irq_check_prof ? "on" : "off");
-
-    const char *irq_delivery = getenv("LT_IRQ_DELIVERY_FAST");
-    tcg_irq_delivery_fast = irq_delivery && strcmp(irq_delivery, "off") &&
-                            strcmp(irq_delivery, "0") &&
-                            ms->smp.cpus == 1 && ms->smp.max_cpus == 1;
-    fprintf(stderr, "[tcg] irq-delivery-fast=%s (single-vCPU physical ARMv6)\n",
-            tcg_irq_delivery_fast ? "on" : "off");
 
     const char *indirect_l2 = getenv("LT_IBTC_L2");
     const char *indirect_prof = getenv("LT_IBTC_L2_PROF");
