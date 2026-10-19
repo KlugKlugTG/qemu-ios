@@ -3794,6 +3794,76 @@ static void gles_present_record(GLESPresentSample *s, int result)
     begin = s->cursor;
 }
 
+/*
+ * Optional physical backing identity, independent of user profiling. Resolve
+ * every page of the destination span while this vCPU is still in the caller's
+ * address space. A debug walk does not fault pages in. The actual present keeps
+ * its original permission/fault handling; only successful presents may be
+ * joined with this observation. A failed/noncontiguous mapping stays unknown.
+ * No guest execution occurs between this observation and the host copy unless
+ * the present faults and returns an error, which invalidates that attempt.
+ */
+static void gles_trace_surface_mapping(CPUState *cpu, uint32_t ctx,
+                                        uint32_t base, uint32_t stride,
+                                        uint32_t width, uint32_t height,
+                                        uint32_t format)
+{
+    static gsize initialized;
+    static bool enabled;
+    uint64_t span = 0, physical = UINT64_MAX;
+    uint32_t bpp = format == GLES_SURFACE_RGB565 ? 2 : 4;
+
+    if (g_once_init_enter(&initialized)) {
+        const char *mode = getenv("LT_GLES_SURFACE_PATH");
+        const char *path = getenv("LT_FRAME_PATH");
+        bool requested = mode && !strcmp(mode, "on");
+
+        enabled = requested && path && *path && strcmp(path, "off") &&
+                  strcmp(path, "0");
+        fprintf(stderr, "[gles-surface-path] requested=%s configured=%s\n",
+                requested ? "on" : "off", enabled ? "on" : "off");
+        g_once_init_leave(&initialized, 1);
+    }
+    if (!enabled) {
+        return;
+    }
+    if (base && width && height && (uint64_t)width * bpp <= 16 * 1024 * 1024 &&
+        stride >= (uint64_t)width * bpp &&
+        height - 1 <= (16 * 1024 * 1024 - (uint64_t)width * bpp) / stride &&
+        (format == GLES_SURFACE_BGRA32 || format == GLES_SURFACE_RGBA32 ||
+         format == GLES_SURFACE_RGB565)) {
+        span = (uint64_t)(height - 1) * stride + (uint64_t)width * bpp;
+    }
+    ios_frame_path(IOS_FP_SURFACE_MAP_BEGIN, ctx, base, span);
+    if (span && span <= 16 * 1024 * 1024 &&
+        (uint64_t)base + span <= (UINT64_C(1) << 32)) {
+        uint64_t first = base & TARGET_PAGE_MASK;
+        uint64_t last = ((uint64_t)base + span - 1) & TARGET_PAGE_MASK;
+        hwaddr first_pa = (hwaddr)-1;
+        bool contiguous = true;
+
+        for (uint64_t va = first; va <= last; va += TARGET_PAGE_SIZE) {
+            MemTxAttrs attrs = {};
+            hwaddr pa = cpu_get_phys_page_attrs_debug(cpu, va, &attrs);
+
+            if (pa == (hwaddr)-1) {
+                contiguous = false;
+                break;
+            }
+            if (va == first) {
+                first_pa = pa;
+            } else if (pa != first_pa + (va - first)) {
+                contiguous = false;
+                break;
+            }
+        }
+        if (contiguous) {
+            physical = first_pa + (base - first);
+        }
+    }
+    ios_frame_path(IOS_FP_SURFACE_MAP_END, ctx, base, physical);
+}
+
 static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t stride,
                                    uint32_t width, uint32_t height,
                                    uint32_t format, GLESPresentSample *sample)
@@ -5990,6 +6060,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
                         gh.presents);
             }
         }
+        gles_trace_surface_mapping(cpu, ctx, a[0], a[1], a[2], a[3], a[4]);
         ios_frame_path(IOS_FP_PRESENT_BEGIN, ctx, a[0], ((uint64_t)a[2] << 32) | a[3]);
         int64_t r = gles_present_to_surface(cpu, a[0], a[1], a[2], a[3], a[4]);
         ios_frame_path(IOS_FP_PRESENT_END, ctx, a[0], r);
