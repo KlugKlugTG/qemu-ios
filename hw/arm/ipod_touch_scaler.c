@@ -83,17 +83,17 @@ static bool scaler_write_bus(IPodScalerState *s, uint32_t va, const void *buf,
 /*
  * The bus address of row `y` of a buffer whose rows are `pitch` bytes apart in memory and
  * `stride` apart as the block is programmed (+0x1c/+0x3c). Where the stride is a power of
- * two past the pitch, the kernel maps the buffer in 64 KiB windows of 64 KiB / stride rows,
- * each packed at the pitch and only as many pages mapped as those rows fill: 2x of a 1x
- * iPad app, 960x640 at stride 4096 (16 rows of 3840 bytes, 15 pages of each window; issue
- * 47), as the iPad 3.2 Zoom source (11 of 16 at 683 wide).
+ * two past the pitch, the kernel maps the buffer in bands of 16 rows, each band 16 strides
+ * long, packed at the pitch and only as many pages mapped as those rows fill: 2x of a 1x
+ * iPad app, 960x640 at stride 4096 (16 rows of 3840 bytes, 15 pages of each 64 KiB band;
+ * issue 47), as the iPad 3.2 Zoom source (11 of 16 at 683 wide); and on 5.1.1 the 1x app's
+ * own 320x480 layer as the source of its 2x, at stride 2048 (16 rows of 1280 bytes, 5 pages
+ * of each 32 KiB band; issue 96).
  */
 static uint32_t scaler_row(uint32_t base, unsigned y, unsigned stride, unsigned pitch)
 {
     if (pitch < stride && stride < 0x10000 && !(stride & (stride - 1))) {
-        unsigned rows = 0x10000 / stride;
-
-        return base + (y / rows) * 0x10000 + (y % rows) * pitch;
+        return base + (y / 16) * 16 * stride + (y % 16) * pitch;
     }
     return base + y * stride;
 }
