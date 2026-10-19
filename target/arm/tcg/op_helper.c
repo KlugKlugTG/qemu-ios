@@ -729,6 +729,22 @@ void HELPER(cpsr_write)(CPUARMState *env, uint32_t val, uint32_t mask)
     }
 }
 
+/* Default off for same-build exception-return measurements. */
+static bool eret_hflags_fast(void)
+{
+    static gsize initialized;
+    static bool enabled;
+
+    if (g_once_init_enter(&initialized)) {
+        const char *setting = getenv("LT_ERET_HFLAGS_FAST");
+
+        enabled = setting && !strcmp(setting, "on");
+        fprintf(stderr, "[eret] hflags-fast=%s\n", enabled ? "on" : "off");
+        g_once_init_leave(&initialized, 1);
+    }
+    return enabled;
+}
+
 /* Write the CPSR for a 32-bit exception return */
 void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
 {
@@ -755,7 +771,15 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
      * state. Do the masking now.
      */
     env->regs[15] &= (env->thumb ? ~1 : ~3);
-    arm_rebuild_hflags(env);
+    /*
+     * The valid mask always includes CPSR_M, so cpsr_write() has already
+     * rebuilt hflags for CPSRWriteExceptionReturn. The intervening PC
+     * alignment is not an input to hflags. Keep the original second rebuild
+     * for A/B; neither exception handling nor either EL hook is skipped.
+     */
+    if (!eret_hflags_fast()) {
+        arm_rebuild_hflags(env);
+    }
 
     if (!QLIST_EMPTY(&cpu->el_change_hooks)) {
         bql_lock();
