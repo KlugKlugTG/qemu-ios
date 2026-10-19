@@ -37,8 +37,9 @@ SignerCertificate dangling after its local CFRelease.
 The original-first metadata and selective certificate fallback follow AppSync
 Unified's behavior; see [prior-art.md](prior-art.md). Its richer metadata
 synthesis is gated for iOS 8+, outside this project's current supported range.
-The embedded certificate in appsync_cert.h is used only for the legacy fallback;
-The fallback compares its bytes exactly.
+The embedded certificate in appsync_cert.h is used only for the legacy fallback,
+which compares its bytes exactly. It is a self-signed "LightTouch AppSync"
+certificate made for this project, not an Apple certificate.
 
 ## Build and check
 
