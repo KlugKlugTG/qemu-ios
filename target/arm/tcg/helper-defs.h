@@ -112,6 +112,7 @@ DEF_HELPER_FLAGS_5(probe_access, TCG_CALL_NO_WG, void, env, vaddr, i32, i32, i32
 
 DEF_HELPER_1(vfp_get_fpscr, i32, env)
 DEF_HELPER_2(vfp_set_fpscr, void, env, i32)
+DEF_HELPER_2(cpsr_write_eret_path, void, env, i32)
 
 DEF_HELPER_3(vfp_addh, f16, f16, f16, fpst)
 DEF_HELPER_3(vfp_adds, f32, f32, f32, fpst)

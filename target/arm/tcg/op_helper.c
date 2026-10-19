@@ -661,6 +661,13 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
     }
 }
 
+/* Translation selects this wrapper only for alignment return diagnostics. */
+void HELPER(cpsr_write_eret_path)(CPUARMState *env, uint32_t val)
+{
+    HELPER(cpsr_write_eret)(env, val);
+    arm_alignment_path_return(env);
+}
+
 /* Access to user mode registers from privileged modes.  */
 uint32_t HELPER(get_user_reg)(CPUARMState *env, uint32_t regno)
 {

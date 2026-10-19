@@ -19,6 +19,9 @@ enum IOSFramePathEvent {
     IOS_FP_VFP_SAMPLE,
     IOS_FP_VFP_RESULT,
     IOS_FP_ALIGNMENT,
+    IOS_FP_ALIGNMENT_BEGIN,
+    IOS_FP_ALIGNMENT_RETURN,
+    IOS_FP_ALIGNMENT_ABANDON,
 };
 
 void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b,

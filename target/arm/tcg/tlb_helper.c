@@ -274,6 +274,110 @@ void arm_deliver_fault(ARMCPU *cpu, vaddr addr,
     raise_exception(env, exc, syn, target_el);
 }
 
+unsigned arm_alignment_path_mode(void)
+{
+    static gsize mode;
+
+    if (g_once_init_enter(&mode)) {
+        const char *audio = getenv("LT_AUDIO_PATH_PROF");
+        const char *path = getenv("LT_ALIGNMENT_PATH_PROF");
+        bool faults = (audio && strcmp(audio, "off") && strcmp(audio, "0")) ||
+                      (path && strcmp(path, "off") && strcmp(path, "0"));
+        bool returns = path && !strcmp(path, "returns");
+
+        if (faults) {
+            fprintf(stderr, "[alignment-path] faults=on returns=%s sample-period=257\n",
+                    returns ? "on" : "off");
+        }
+        g_once_init_leave(&mode, 1 + faults + 2 * returns);
+    }
+    return mode - 1;
+}
+
+/* Only CPU 0 touches this diagnostic table. A thread can be switched out while
+ * its fault is being handled, so one global pending fault is insufficient.
+ * Match the raw installed page table/CIDR and privileged thread register plus
+ * the exact next ARM PC. Keep failed matches observable instead of guessing.
+ */
+static struct AlignmentPathPending {
+    uint64_t id, ttbr0, context;
+    uint32_t thread, pc;
+} alignment_pending[64];
+static uint64_t alignment_eligible, alignment_id;
+static unsigned alignment_active;
+
+static void arm_alignment_path_begin(CPUARMState *env)
+{
+    struct AlignmentPathPending *slot = NULL;
+    bool secure = arm_is_secure(env);
+    uint32_t thread = (secure ? env->cp15.tpidrprw_s : env->cp15.tpidrprw_ns) & ~3u;
+
+    if (env->thumb || (env->uncached_cpsr & CPSR_M) != ARM_CPU_MODE_USR) {
+        return;
+    }
+    /* A new fault in a still-pending thread means its expected return was
+     * not observed. Report it even when this new fault is not sampled. */
+    for (unsigned i = 0; alignment_active && i < ARRAY_SIZE(alignment_pending); i++) {
+        if (alignment_pending[i].id && alignment_pending[i].thread == thread) {
+            ios_frame_path(IOS_FP_ALIGNMENT_ABANDON, alignment_pending[i].id, 1, thread);
+            alignment_pending[i].id = 0;
+            alignment_active--;
+        }
+    }
+    if (++alignment_eligible % 257 || !thread) {
+        return;
+    }
+    for (unsigned i = 0; i < ARRAY_SIZE(alignment_pending); i++) {
+        if (!alignment_pending[i].id) {
+            slot = &alignment_pending[i];
+            break;
+        }
+    }
+    if (!slot) {
+        ios_frame_path(IOS_FP_ALIGNMENT_ABANDON, ++alignment_id, 3, thread);
+        return;
+    }
+    *slot = (struct AlignmentPathPending) {
+        .id = ++alignment_id, .thread = thread, .pc = env->regs[15],
+        .ttbr0 = secure ? env->cp15.ttbr0_s : env->cp15.ttbr0_ns,
+        .context = secure ? env->cp15.contextidr_s : env->cp15.contextidr_ns,
+    };
+    alignment_active++;
+    ios_frame_path(IOS_FP_ALIGNMENT_BEGIN, slot->id,
+                   ((uint64_t)thread << 32) | slot->pc, slot->ttbr0);
+}
+
+void arm_alignment_path_return(CPUARMState *env)
+{
+    if (!alignment_active || env_cpu(env)->cpu_index != 0 ||
+        (env->uncached_cpsr & CPSR_M) != ARM_CPU_MODE_USR) {
+        return;
+    }
+    bool secure = arm_is_secure(env);
+    uint32_t thread = (secure ? env->cp15.tpidrprw_s : env->cp15.tpidrprw_ns) & ~3u;
+    uint64_t ttbr0 = secure ? env->cp15.ttbr0_s : env->cp15.ttbr0_ns;
+    uint64_t context = secure ? env->cp15.contextidr_s : env->cp15.contextidr_ns;
+
+    for (unsigned i = 0; i < ARRAY_SIZE(alignment_pending); i++) {
+        struct AlignmentPathPending *p = &alignment_pending[i];
+
+        if (!p->id || p->thread != thread) {
+            continue;
+        }
+        if (!env->thumb && ttbr0 == p->ttbr0 && context == p->context &&
+            env->regs[15] == p->pc + 4) {
+            ios_frame_path(IOS_FP_ALIGNMENT_RETURN, p->id,
+                           ((uint64_t)thread << 32) | env->regs[15], p->ttbr0);
+        } else {
+            ios_frame_path(IOS_FP_ALIGNMENT_ABANDON, p->id, 2,
+                           ((uint64_t)thread << 32) | env->regs[15]);
+        }
+        p->id = 0;
+        alignment_active--;
+        return;
+    }
+}
+
 /* Raise a data fault alignment exception for the specified virtual address */
 void arm_cpu_do_unaligned_access(CPUState *cs, vaddr vaddr,
                                  MMUAccessType access_type,
@@ -287,17 +391,14 @@ void arm_cpu_do_unaligned_access(CPUState *cs, vaddr vaddr,
 
     /* Record fault PCs without bypassing the guest's alignment handler. */
     if (!cpu->env.aarch64 && cs->cpu_index == 0) {
-        static gsize mode;
+        unsigned mode = arm_alignment_path_mode();
 
-        if (g_once_init_enter(&mode)) {
-            const char *v = getenv("LT_AUDIO_PATH_PROF");
-            bool on = v && strcmp(v, "off") && strcmp(v, "0");
-
-            g_once_init_leave(&mode, 1 + on);
-        }
-        if (mode == 2) {
+        if (mode & 1) {
             ios_frame_path(IOS_FP_ALIGNMENT, cpu->env.regs[15], vaddr,
                            ((uint64_t)access_type << 32) | (uint32_t)mmu_idx);
+        }
+        if (mode & 2) {
+            arm_alignment_path_begin(&cpu->env);
         }
     }
     fi.type = ARMFault_Alignment;
