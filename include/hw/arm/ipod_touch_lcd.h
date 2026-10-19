@@ -105,6 +105,17 @@ typedef struct IPodTouchLCDState
     uint8_t *rotbuf;
 
     /*
+     * The frame the guest last committed (a +0x4 write with bit 4, the swap) into the page already on the panel,
+     * copied at that write: software CoreAnimation with one page (3.0 on the iPhone 3GS: MBX2D_PAGE_FLIP=0) starts
+     * drawing the next frame into the page the panel scans, so the panel shows this copy instead. Host memory only;
+     * dropped by a commit of another page, a reset and a restore.
+     */
+    uint8_t *front;
+    bool front_valid;
+    uint32_t front_gen, front_shown_gen;
+    uint32_t last_commit_base;
+
+    /*
      * Latched multi-touch contact positions, in console coordinates (0..2^15).
      * QEMU's mtt protocol delivers a slot's X and Y as separate DATA events and
      * only commits them with a following BEGIN/UPDATE/END, so each slot's last

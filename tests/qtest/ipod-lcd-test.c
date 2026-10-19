@@ -146,6 +146,64 @@ static void n45_control(void)
     qtest_quit(q);
 }
 
+/* The pixel at (x, y) of a QMP screendump (PPM P6), as 0xRRGGBB. */
+static uint32_t screen_pixel(QTestState *q, unsigned x, unsigned y)
+{
+    g_autofree char *path = NULL, *data = NULL;
+    gsize len;
+    unsigned w, h, max;
+    int n = 0, fd = g_file_open_tmp("n72-lcd-shot-XXXXXX", &path, NULL);
+
+    g_assert_cmpint(fd, >=, 0);
+    close(fd);
+    qtest_qmp_assert_success(q, "{'execute':'screendump','arguments':{'filename':%s}}", path);
+    g_assert_true(g_file_get_contents(path, &data, &len, NULL));
+    unlink(path);
+    g_assert_cmpint(sscanf(data, "P6 %u %u %u%n", &w, &h, &max, &n), ==, 3);
+    g_assert_true(x < w && y < h && max == 255);
+    g_assert_cmpuint(n + 1 + (gsize)w * h * 3, <=, len);
+    const uint8_t *p = (const uint8_t *)data + n + 1 + ((gsize)y * w + x) * 3;
+    return p[0] << 16 | p[1] << 8 | p[2];
+}
+
+/*
+ * A page committed (+0x4 bit 4) again while the panel shows it is drawn in place: the panel shows the frame as
+ * committed, not the next one the guest has started in the same page (issue 98: 3.0's software CoreAnimation with one
+ * page showed cleared and half-drawn frames in every animation). A commit of another page scans out live.
+ */
+static void committed_frame(void)
+{
+    const uint64_t fb = 0x0f496000, other = 0x0f600000, size = 320 * 480 * 4;
+    QTestState *q = start_board("", false);
+
+    qtest_writel(q, LCD + 0x20, 0x00200700);
+    qtest_writel(q, LCD + 0x28, 320);
+    qtest_writel(q, LCD + 0x30, 0x014001e0);
+    qtest_writel(q, LCD + 0x24, fb);
+    qtest_memset(q, fb, 0x40, size);            /* frame 1, grey */
+    qtest_writel(q, LCD + 0x4, 0x10);
+    qtest_clock_step(q, 20 * 1000 * 1000);      /* a frame interrupt: the panel takes the window */
+    qtest_writel(q, LCD + 0x24, fb);
+    qtest_writel(q, LCD + 0x4, 0x10);           /* the same page committed again */
+    g_assert_cmphex(screen_pixel(q, 160, 240), ==, 0x404040);
+    qtest_memset(q, fb, 0x00, size / 2);        /* the next frame begun in place: cleared, half drawn */
+    qtest_memset(q, fb, 0xc0, size / 4);
+    qtest_clock_step(q, 20 * 1000 * 1000);
+    g_assert_cmphex(screen_pixel(q, 160, 100), ==, 0x404040);
+    g_assert_cmphex(screen_pixel(q, 160, 200), ==, 0x404040);
+    qtest_writel(q, LCD + 0x4, 0x10);           /* ... and committed */
+    g_assert_cmphex(screen_pixel(q, 160, 100), ==, 0xc0c0c0);
+    g_assert_cmphex(screen_pixel(q, 160, 200), ==, 0x000000);
+    /* Page flipping: another page committed is scanned out as it is. */
+    qtest_memset(q, other, 0x80, size);
+    qtest_writel(q, LCD + 0x24, other);
+    qtest_writel(q, LCD + 0x4, 0x10);
+    qtest_clock_step(q, 20 * 1000 * 1000);
+    qtest_memset(q, other, 0x20, size);
+    g_assert_cmphex(screen_pixel(q, 160, 240), ==, 0x202020);
+    qtest_quit(q);
+}
+
 int main(int argc, char **argv)
 {
     g_autofree char *zero = g_malloc0(1048576);
@@ -163,11 +221,13 @@ int main(int argc, char **argv)
     close(fd);
     g_assert_true(g_file_set_contents(rom45, zero, 65536, NULL));
     nand = g_dir_make_tmp("n72-lcd-nand-XXXXXX", NULL);
+    g_setenv("IT_LCD_BRIGHT", "255", true);     /* the screendumps at full backlight, whatever the PMU says */
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/ipod/lcd/default-control-readback-rmw", default_readback);
     qtest_add_func("/ipod/lcd/option-control-readback-rmw", option_readback);
     qtest_add_func("/ipod/lcd/control-reset", reset_control);
     qtest_add_func("/ipod/lcd/control-restored", restored_control);
+    qtest_add_func("/ipod/lcd/committed-frame", committed_frame);
     if (qtest_has_machine("iPod-Touch-1G")) {
         qtest_add_func("/ipod/lcd/n45-mapped-control", n45_control);
     }

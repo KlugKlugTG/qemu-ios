@@ -33,6 +33,7 @@ static bool lcd_ready_hack(void) { return false; }
 static void lcd_update_irq(IPodTouchLCDState *s) { (void)s; }
 static void lcd_write_irq(IPodTouchLCDState *s, hwaddr addr, uint64_t value)
 { (void)s; (void)addr; (void)value; }
+static void lcd_commit(IPodTouchLCDState *s) { (void)s; }   /* the swap's latch: tests/qtest/ipod-lcd-test */
 #define lcd_ft(...) ((void)0)
 #define qemu_log_mask(...) ((void)0)
 #define LOG_UNIMP 0
