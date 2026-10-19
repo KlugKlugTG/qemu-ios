@@ -10,8 +10,10 @@
  * PCM arrives in the TX FIFO from CDMA channel 0x1a (i2s0) as 16-bit writes,
  * paced by the CDMA model at this block's frame rate (s5l8930_cdma.c), so the
  * FIFO just appends to a ring the audio backend drains. Stereo S16LE at the
- * port's frame rate, read from its PMGR NCO bit clock (s5l8930_i2s_rate())
- * each time the TX side is started.
+ * port's frame rate (s5l8930_i2s_rate()): the codec's LRCLK where the codec
+ * masters the frame clock ("lrclk", the iPod touch 4), else the port's PMGR
+ * NCO bit clock; read each time the TX side is started and whenever the
+ * codec's LRCLK changes.
  *
  * Capture is the mirror image: CDMA channel 0x1b reads the RX FIFO (+0x38) at
  * the same paced rate and the FIFO hands out bytes a QEMU input voice (the
@@ -30,6 +32,7 @@
 #include "qemu/error-report.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
+#include "hw/core/qdev-clock.h"
 #include "hw/arm/s5l8930.h"
 #include "qemu/audio.h"
 #include "migration/vmstate.h"
@@ -62,6 +65,7 @@ struct S5L8930I2SState {
      * format (0x78057805); the A4's starts with TXCOM = 6. */
     bool ctrl_run;
     uint8_t port;                   /* property: i2s<port>, selects its NCO */
+    Clock *lrclk;                   /* in: the codec's frame clock, where the codec is master */
     unsigned rate;                  /* the voice's current frame rate */
 
     uint8_t ring[I2S_RING];
@@ -80,6 +84,24 @@ struct S5L8930I2SState {
     SWVoiceOut *voice;
     SWVoiceIn *voice_in;
 };
+
+/* Each port's block, for the CDMA's pacing. ponytail: one machine per process;
+ * a link property from the CDMA if that ever changes. */
+static S5L8930I2SState *i2s_ports[3];
+
+unsigned s5l8930_i2s_rate(unsigned port)
+{
+    S5L8930I2SState *s = port < ARRAY_SIZE(i2s_ports) ? i2s_ports[port] : NULL;
+    unsigned lrclk = s ? clock_get_hz(s->lrclk) : 0;
+    uint32_t bclk;
+
+    if (lrclk) {
+        return lrclk;
+    }
+    bclk = address_space_ldl_le(&address_space_memory, S5L8930_NCO_BCLK(port),
+                                MEMTXATTRS_UNSPECIFIED, NULL);
+    return bclk >= 64 * 8000 && bclk <= 64 * 192000 ? bclk / 64 : 44100;
+}
 
 static void i2s_in_cb(void *opaque, int avail)
 {
@@ -222,6 +244,16 @@ static bool i2s_tx_running(S5L8930I2SState *s)
     return s->ctrl_run ? s->regs[I2S_CTRL >> 2] & 1 : s->regs[I2S_TXCOM >> 2] == I2S_CMD_RUN;
 }
 
+/* The codec switched rates (the iPod touch 4 goes to 22.05 kHz for VoiceOver's speech). */
+static void i2s_lrclk_update(void *opaque, ClockEvent event)
+{
+    S5L8930I2SState *s = opaque;
+
+    if (s->voice && i2s_tx_running(s)) {
+        i2s_set_rate(s, s5l8930_i2s_rate(s->port));
+    }
+}
+
 static void i2s_write(void *opaque, hwaddr offset, uint64_t value,
                       unsigned size)
 {
@@ -285,6 +317,9 @@ static void s5l8930_i2s_realize(DeviceState *dev, Error **errp)
 {
     S5L8930I2SState *s = S5L8930_I2S(dev);
 
+    if (s->port < ARRAY_SIZE(i2s_ports)) {
+        i2s_ports[s->port] = s;
+    }
     if (!s->audio_out) {
         return;
     }
@@ -316,6 +351,7 @@ static void s5l8930_i2s_init(Object *obj)
 {
     S5L8930I2SState *s = S5L8930_I2S(obj);
 
+    s->lrclk = qdev_init_clock_in(DEVICE(obj), "lrclk", i2s_lrclk_update, s, ClockUpdate);
     memory_region_init_io(&s->iomem, obj, &i2s_ops, s, TYPE_S5L8930_I2S,
                           I2S_REGS_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
@@ -337,11 +373,12 @@ static int s5l8930_i2s_post_load(void *opaque, int version_id)
 /* The PCM ring is transient host-side buffering and is not migrated. */
 static const VMStateDescription vmstate_s5l8930_i2s = {
     .name = TYPE_S5L8930_I2S,
-    .version_id = 1,
+    .version_id = 2,
     .minimum_version_id = 1,
     .post_load = s5l8930_i2s_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, S5L8930I2SState, I2S_REGS_SIZE / 4),
+        VMSTATE_CLOCK_V(lrclk, S5L8930I2SState, 2),
         VMSTATE_END_OF_LIST()
     }
 };
