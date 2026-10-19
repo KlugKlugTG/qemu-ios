@@ -15,6 +15,7 @@
 #include <math.h>
 #include <dlfcn.h>
 #include <sqlite3.h>
+#include <notify.h>
 
 #define MEDIA "/var/mobile/Media/"
 #define LIBRARY MEDIA "iTunes_Control/iTunes/iTunes Library.itlp/"
@@ -38,8 +39,14 @@ static ID field(ID o, const char *key) { return m1(o,"objectForKey:",string(key)
 static void set(ID o, const char *key, ID value) {
     CALL(void,(ID,ID,ID,ID))(o,selector("setObject:forKey:"),value,string(key));
 }
+static int sync_started;
+static void sync_end(void) {
+    if (sync_started) notify_post("com.apple.itunes-mobdev.syncDidFinish");
+    sync_started = 0;
+}
 static void fail(const char *reason) {
     fprintf(stderr,"itmedia: %s\n",reason);
+    sync_end();
     _exit(1);
 }
 
@@ -442,6 +449,28 @@ static int ml3_has_integrity(sqlite3_int64 pid) {
     return read_query(sql,NULL,NULL,&has,NULL) == SQLITE_ROW && has;
 }
 
+/* 3.1.x on the iPhone 3GS and the iPod touch 3G: Music (MobileMusicPlayer) runs in the background from boot,
+ * serving MediaPlayer's library queries, and holds a read transaction on
+ * Library.itdb (the shared range of SQLite's lock bytes) for as long as it runs, so the insert's commit waits in
+ * SQLite's busy handler without end. iTunes starts a sync with com.apple.itunes-mobdev.syncWillStart, and Music
+ * quits on it, its own sync handling; it is posted only while another process holds that range, and
+ * syncDidFinish follows the import. */
+static int library_read_locked(void) {
+    int fd = open(LIBRARY "Library.itdb",O_RDONLY);
+    if (fd < 0) return 0;
+    struct flock fl = { .l_start = 0x40000002, .l_len = 510, .l_type = F_WRLCK, .l_whence = SEEK_SET };
+    int held = !fcntl(fd,F_GETLK,&fl) && fl.l_type != F_UNLCK;
+    close(fd);
+    return held;
+}
+static void sync_start(void) {
+    if (!library_read_locked()) return;
+    sync_started = 1;
+    notify_post("com.apple.itunes-mobdev.syncWillStart");
+    for (int i = 0; i < 120 && library_read_locked(); ++i) usleep(250000);
+    if (library_read_locked()) fail("another process holds the music library open");
+}
+
 __attribute__((naked)) void _start(void) {
     __asm__ volatile("ldr r0, [sp]\n\tadd r1, sp, #4\n\tb _main");
 }
@@ -559,6 +588,7 @@ int main(int argc, char **argv) {
         import_artwork(folder,artwork_id);
     }
     if (!was_present) {
+        sync_start();
         ID result = CALL(ID,(ID,ID,ID,ID))(library,selector(insert),string(folder),props);
         if (!result) fail("MusicLibrary declined import; retain staged media for reconciliation");
         m0(getclass("MusicLibrary"),"commitAllDeferredWork");
@@ -575,6 +605,7 @@ int main(int argc, char **argv) {
         fail("music post-processing did not finish; retain staging for reconciliation");
     sleep(2);
     if (!existing(folder,filename,&artwork_id)) fail("the music library dropped the import");
+    sync_end();
     puts(was_present ? "already-imported" : "imported");
     fflush(stdout);
     m0(pool,"drain");

@@ -66,17 +66,22 @@ the locations in `Locations.itdb` as the library keeps them. Rows are never rewr
 and runs itdbprepserver's post-processing (`executeITunesCommands`, `executeITDBPostProcessing`, `updateSortMap`), as
 after a purchase. Photos save through AssetsLibrary as on 4.0 to 4.2.1.
 
+On 3.1 to 3.1.3 on the iPhone 3GS and the iPod touch 3G, Music (MobileMusicPlayer, which serves MediaPlayer's
+library queries to other processes through `com.apple.mobileipod.MPMediaLibraryMigServer`) runs in the background
+from boot, before anything is opened, and holds a read transaction on `Library.itdb` for as long as it runs (the
+`F_GETLK` owner of the shared range of SQLite's lock bytes, at every point from the guest agent's first answer to the
+import). The insert's commit then waits without end in SQLite's busy handler. The iPod touch 2G's 3.1.3 has no
+Music process at boot; of SpringBoard's capabilities it lacks the other two's `voice-control`, whose iPod plug-in
+(VoiceServices' iPod.vsplugin) reads the library, the likely client, not traced. An iTunes sync starts with `com.apple.itunes-mobdev.syncWillStart`, and Music
+quits on it, as it does for a sync; nothing else needed it. So when another process holds that range, the helper
+posts that notification, waits for the range to clear (up to 30 s), inserts, and posts
+`com.apple.itunes-mobdev.syncDidFinish` after the import or a refusal; Music starts again in the background after
+it. SpringBoard shows no sync screen for the notification alone (Home stays frontmost). The cost: a song Music
+was playing would stop, as for a sync.
+
 Not offered by Light Touch (its MediaSupport), and why:
 
 - 2.x and 3.0 have neither (and 3.0 needs a legacy-linked build).
-- 3.1 to 3.1.3 on the iPhone 3GS and the iPod touch 3G: the insert waits without end in SQLite's busy handler
-  (`-[MLMusicLibrary_SQL purchasedItemsPlaylist]` committing through `CPSqliteConnectionCommit`). The process
-  holding the read lock that blocks the commit is the iPod app (`UIKitApplication:com.apple.mobileipod` in
-  `launchctl list`, the `F_GETLK` owner of `Library.itdb`'s shared range), running in the background on those
-  boards when the import starts (launched after Home, before the import); the helper itself holds the pending and
-  reserved locks. With that app killed 25 s into the insert, the song and the movie commit and are still there after
-  a reboot with Music open, so its read lock is the only thing in the way. Killing a user's app is no fix; what keeps
-  its read transaction open (and what launches it) is not known yet. Photos import there.
 
 Both helpers are signed with `ldid -S`: 3.2+ AMFI runs nothing unsigned. Upstream
 [libgpod's SQLite notes](https://github.com/fadingred/libgpod/blob/master/README.sqlite)
