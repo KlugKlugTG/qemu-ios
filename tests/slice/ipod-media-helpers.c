@@ -160,7 +160,7 @@ static void photo_receipts(void)
     assert_refused(done, strlen(done));
 }
 
-static int ml3;
+static int ml3, itlp_importer;
 static const char *query(int which)
 {
     ml3 = which;
@@ -203,6 +203,10 @@ static void media_identity(void)
     assert(!strcmp(rows(db, "LightTouch/movie", "video.mp4"), "2,0;"));
     assert(!strcmp(rows(db, "LightTouch/song", "video.mp4"), ""));
     assert(!strcmp(rows(db, "LightTouch/other", "audio.m4a"), ""));
+    /* 4.3: ML3's importer, the itlp library's query. */
+    ml3 = itlp_importer = 1;
+    assert(!strcmp(rows(db, "LightTouch/song", "audio.m4a"), "1,23;"));
+    itlp_importer = 0;
     sqlite3_close(db);
     /* 5.x's ml3 location query. */
     ml3 = 1;

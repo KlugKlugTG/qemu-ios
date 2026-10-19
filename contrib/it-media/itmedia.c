@@ -190,6 +190,7 @@ static __typeof__(sqlite3_step) *sql_step;
 static __typeof__(sqlite3_finalize) *sql_finalize;
 static __typeof__(sqlite3_close) *sql_close;
 static __typeof__(sqlite3_errmsg) *sql_error;
+static __typeof__(sqlite3_column_text) *sql_text;
 static void database_failure(sqlite3 *db, const char *reason) {
     fprintf(stderr,"itmedia: %s: %s\n",reason,db ? sql_error(db) : "no connection");
     _exit(1);
@@ -197,7 +198,7 @@ static void database_failure(sqlite3 *db, const char *reason) {
 
 /* 5.x replaced the iTunes Library.itlp databases with ML3's one MediaLibrary.sqlitedb. */
 #define ML3_LIBRARY MEDIA "iTunes_Control/iTunes/MediaLibrary.sqlitedb"
-static int ml3;
+static int ml3, itlp_importer;
 
 /* An old SQLite connection can retain the attached Locations schema while
  * Apple's sync service replaces its indexes. Reopen and reprepare only on
@@ -208,10 +209,10 @@ static int read_query(const char *sql, const char *folder, const char *filename,
     for (unsigned attempt = 0; attempt < 3; ++attempt) {
         sqlite3 *db = NULL;
         sqlite3_stmt *stmt = NULL;
-        int rc = sql_open(ml3 ? ML3_LIBRARY : LIBRARY "Library.itdb",&db,SQLITE_OPEN_READONLY,NULL);
+        int rc = sql_open(ml3 && !itlp_importer ? ML3_LIBRARY : LIBRARY "Library.itdb",&db,SQLITE_OPEN_READONLY,NULL);
         if (rc == SQLITE_OK) {
             sql_timeout(db,5000);
-            if (folder && !ml3) rc = sql_exec(db,"ATTACH DATABASE '" LIBRARY "Locations.itdb' AS loc",NULL,NULL,NULL);
+            if (folder && (!ml3 || itlp_importer)) rc = sql_exec(db,"ATTACH DATABASE '" LIBRARY "Locations.itdb' AS loc",NULL,NULL,NULL);
             if (rc == SQLITE_OK) rc = sql_prepare(db,sql,-1,&stmt,NULL);
             if (rc == SQLITE_OK && folder) rc = sql_bind(stmt,1,folder,-1,SQLITE_TRANSIENT);
             if (rc == SQLITE_OK && filename) rc = sql_bind(stmt,2,filename,-1,SQLITE_TRANSIENT);
@@ -236,7 +237,7 @@ static int read_query(const char *sql, const char *folder, const char *filename,
 /* Read identity and the native artwork ID at the immutable staged location.
  * Errors are fatal: an uncertain prior import must never replay. */
 static sqlite3_int64 existing(const char *folder, const char *filename, unsigned *artwork_id) {
-    const char *sql = ml3
+    const char *sql = ml3 && !itlp_importer
         ? "SELECT item.item_pid,e.artwork_cache_id FROM item JOIN item_extra e ON e.item_pid=item.item_pid "
           "JOIN base_location b ON b.base_location_id=item.base_location_id WHERE b.path=? AND e.location=? LIMIT 1"
         : "SELECT item.pid,item.artwork_cache_id FROM item NOT INDEXED JOIN loc.location l ON l.item_pid=item.pid "
@@ -302,14 +303,91 @@ static struct { int done, ok; sqlite3_int64 pid; } ml3_result;
 static void ml3_finished(struct block *b, signed char ok, long long pid) {
     (void)b; ml3_result.done = 1; ml3_result.ok = ok; ml3_result.pid = pid;
 }
+/* Whether the library (main or attached) has `table`, or with `column` that column of it. */
+static int library_has(sqlite3 *db, const char *table, const char *column) {
+    char sql[160];
+    sqlite3_stmt *info = NULL;
+    int found = 0;
+    snprintf(sql,sizeof(sql),"PRAGMA table_info('%s')",table);
+    if (sql_prepare(db,sql,-1,&info,NULL) != SQLITE_OK) database_failure(db,"cannot read the music library's schema");
+    while (!found && sql_step(info) == SQLITE_ROW) found = !column || !strcmp((const char *)sql_text(info,1),column);
+    sql_finalize(info);
+    return found;
+}
+
+/* 4.3: ML3's importer writes the itlp library, in the schema iTunes 10.2 leaves on the device at its first sync
+ * (+[MusicLibrary isDatabaseSchemaUnsupported:] and executeITunesCommands: the device's own code never adds it;
+ * the library 4.3 creates without a sync is the older one, with no item.album_artist_pid or sort_map). Before the
+ * first import the library gets the tables and columns ML3 defines: +[ML3MusicLibrary buildDatabaseTablesUsingHandle:]
+ * creates them on an empty database, and whatever the device's library lacks is added through sharedLibrary's own
+ * connection (executeSQL:). Rows are never touched; a library that has them stays as it is. */
+static void itlp_upgrade(ID writer) {
+    sqlite3 *ref = NULL, *db = NULL;
+    sqlite3_stmt *tables = NULL;
+    if (sql_open(":memory:",&ref,SQLITE_OPEN_READWRITE|SQLITE_OPEN_CREATE,NULL) != SQLITE_OK)
+        fail("cannot open a schema database");
+    CALL(void,(ID,ID,sqlite3 *))(getclass("ML3MusicLibrary"),selector("buildDatabaseTablesUsingHandle:"),ref);
+    if (sql_open(LIBRARY "Library.itdb",&db,SQLITE_OPEN_READONLY,NULL) != SQLITE_OK ||
+        sql_exec(db,"ATTACH DATABASE '" LIBRARY "Locations.itdb' AS locations",NULL,NULL,NULL) != SQLITE_OK ||
+        sql_exec(db,"ATTACH DATABASE '" LIBRARY "Dynamic.itdb' AS dynamic",NULL,NULL,NULL) != SQLITE_OK ||
+        sql_exec(db,"ATTACH DATABASE '" LIBRARY "Extras.itdb' AS extra",NULL,NULL,NULL) != SQLITE_OK ||
+        sql_exec(db,"ATTACH DATABASE '" LIBRARY "DBTemp/ddd.itdbm' AS ddd",NULL,NULL,NULL) != SQLITE_OK)
+        database_failure(db,"cannot read the music library's schema");
+    sql_timeout(db,5000);
+    if (sql_prepare(ref,"SELECT name,sql FROM sqlite_master WHERE type='table'",-1,&tables,NULL) != SQLITE_OK)
+        database_failure(ref,"ML3 defined no schema");
+    unsigned defined = 0;
+    while (sql_step(tables) == SQLITE_ROW) {
+        ++defined;
+        const char *table = (const char *)sql_text(tables,0), *create = (const char *)sql_text(tables,1);
+        char sql[512];
+        sqlite3_stmt *want = NULL;
+        snprintf(sql,sizeof(sql),"PRAGMA table_info('%s')",table);
+        if (sql_prepare(ref,sql,-1,&want,NULL) != SQLITE_OK) database_failure(ref,"ML3 defined no schema");
+        if (!library_has(db,table,NULL)) {
+            /* Where the device's library keeps them: the locations in Locations.itdb, the rest in Library.itdb. */
+            int located = !strcmp(table,"location") || !strcmp(table,"base_location");
+            ID statement = m0(getclass("NSMutableString"),"string");
+            m1(statement,"appendString:",string(located ? "CREATE TABLE locations." : "CREATE TABLE "));
+            m1(statement,"appendString:",string(create + strlen("CREATE TABLE ")));
+            if (!CALL(signed char,(ID,ID,ID))(writer,selector("executeSQL:"),statement))
+                fail("ML3 did not create a music library table");
+            if (!strcmp(table,"base_location") &&
+                !CALL(signed char,(ID,ID,ID))(writer,selector("executeSQL:"),
+                                             string("INSERT INTO locations.base_location (id, path) VALUES (0, '')")))
+                fail("ML3 did not create a music library table");
+            fprintf(stderr,"itmedia: created %s\n",table);
+        } else {
+            while (sql_step(want) == SQLITE_ROW) {
+                const char *name = (const char *)sql_text(want,1), *type = (const char *)sql_text(want,2);
+                const char *fallback = (const char *)sql_text(want,4);
+                if (library_has(db,table,name)) continue;
+                snprintf(sql,sizeof(sql),"ALTER TABLE %s ADD COLUMN %s %s%s%s",table,name,type ? type : "",
+                         fallback ? " DEFAULT " : "",fallback ? fallback : "");
+                if (!CALL(signed char,(ID,ID,ID))(writer,selector("executeSQL:"),string(sql)))
+                    fail("ML3 did not add a music library column");
+                fprintf(stderr,"itmedia: added %s.%s\n",table,name);
+            }
+        }
+        sql_finalize(want);
+    }
+    sql_finalize(tables);
+    sql_close(db);
+    sql_close(ref);
+    if (!defined) fail("ML3 defined no schema");
+}
+
 static sqlite3_int64 ml3_import(void *music, ID input, const char *folder, const char *filename, const char *artwork) {
     static const struct block_descriptor descriptor = {0, sizeof(struct block)};
     void **global = dlsym(RTLD_DEFAULT,"_NSConcreteGlobalBlock");
     ID track = m0(m0(getclass("MLTrackImport"),"alloc"),"init");
     /* sharedLibrary is read-only outside the system's writers; this process opens its own writer (5.x and 6.x
-     * initWithPath:enableWrites:, 7.x initWithPath:readOnly:populateUnitTestTablesBlock:). */
-    ID writer = m0(getclass("ML3MusicLibrary"),"alloc"), library = string(ML3_LIBRARY);
-    if (CALL(int,(ID,ID,ID))(writer,selector("respondsToSelector:"),selector("initWithPath:enableWrites:")))
+     * initWithPath:enableWrites:, 7.x initWithPath:readOnly:populateUnitTestTablesBlock:). On 4.3 the helper is one
+     * of them (Music, as itunesstored is): sharedLibrary, with the itlp library's other files attached. */
+    ID writer = m0(getclass("ML3MusicLibrary"),itlp_importer ? "sharedLibrary" : "alloc"), library = string(ML3_LIBRARY);
+    if (itlp_importer) {
+        if (writer) itlp_upgrade(writer);
+    } else if (CALL(int,(ID,ID,ID))(writer,selector("respondsToSelector:"),selector("initWithPath:enableWrites:")))
         writer = CALL(ID,(ID,ID,ID,signed char))(writer,selector("initWithPath:enableWrites:"),library,1);
     else
         writer = CALL(ID,(ID,ID,ID,signed char,void *))(writer,selector("initWithPath:readOnly:populateUnitTestTablesBlock:"),
@@ -410,26 +488,34 @@ int main(int argc, char **argv) {
     sql_finalize = dlsym(sqlite,"sqlite3_finalize");
     sql_close = dlsym(sqlite,"sqlite3_close");
     sql_error = dlsym(sqlite,"sqlite3_errmsg");
+    sql_text = dlsym(sqlite,"sqlite3_column_text");
     if (!sql_open || !sql_timeout || !sql_exec || !sql_prepare || !sql_bind ||
         !sql_column ||
-        !sql_step || !sql_finalize || !sql_close || !sql_error) fail("SQLite API unavailable");
+        !sql_step || !sql_finalize || !sql_close || !sql_error || !sql_text) fail("SQLite API unavailable");
     int fresh = access(LIBRARY "Library.itdb",F_OK) != 0;
     ID library = m0(getclass("MusicLibrary"),"sharedMusicLibrary");
     const char *insert = "insertItemFromPurchaseFolder:withItemProperties:";
     /* The capability, not a build list: 3.1 through 4.2.1 answer this insert over the iTunes Library.itlp SQLite
      * library the queries below read; 5.x on have ML3's importer over MediaLibrary.sqlitedb instead. 4.3 has
-     * neither the insert nor ML3's library (its importer writes the itlp library, see README.md). */
+     * the importer but writes the itlp library (itlp_upgrade, README.md). */
     int purchase = library && CALL(int,(ID,ID,ID))(library,selector("respondsToSelector:"),selector(insert));
     if (!purchase) {
         ml3 = getclass("ML3TrackImporter") && getclass("MLTrackImport") && getclass("ML3MusicLibrary");
         if (!ml3) fail("unsupported firmware: no MusicLibrary import service");
         m0(getclass("ML3MusicLibrary"),"sharedLibrary");   /* creates the library on a device that has none */
+        /* 4.3's ML3 library is the itlp one (mainLibraryPath iTunes Library.itlp/Library.itdb), 5.x's its own
+         * (6.x and 7.x have no mainLibraryPath). */
+        ID ml3_class = getclass("ML3MusicLibrary");
+        ID main_path = CALL(int,(ID,ID,ID))(ml3_class,selector("respondsToSelector:"),selector("mainLibraryPath"))
+            ? m0(ml3_class,"mainLibraryPath") : NULL;
+        const char *main_library = main_path ? utf8(main_path) : "";
+        itlp_importer = strlen(main_library) >= 12 && !strcmp(main_library + strlen(main_library) - 12,"Library.itdb");
     }
     /* A library this process has just created is committed and the import starts over in a fresh process:
      * 4.2.1's library signs each database file (Locations.itdb.cbk and the rest), and the process that created
      * them failed its own size check against them at the next open ("ERROR-cbk: filesize mismatch"), so the
      * insert was refused; a second process imports into the same library. */
-    if (fresh && purchase) {
+    if (fresh && (purchase || itlp_importer)) {
         if (getenv("ITMEDIA_CREATED")) fail("MusicLibrary did not create the music library");
         m0(getclass("MusicLibrary"),"commitAllDeferredWork");
         m0(getclass("MusicLibrary"),"flush");
@@ -446,7 +532,14 @@ int main(int argc, char **argv) {
             fail("import not visible; retain staged media for reconciliation");
         if (!was_present && !existing(folder,filename,&artwork_id))
             fail("import not visible; retain staged media for reconciliation");
-        if (!ml3_has_integrity(pid))
+        if (itlp_importer) {
+            /* As after a purchase: itdbprepserver runs ML3's post-processing (sort map, triggers) before Music. */
+            void *sync = dlopen("/System/Library/PrivateFrameworks/ITSync.framework/ITSync",RTLD_NOW);
+            int (*postprocess)(ID,int) = sync ? dlsym(sync,"ITDBPrepServerPostProcessRun") : NULL;
+            if (!postprocess || !postprocess(NULL,1))
+                fail("music post-processing did not finish; retain staging for reconciliation");
+            if (!existing(folder,filename,&artwork_id)) fail("the music library dropped the import");
+        } else if (!ml3_has_integrity(pid))
             fail("MusicLibrary stored the track without its integrity; Music would list it but not play it");
         puts(was_present ? "already-imported" : "imported");
         fflush(stdout);

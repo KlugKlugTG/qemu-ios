@@ -12,8 +12,8 @@ service at runtime, not for a build. Verified with tags, cover and playback on t
 and the iPad's 3.2 (Light Touch `tests/sessions/check-media-native.py --single`, since retired; `sessions single
 --media` now imports a song, a movie and a photo and reads the libraries back, also after a reboot).
 
-4.x keeps the insert and the itlp files, and signs each database file (`Locations.itdb.cbk` and the rest). Two
-things decide whether an insert stays:
+4.0 to 4.2.1 keep the insert and the itlp files and sign each database file (`Locations.itdb.cbk` and the rest).
+Two things decide whether an insert stays:
 
 - 4.x MusicLibrary opens the library for writing only in Music (`com.apple.mobileipod`), iPod Out and
   `itdbprepserver` (`MLProcessHasDatabaseWritePermissions`: the main bundle's identifier, else the process name).
@@ -42,28 +42,41 @@ whether Music shows and plays the row:
   but list nothing. A movie is 0x800, what `MLMediaTypeForITMediaKind` makes of iTunes' kind 2;
 - `item_extra.integrity` (`ML3TrackIntegrityVerify`) must be set, or Music lists the song but won't play it. The
   importer computes it with FairPlay (`FairPlayCandyBarCompute`), which answers only processes with a
-  `fairplay-client` entitlement (it logs -42180 otherwise). `itmedia.entitlements` carries atc's client ID
-  (the sync agent that imports tracks from iTunes; the same on 5.x, 6.x and 7.1.2); the helper fails if the column
-  stays NULL.
+  `fairplay-client` entitlement (it logs -42180 otherwise). `itmedia.entitlements` carries Music's client ID,
+  1974055701, the process the helper names itself as (4.3's FairPlay refuses atc's, 177554772, which 5.x to 7.1.2
+  also take); the helper fails if the column stays NULL.
 
 The completion block is a global block literal whose isa is `_NSConcreteGlobalBlock` itself: 7.x's importer retains
 it, and the class's first word in its place crashed there (5.x and 6.x never looked).
 
 5.x covers are rendered by the importer under `iTunes_Control/iTunes/Artwork/NN/` (`artwork_info` lists them).
 
+4.3 to 4.3.5 have no purchase-folder insert: their MusicLibrary imports through ML3's importer (itunesstored's
+`AddItemToIPodLibraryOperation` does, on `+[ML3MusicLibrary sharedLibrary]`), but over the itlp library
+(`+[ML3MusicLibrary mainLibraryPath]` is `iTunes Library.itlp/Library.itdb`; `+[MusicLibrary sharedMusicLibraryClass]`
+is `ML3MusicLibraryImpl`). The library 4.3 itself creates (`_MLSDBLoadAndInitSharedInstances`: "no library exists",
+then the older MLS tables, user version 8 in `db_schema_upgrade_info`) lacks what the importer writes
+(`item.album_artist_pid`, `sort_map`, the newer `album`, `location` and `video_info` columns). On a phone the library
+gets them from iTunes: 4.3 has no migration for it ("Syncing is required to upgrade your database schema",
+`+[MLMusicLibrary_SQL isDatabaseSchemaUnsupported:]`), and `-[ML3MusicLibrary executeITunesCommands]` runs the SQL an
+iTunes sync leaves. So before its first import the helper gives the library the tables and columns 4.3's ML3 defines:
+`+[ML3MusicLibrary buildDatabaseTablesUsingHandle:]` creates ML3's schema on an empty in-memory database, and each
+table or column the device's library lacks is added through `sharedLibrary`'s own connection (`executeSQL:`), with
+the locations in `Locations.itdb` as the library keeps them. Rows are never rewritten. It then imports as on 5.x
+and runs itdbprepserver's post-processing (`executeITunesCommands`, `executeITDBPostProcessing`, `updateSortMap`), as
+after a purchase. Photos save through AssetsLibrary as on 4.0 to 4.2.1.
+
 Not offered by Light Touch (its MediaSupport), and why:
 
 - 2.x and 3.0 have neither (and 3.0 needs a legacy-linked build).
-- 4.3 to 4.3.5 dropped the purchase-folder insert: their MusicLibrary imports through ML3's importer, but over the
-  itlp library (`+[ML3MusicLibrary mainLibraryPath]` is `iTunes Library.itlp/Library.itdb`), and the library on a
-  prepared device has the older schema the importer can't write (no `item.album_artist_pid`, no `sort_map`), even
-  after `+[MusicLibrary beginDatabaseMigrationIfNecessary]`. The helper looks for `MediaLibrary.sqlitedb` there and
-  fails. (Before that, 4.3's FairPlay refused atc's client ID, "cfdcb statusError = -42180. missing
-  entitlement?", where Music's, 1974055701, was accepted; Music's ID also signs integrity on 5.1.1, 6.1.6 and
-  7.1.2.)
 - 3.1 to 3.1.3 on the iPhone 3GS and the iPod touch 3G: the insert waits without end in SQLite's busy handler
-  (`-[MLMusicLibrary_SQL purchasedItemsPlaylist]` committing through `CPSqliteConnectionCommit`): another process
-  holds the library's lock on those boards. Photos import there.
+  (`-[MLMusicLibrary_SQL purchasedItemsPlaylist]` committing through `CPSqliteConnectionCommit`). The process
+  holding the read lock that blocks the commit is the iPod app (`UIKitApplication:com.apple.mobileipod` in
+  `launchctl list`, the `F_GETLK` owner of `Library.itdb`'s shared range), running in the background on those
+  boards when the import starts (launched after Home, before the import); the helper itself holds the pending and
+  reserved locks. With that app killed 25 s into the insert, the song and the movie commit and are still there after
+  a reboot with Music open, so its read lock is the only thing in the way. Killing a user's app is no fix; what keeps
+  its read transaction open (and what launches it) is not known yet. Photos import there.
 
 Both helpers are signed with `ldid -S`: 3.2+ AMFI runs nothing unsigned. Upstream
 [libgpod's SQLite notes](https://github.com/fadingred/libgpod/blob/master/README.sqlite)
