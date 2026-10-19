@@ -130,39 +130,6 @@ static void wd(unsigned v)
     w(p);
 }
 
-static char *tally_append_text(char *p, const char *s)
-{
-    while (*s) *p++ = *s++;
-    return p;
-}
-
-static char *tally_append_uint(char *p, unsigned v)
-{
-    char digits[10];
-    unsigned n = 0;
-
-    do { digits[n++] = '0' + v % 10; v /= 10; } while (v);
-    while (n) *p++ = digits[--n];
-    return p;
-}
-
-static void tally_write_line(unsigned ok, unsigned failed, unsigned result)
-{
-    /* Three uint32 decimals plus these fixed strings fit in 128 bytes.
-     * Keep the exact text, one stderr write and one host log call. */
-    char line[128], *p = line;
-
-    p = tally_append_text(p, "[mbxshim] present tally: ok=");
-    p = tally_append_uint(p, ok);
-    p = tally_append_text(p, " failed=");
-    p = tally_append_uint(p, failed);
-    p = tally_append_text(p, " (last -> ");
-    p = tally_append_uint(p, result);
-    p = tally_append_text(p, ")\n");
-    *p = 0;
-    w(line);
-}
-
 static void wx(unsigned long v)
 {
     char b[11], *p = b + 10;
@@ -1813,21 +1780,17 @@ static int GLESPresentView(void *gc, void *view)
              */
             if (rr) present_ok++; else present_fail++;
             if (!present_logged || (present_ok + present_fail) % 300 == 0) {
-                long long policy = qc(GLES_OP_TALLY_POLICY, 0, 2,
-                                      A(present_ok, present_fail));
+                long long quiet = qc(GLES_OP_TALLY_POLICY, 0, 2,
+                                     A(present_ok, present_fail));
                 /* The first outcome and any failed-present history remain
                  * visible. Only an exact opt-in host reply suppresses the
                  * repeated all-success tally; old hosts keep the old log.
                  * Counters, CA calls and return values are unchanged. */
-                if (!present_logged || present_fail || policy != 1) {
+                if (!present_logged || present_fail || quiet != 1) {
                     present_logged = 1;
-                    if (policy == 2) {
-                        tally_write_line(present_ok, present_fail, (unsigned)rr);
-                    } else {
-                        w("[mbxshim] present tally: ok="); wd(present_ok);
-                        w(" failed="); wd(present_fail);
-                        w(" (last -> "); wd((unsigned)rr); w(")\n");
-                    }
+                    w("[mbxshim] present tally: ok="); wd(present_ok);
+                    w(" failed="); wd(present_fail);
+                    w(" (last -> "); wd((unsigned)rr); w(")\n");
                 }
             }
             return rr != 0;

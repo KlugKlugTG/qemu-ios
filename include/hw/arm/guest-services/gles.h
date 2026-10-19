@@ -373,10 +373,8 @@ static inline const char *gles_id_name(uint32_t id)
 #define GLES_BATCH_MAX_WORDS            4096
 
 /* Routine present tally policy: args = cumulative CA successes, failures.
- * 1 permits suppressing periodic success-only logs; 2 requests the same tally
- * text in one write instead of fragments; 0 keeps the original fragments.
- * Older hosts refuse this op, so guests must change policy only on an exact
- * recognized reply. Older guests treat 2 as ordinary unsuppressed logging.
+ * 1 permits suppressing periodic success-only logs; 0 keeps them. Older
+ * hosts refuse this op, so guests must suppress only on an exact 1 reply.
  * No rendering/context state is touched. */
 #define GLES_OP_TALLY_POLICY            (GLES_OP_BASE + 10)
 
