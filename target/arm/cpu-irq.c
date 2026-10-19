@@ -168,47 +168,6 @@ static inline bool arm_excp_unmasked(CPUState *cs, unsigned int excp_idx,
     return unmasked || pstate_unmasked;
 }
 
-bool arm_cpu_interrupts_masked(CPUState *cs, int interrupt_request)
-{
-    CPUARMState *env = cpu_env(cs);
-    uint32_t cur_el, target_el;
-    bool secure;
-    uint64_t hcr_el2;
-
-    /*
-     * Only ordinary physical IRQ/FIQ are covered. In particular, never skip
-     * DEBUG, HALT, RESET, virtual interrupts, NMI or unknown request bits.
-     * The M-profile interrupt controller has different delivery rules.
-     */
-    if (arm_feature(env, ARM_FEATURE_M) ||
-        !(interrupt_request & (CPU_INTERRUPT_HARD | CPU_INTERRUPT_FIQ)) ||
-        (interrupt_request & ~(CPU_INTERRUPT_HARD | CPU_INTERRUPT_FIQ |
-                               CPU_INTERRUPT_EXITTB))) {
-        return false;
-    }
-
-    cur_el = arm_current_el(env);
-    secure = arm_is_secure(env);
-    hcr_el2 = arm_hcr_el2_eff(env);
-
-    /* Reuse delivery's routing and mask rules, including SCR/HCR overrides. */
-    if (interrupt_request & CPU_INTERRUPT_FIQ) {
-        target_el = arm_phys_excp_target_el(cs, EXCP_FIQ, cur_el, secure);
-        if (arm_excp_unmasked(cs, EXCP_FIQ, target_el,
-                              cur_el, secure, hcr_el2)) {
-            return false;
-        }
-    }
-    if (interrupt_request & CPU_INTERRUPT_HARD) {
-        target_el = arm_phys_excp_target_el(cs, EXCP_IRQ, cur_el, secure);
-        if (arm_excp_unmasked(cs, EXCP_IRQ, target_el,
-                              cur_el, secure, hcr_el2)) {
-            return false;
-        }
-    }
-    return true;
-}
-
 bool arm_cpu_exec_interrupt(CPUState *cs, int interrupt_request)
 {
     CPUARMState *env = cpu_env(cs);
