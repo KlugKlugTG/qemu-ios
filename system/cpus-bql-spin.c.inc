@@ -5,6 +5,8 @@
  * incurs a millisecond-scale wakeup. Default off; no scheduler/affinity change.
  */
 #define BQL_SPIN_NS 50000
+#define BQL_SPIN_EXTENDED_NS 150000
+static int bql_spin_budget_ns = BQL_SPIN_NS;
 static bool bql_spin_on;
 static bool bql_spin_fallback_prof;
 static uint64_t bql_spin_profiled_fallbacks;
@@ -22,7 +24,7 @@ static void bql_spin_lock(QemuMutex *mutex, const char *file, int line)
         return;
     }
     bql_spin_contended++;
-    int64_t deadline = get_clock() + BQL_SPIN_NS;
+    int64_t deadline = get_clock() + bql_spin_budget_ns;
     while (get_clock() < deadline) {
         cpu_relax();
         if (!qemu_mutex_trylock_impl(mutex, file, line)) {
@@ -33,7 +35,7 @@ static void bql_spin_lock(QemuMutex *mutex, const char *file, int line)
     bql_spin_fallback++;
     /* Independent diagnostic, only on the uncommon blocking path. Conditions
      * mode keeps this BQL hook intact; reuse its bounded site/span recorder.
-     * The interval excludes the preceding 50us spin. Off adds no clocks. */
+     * The interval excludes the preceding spin. Off adds no clocks. */
     int64_t begin = bql_spin_fallback_prof && native_wait_on ? get_clock() : 0;
     qemu_mutex_lock_impl(mutex, file, line);
     if (begin) {
@@ -45,14 +47,27 @@ static void bql_spin_lock(QemuMutex *mutex, const char *file, int line)
 static void bql_spin_init(void)
 {
     const char *mode = getenv("LT_BQL_SPIN");
+    const char *extended = getenv("LT_BQL_SPIN_EXTENDED");
     bool requested = mode && !strcmp(mode, "on");
+    bool extended_requested = extended && !strcmp(extended, "on");
+
+    /* Separate default-off comparison with the original 50us experiment.
+     * Residual short sleeps may still pay a millisecond-scale host wakeup.
+     * Keep the same bounded retry and original blocking fallback. */
+    if (requested && extended_requested) {
+        bql_spin_budget_ns = BQL_SPIN_EXTENDED_NS;
+    }
 
     if (requested && qatomic_read(&bql_mutex_lock_func) == qemu_mutex_lock_impl) {
         bql_spin_on = true;
         qatomic_set(&bql_mutex_lock_func, bql_spin_lock);
     }
     fprintf(stderr, "[bql-spin] requested=%s active=%s cpu=0 budget-ns=%d\n",
-            requested ? "on" : "off", bql_spin_on ? "on" : "off", BQL_SPIN_NS);
+            requested ? "on" : "off", bql_spin_on ? "on" : "off",
+            bql_spin_budget_ns);
+    fprintf(stderr, "[bql-spin-budget] extended=%s active=%s\n",
+            extended_requested ? "on" : "off",
+            bql_spin_on && extended_requested ? "on" : "off");
     const char *profile = getenv("LT_BQL_FALLBACK_PROF");
     const char *wait = getenv("LT_NATIVE_WAIT_PROF");
     bool profile_requested = profile && !strcmp(profile, "on");
