@@ -78,7 +78,7 @@ void qemu_ios_frame_path_finish(void)
         "publish", "context-switch", "ttbr0", "vfp-sample", "vfp-result",
         "alignment", "alignment-begin", "alignment-return", "alignment-abandon",
         "alignment-args", "alignment-caller",
-        "guest-pc", "guest-regs", "guest-stack",
+        "guest-pc", "guest-regs", "guest-stack", "shim-tally",
     };
     qatomic_store_release(&ios_fp_on, false);
     if (!ios_fp_file) {

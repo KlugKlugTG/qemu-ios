@@ -17,6 +17,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/timer.h"
+#include "qemu/ios-frame-path.h"
 #include "cpu.h"
 #include "accel/tcg/probe.h"
 #include "accel/tcg/cpu-mmu-index.h"
@@ -258,6 +259,27 @@ int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a)
 
     gles_slot_calls[a->slot]++;
     gles_total_calls++;
+
+    if (a->slot == GLES_OP_TALLY_POLICY) {
+        static gsize initialized;
+        static bool quiet;
+
+        if (a->argc != 2) {
+            gles_bad_slots++;
+            gles_host_refuse("bad-call:tally-policy");
+            return -1;
+        }
+        if (g_once_init_enter(&initialized)) {
+            const char *setting = getenv("LT_GLES_TALLY_QUIET");
+
+            quiet = setting && !strcmp(setting, "on");
+            fprintf(stderr, "[gles-tally] quiet=%s\n", quiet ? "on" : "off");
+            g_once_init_leave(&initialized, 1);
+        }
+        /* Rare guest log candidates only, before their stderr writes. */
+        ios_frame_path(IOS_FP_SHIM_TALLY, a->args[0], a->args[1], quiet);
+        return quiet ? 1 : 0;
+    }
 
     /* Trace only the first sighting of each slot. A GL stream is tens of
      * thousands of calls a second; anything per-call would drown the log and

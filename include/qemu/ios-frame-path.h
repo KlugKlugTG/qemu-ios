@@ -27,6 +27,7 @@ enum IOSFramePathEvent {
     IOS_FP_GUEST_PC,
     IOS_FP_GUEST_REGS,
     IOS_FP_GUEST_STACK,
+    IOS_FP_SHIM_TALLY,
 };
 
 void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b,
