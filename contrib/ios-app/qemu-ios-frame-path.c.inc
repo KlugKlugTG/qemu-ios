@@ -28,9 +28,12 @@ void qemu_ios_frame_path_init(void)
     }
     const char *context = getenv("LT_FRAME_PATH_CONTEXT");
     const char *audio = getenv("LT_AUDIO_PATH_PROF");
+    const char *guest = getenv("LT_GUEST_TRACE_PC");
     bool audio_on = audio && strcmp(audio, "off") && strcmp(audio, "0");
+    bool guest_on = guest && *guest && strcmp(guest, "off") && strcmp(guest, "0");
     ios_fp_context = context && strcmp(context, "off") && strcmp(context, "0");
-    ios_fp_capacity = IOS_FP_CAPACITY * (audio_on ? 16 : ios_fp_context ? 8 : 1);
+    ios_fp_capacity = IOS_FP_CAPACITY *
+                      (audio_on || guest_on ? 16 : ios_fp_context ? 8 : 1);
     ios_fp_records = g_try_new0(struct IOSFramePathRecord, ios_fp_capacity);
     if (!ios_fp_records) {
         fprintf(stderr, "[frame-path] allocation failed\n");
