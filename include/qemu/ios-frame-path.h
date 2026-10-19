@@ -28,7 +28,11 @@ enum IOSFramePathEvent {
     IOS_FP_GUEST_REGS,
     IOS_FP_GUEST_STACK,
     IOS_FP_SHIM_TALLY,
+    IOS_FP_NATIVE_WAIT,
 };
+
+void qemu_ios_native_wait_init(void) __attribute__((weak));
+void qemu_ios_native_wait_finish(void) __attribute__((weak));
 
 void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b,
                                uint64_t c) __attribute__((weak));

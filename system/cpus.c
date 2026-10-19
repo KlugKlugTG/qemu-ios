@@ -36,6 +36,7 @@
 #include "system/hw_accel.h"
 #include "exec/cpu-common.h"
 #include "qemu/thread.h"
+#include "qemu/ios-frame-path.h"
 #include "qemu/main-loop.h"
 #include "qemu/plugin.h"
 #include "system/cpus.h"
@@ -69,6 +70,8 @@
 
 /* The Big QEMU Lock (BQL) */
 static QemuMutex bql;
+
+#include "cpus-native-wait.c.inc"
 
 /*
  * The chosen accelerator is supposed to register this.
