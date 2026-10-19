@@ -24,9 +24,6 @@
  */
 
 #include "qemu/osdep.h"
-#ifdef __ANDROID__
-#include <sys/resource.h>
-#endif
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
@@ -109,33 +106,6 @@ static void mttcg_request_performance_core(void)
                 "(USER_INTERACTIVE=%d)\n",
                 (int)qos, (int)now, (int)QOS_CLASS_USER_INTERACTIVE);
     }
-#endif
-#ifdef __ANDROID__
-    /*
-     * Separate from affinity and ADPF: ask only this vCPU thread for Android's
-     * ordinary display nice level. Keep CFS scheduling and the existing CPU
-     * mask. In particular, do not raise the whole engine or lower a thread
-     * that already has a higher priority. Failure leaves execution unchanged.
-     * This is an experiment for measured runnable delays, not guest CPU work.
-     */
-    const char *priority = getenv("LT_VCPU_DISPLAY_PRIORITY");
-    bool requested = priority && !strcmp(priority, "on");
-    int before, after, before_error, after_error, set_error = 0;
-
-    errno = 0;
-    before = getpriority(PRIO_PROCESS, 0);
-    before_error = errno;
-    if (requested && !before_error && before > -4 &&
-        setpriority(PRIO_PROCESS, 0, -4) != 0) {
-        set_error = errno;
-    }
-    errno = 0;
-    after = getpriority(PRIO_PROCESS, 0);
-    after_error = errno;
-    fprintf(stderr, "[vcpu-priority] display=%s before=%d before-error=%d "
-            "set-error=%d after=%d after-error=%d\n",
-            requested ? "on" : "off", before, before_error, set_error,
-            after, after_error);
 #endif
 }
 
