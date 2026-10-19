@@ -300,7 +300,7 @@ static void mt_stamp_frame_cmd(MTFrame *f, uint8_t cmd)
 bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
                                    unsigned begins, unsigned ends, unsigned moves)
 {
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     unsigned used = s->queued_count + !!s->next_frame;
     unsigned needed = begins + ends;
     if (begins) {
@@ -324,7 +324,7 @@ static void mt_clear_pending(IPodTouchMultitouchState *s)
     g_free(s->next_frame);
     s->next_frame = NULL;
     s->next_frame_len = 0;
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     for (unsigned i = 0; i < s->queued_count; i++) {
         g_free(s->queued_frames[i]);
     }
@@ -339,7 +339,7 @@ static MTFrame *mt_take_pending(IPodTouchMultitouchState *s, uint32_t *length)
     *length = s->next_frame_len;
     s->next_frame = NULL;
     s->next_frame_len = 0;
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     if (s->queued_count) {
         s->next_frame = s->queued_frames[0];
         s->next_frame_len = s->queued_lengths[0];
@@ -1098,7 +1098,7 @@ static void mt_emit_frame(IPodTouchMultitouchState *s)
      * reports can replace one another; a release must precede reuse of its ID.
      * The original Apple path retains its single pending report behavior.
      */
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     bool motion = true;
     for (i = 0; i < MT_MAX_FINGERS; i++) {
         MTFingerState *f = &s->fingers[i];
@@ -1200,7 +1200,7 @@ void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
         return;
     }
     f = &s->fingers[slot];
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     if (down != (f->phase == MT_FINGER_DOWN) &&
         !ipod_touch_multitouch_can_queue(s, down, !down, false)) {
         return; /* portable batch caller preflights and reports BUSY */
@@ -1274,7 +1274,7 @@ void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
     if (mt_any_down(s)) {
         timer_mod(s->touch_timer, now + mt_frame_period_ns());
     } else {
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
         if (s->next_frame) {
             timer_mod(s->touch_timer, now + mt_frame_period_ns());
         } else
@@ -1317,7 +1317,7 @@ static void touch_timer_tick(void *opaque)
     IPodTouchMultitouchState *s = (IPodTouchMultitouchState *)opaque;
 
     if (!mt_any_active(s)) {
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
         if (s->next_frame) {
             ipod_touch_multitouch_inform_frame_ready(s);
             timer_mod(s->touch_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns());
@@ -1331,7 +1331,7 @@ static void touch_timer_tick(void *opaque)
         s->last_motion_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
         timer_mod(s->touch_timer, s->last_motion_ns + mt_frame_period_ns());
     }
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     else if (s->next_frame) {
         ipod_touch_multitouch_inform_frame_ready(s);
         timer_mod(s->touch_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns());
@@ -1347,7 +1347,7 @@ static void touch_end_timer_tick(void *opaque)
         return;
     }
     mt_emit_frame(s);
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     if (mt_any_active(s)) {
         timer_mod(s->touch_end_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns());
     }
@@ -1431,7 +1431,7 @@ static int ipod_touch_multitouch_post_load(void *opaque, int version_id)
     IPodTouchMultitouchState *s = opaque;
 
     mt_clear_pending(s);
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     g_free(s->n1_frame);
     s->n1_frame = NULL;
     s->n1_frame_len = 0;
@@ -1486,7 +1486,7 @@ static void ipod_touch_multitouch_class_init(ObjectClass *klass, const void *dat
     dc->vmsd = &vmstate_ipod_touch_multitouch;
 }
 
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
 static void ipod_touch_multitouch_finalize(Object *obj)
 {
     IPodTouchMultitouchState *s = IPOD_TOUCH_MULTITOUCH(obj);
@@ -1508,7 +1508,7 @@ static const TypeInfo ipod_touch_multitouch_type_info = {
     .parent = TYPE_SSI_PERIPHERAL,
     .instance_size = sizeof(IPodTouchMultitouchState),
     .class_init = ipod_touch_multitouch_class_init,
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     .instance_finalize = ipod_touch_multitouch_finalize,
 #endif
 };

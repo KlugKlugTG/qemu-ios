@@ -1154,7 +1154,7 @@ static bool boot_args_signature(const uint8_t *p)
 
 static uint32_t ipod_touch_boot_args_discovery_interval_ms(IPodTouchMachineState *nms)
 {
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     /* Native TCG can spend minutes in iBoot on a slower portable host. A full
      * DRAM scan every millisecond competes with that same CPU under the BQL. */
     return MAX(25, nms->boot_args_interval_ms);
@@ -1167,7 +1167,7 @@ static uint64_t ipod_touch_boot_args_search_budget_ms(IPodTouchMachineState *nms
 {
     uint64_t budget = (uint64_t)MAX(1, nms->boot_args_repeat) *
                       nms->boot_args_interval_ms;
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     /* Discovery has a separate bound from post-match refresh. Virtual time
      * without icount advances with host time while slow TCG is still in iBoot. */
     return MAX(UINT64_C(600000), budget);
@@ -1210,7 +1210,7 @@ static void ipod_touch_set_boot_args_now(void *opaque)
     }
     if (!ba && qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) >=
                nms->boot_args_scan_deadline) {
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
         fprintf(stderr, "[IT_BOOT_ARGS] discovery expired after %" PRIu64
                 " ms, %" PRIu64 " scans; no handoff signature\n",
                 qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) -
@@ -1287,7 +1287,7 @@ static void ipod_touch_set_boot_args_now(void *opaque)
      * before any consumer reads it and stays present afterwards.
      */
     if (nms->boot_args_writes == 0) {
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
         fprintf(stderr, "[IT_BOOT_ARGS] handoff signature after %" PRIu64
                 " ms, %" PRIu64 " scans; discovery complete\n",
                 qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) -
@@ -1369,7 +1369,7 @@ static void ipod_touch_stage_boot_args(IPodTouchMachineState *nms)
      * hosts, where iBoot can take longer than the original refresh window. */
     nms->boot_args_scan_deadline = nms->boot_args_scan_started_ms + delay_ms +
         ipod_touch_boot_args_search_budget_ms(nms);
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     fprintf(stderr, "[IT_BOOT_ARGS] discovery cadence %u ms, budget %" PRIu64
             " ms after initial delay\n",
             ipod_touch_boot_args_discovery_interval_ms(nms),

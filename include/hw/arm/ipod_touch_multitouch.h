@@ -268,7 +268,7 @@ typedef struct IPodTouchMultitouchState {
      * sizeof(MTFrame) once it can carry more than one finger.
      */
     uint32_t next_frame_len;
-#if defined(__linux__) && !defined(__APPLE__)
+#if !defined(__APPLE__)
     MTFrame *queued_frames[MT_REPORT_QUEUE_SIZE - 1];
     uint32_t queued_lengths[MT_REPORT_QUEUE_SIZE - 1];
     bool queued_motion[MT_REPORT_QUEUE_SIZE - 1];
