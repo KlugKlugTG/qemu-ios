@@ -665,7 +665,7 @@ static bool gles_present_prof;
 static struct {
     uint64_t count, switches, init, current, dispatch, max_current, max_dispatch;
 } gles_context_times[3];
-static uint64_t gles_context_next;
+static uint64_t gles_context_begin, gles_context_next;
 /*
  * IT_GLES_SWIZZLE=1 restores the old readback -- RGBA plus a per-pixel byte
  * swap -- and =2 alternates between old and new every 300 frames. Alternating
@@ -8045,6 +8045,10 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
                      slot == GLES_OP_PRESENT_SURFACE ? 2 : -1;
         if (stage_slot >= 0) {
             stage_begin = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            if (!gles_context_next) {
+                gles_context_begin = stage_begin;
+                gles_context_next = stage_begin + 5000000000ULL;
+            }
         }
     }
     if (!gles_host_init()) {
@@ -8107,9 +8111,7 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
             gles_context_times[stage_slot].max_current, current_ns);
         gles_context_times[stage_slot].max_dispatch = MAX(
             gles_context_times[stage_slot].max_dispatch, dispatch_ns);
-        if (!gles_context_next) {
-            gles_context_next = end + 5000000000ULL;
-        } else if (end >= gles_context_next) {
+        if (end >= gles_context_next) {
             static const char *names[] = { "viewport", "bind-fbo", "present-surface" };
             for (int i = 0; i < G_N_ELEMENTS(gles_context_times); i++) {
                 fprintf(stderr, "[gles-context] %s n=%" PRIu64 " switches=%" PRIu64
@@ -8121,7 +8123,10 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
                         gles_context_times[i].dispatch, gles_context_times[i].max_current,
                         gles_context_times[i].max_dispatch);
             }
+            fprintf(stderr, "[gles-context] end begin-ns=%" PRIu64
+                    " end-ns=%" PRIu64 "\n", gles_context_begin, end);
             memset(gles_context_times, 0, sizeof(gles_context_times));
+            gles_context_begin = end;
             gles_context_next = end + 5000000000ULL;
         }
     }

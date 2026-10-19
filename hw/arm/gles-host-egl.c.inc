@@ -50,6 +50,7 @@ typedef struct GLESEGLContext {
     unsigned rectangle_zero;
     bool drawing_window_quad;
     bool release_pending; /* final owner released, but still current here */
+    bool surfaceless; /* pbuffer retained for lifetime, omitted from binding */
 } *CGLContextObj;
 static EGLDisplay gles_egl_display = EGL_NO_DISPLAY;
 static EGLConfig gles_egl_config;
@@ -62,8 +63,8 @@ static int CGLSetCurrentContext(CGLContextObj c)
 {
     if (gles_egl_current == c && eglGetCurrentContext() ==
         (c ? c->context : EGL_NO_CONTEXT)) return 0;
-    if (!eglMakeCurrent(gles_egl_display, c ? c->surface : EGL_NO_SURFACE,
-                        c ? c->surface : EGL_NO_SURFACE,
+    EGLSurface surface = c && !c->surfaceless ? c->surface : EGL_NO_SURFACE;
+    if (!eglMakeCurrent(gles_egl_display, surface, surface,
                         c ? c->context : EGL_NO_CONTEXT)) {
         fprintf(stderr, "[gles-egl] make-current failed: 0x%x\n", eglGetError());
         return -1;
@@ -196,6 +197,44 @@ static bool gles_egl_desktop_display(EGLint renderable)
 }
 #endif
 
+/* Rendering uses private FBOs, never the 1x1 pbuffer's default framebuffer.
+ * Keep the pbuffer allocation until destruction for unchanged fallback/lifetime.
+ * Release flushing and the frame's GPU-completion wait remain unchanged. */
+#if defined(__ANDROID__) && defined(GLES_HOST_EGL_ES)
+static void gles_egl_try_surfaceless(CGLContextObj c)
+{
+    const char *value = getenv("LT_GLES_SURFACELESS");
+    bool enabled = value && strcmp(value, "off") && strcmp(value, "0");
+
+    if (!enabled) {
+        fprintf(stderr, "[gles-egl] surfaceless=off api=%u\n", c->api);
+        return;
+    }
+    /* ES 1/2 need this client extension as well as EGL support. Query the
+     * selected provider's actual context, before the host init wrappers. */
+    const char *extensions = (const char *)glGetString(GL_EXTENSIONS);
+    const char *extension = "GL_OES_surfaceless_context";
+    const char *found = extensions ? strstr(extensions, extension) : NULL;
+    size_t length = strlen(extension);
+    bool supported = found && (found == extensions || found[-1] == ' ') &&
+                     (found[length] == ' ' || found[length] == '\0');
+    if (!supported) {
+        fprintf(stderr, "[gles-egl] surfaceless=fallback api=%u reason=client-extension\n",
+                c->api);
+        return;
+    }
+    /* On failure EGL preserves the previous pbuffer binding. */
+    if (!eglMakeCurrent(gles_egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                        c->context)) {
+        fprintf(stderr, "[gles-egl] surfaceless=fallback api=%u egl-error=0x%x\n",
+                c->api, eglGetError());
+        return;
+    }
+    c->surfaceless = true;
+    fprintf(stderr, "[gles-egl] surfaceless=on api=%u\n", c->api);
+}
+#endif
+
 static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *out)
 {
 #if defined(__ANDROID__) && defined(GLES_HOST_EGL_ES)
@@ -281,6 +320,9 @@ static bool gles_egl_create(CGLContextObj share, unsigned api, CGLContextObj *ou
         fprintf(stderr, "[gles-egl] create api=%u failed: 0x%x\n", c->api, eglGetError());
         goto create_failed;
     }
+#endif
+#if defined(__ANDROID__) && defined(GLES_HOST_EGL_ES)
+    gles_egl_try_surfaceless(c);
 #endif
     c->next_context=c->textures->contexts;
     c->textures->contexts=c;
