@@ -97,6 +97,9 @@ void qemu_ios_frame_path_finish(void)
     if (qemu_ios_bql_spin_finish) {
         qemu_ios_bql_spin_finish();
     }
+    if (qemu_ios_idle_spin_finish) {
+        qemu_ios_idle_spin_finish();
+    }
     if (!ios_fp_file) {
         return;
     }

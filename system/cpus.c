@@ -73,6 +73,7 @@ static QemuMutex bql;
 
 #include "cpus-native-wait.c.inc"
 #include "cpus-bql-spin.c.inc"
+#include "cpus-idle-spin.c.inc"
 
 /*
  * The chosen accelerator is supposed to register this.
@@ -436,6 +437,7 @@ void qemu_init_cpu_loop(void)
     qemu_cond_init(&qemu_pause_cond);
     qemu_mutex_init(&bql);
     bql_spin_init();
+    idle_spin_init();
 
     qemu_thread_get_self(&io_thread);
 }
@@ -475,7 +477,9 @@ void qemu_process_cpu_events(CPUState *cpu)
             slept = true;
             qemu_plugin_vcpu_idle_cb(cpu);
         }
-        qemu_cond_wait(cpu->halt_cond, &bql);
+        if (!idle_spin_wait(cpu)) {
+            qemu_cond_wait(cpu->halt_cond, &bql);
+        }
     }
     if (slept) {
         qemu_plugin_vcpu_resume_cb(cpu);
@@ -504,6 +508,7 @@ void cpus_kick_thread(CPUState *cpu)
 
 void qemu_cpu_kick(CPUState *cpu)
 {
+    idle_spin_kick(cpu);
     qemu_cond_broadcast(cpu->halt_cond);
     if (cpus_accel->kick_vcpu_thread) {
         cpus_accel->kick_vcpu_thread(cpu);
