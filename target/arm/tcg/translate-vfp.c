@@ -66,33 +66,6 @@ static void gen_vfp_subs_selected(TCGv_i32 dst, TCGv_i32 a, TCGv_i32 b,
     }
 }
 
-/* Fixed at translation time; ordinary/default generated code stays unchanged.
- * Keep both existing multiplication experiments and arithmetic diagnostics on
- * their own original paths when selected, rather than silently bypass them. */
-static bool vfp_mla_fast(void)
-{
-    static gsize mode;
-
-    if (g_once_init_enter(&mode)) {
-        const char *v = getenv("LT_VFP_MLA_FAST");
-        bool on = v && strcmp(v, "off") && strcmp(v, "0");
-        const char *conflicts[] = {
-            "LT_AUDIO_PATH_PROF", "LT_VFP_MUL_ZERO_FAST", "LT_VFP_MUL_ZERO_PROF",
-        };
-        bool blocked = false;
-
-        for (unsigned i = 0; i < ARRAY_SIZE(conflicts); i++) {
-            v = getenv(conflicts[i]);
-            blocked |= v && strcmp(v, "off") && strcmp(v, "0");
-        }
-        fprintf(stderr, "[vfp] mla-fast=%s requested=%s conflict=%s; "
-                "separately rounded mul/add\n", on && !blocked ? "on" : "off",
-                on ? "on" : "off", blocked ? "yes" : "no");
-        g_once_init_leave(&mode, 1 + (on && !blocked));
-    }
-    return mode == 2;
-}
-
 /* Select helpers during translation, with no runtime switch branch in the
  * default path. Only AArch32 single-precision VFP multiplication is affected.
  * Both switches default off and are fixed for this engine process. */
@@ -1828,10 +1801,6 @@ static bool trans_VMLA_hp(DisasContext *s, arg_VMLA_sp *a)
 
 static void gen_VMLA_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
 {
-    if (vfp_mla_fast()) {
-        gen_helper_vfp_mlas(vd, vd, vn, vm, fpst);
-        return;
-    }
     /* Note that order of inputs to the add matters for NaNs */
     TCGv_i32 tmp = tcg_temp_new_i32();
 
@@ -1878,10 +1847,6 @@ static bool trans_VMLS_hp(DisasContext *s, arg_VMLS_sp *a)
 
 static void gen_VMLS_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
 {
-    if (vfp_mla_fast()) {
-        gen_helper_vfp_mlss(vd, vd, vn, vm, fpst);
-        return;
-    }
     /*
      * VMLS: vd = vd + -(vn * vm)
      * Note that order of inputs to the add matters for NaNs.
@@ -1938,10 +1903,6 @@ static bool trans_VNMLS_hp(DisasContext *s, arg_VNMLS_sp *a)
 
 static void gen_VNMLS_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
 {
-    if (vfp_mla_fast()) {
-        gen_helper_vfp_nmlss(vd, vd, vn, vm, fpst);
-        return;
-    }
     /*
      * VNMLS: -fd + (fn * fm)
      * Note that it isn't valid to replace (-A + B) with (B - A) or similar
@@ -1998,10 +1959,6 @@ static bool trans_VNMLA_hp(DisasContext *s, arg_VNMLA_sp *a)
 
 static void gen_VNMLA_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
 {
-    if (vfp_mla_fast()) {
-        gen_helper_vfp_nmlas(vd, vd, vn, vm, fpst);
-        return;
-    }
     /* VNMLA: -fd + -(fn * fm) */
     TCGv_i32 tmp = tcg_temp_new_i32();
 

@@ -299,33 +299,6 @@ VFP_BINOP(minnum)
 VFP_BINOP(maxnum)
 #undef VFP_BINOP
 
-/* ARM VMLA is two rounded operations. Keep the same softfloat calls, status
- * object and NaN operand order; only combine the generated helper boundary.
- * This must not use float32_muladd (which rounds once). */
-float32 HELPER(vfp_mlas)(float32 d, float32 n, float32 m, float_status *fpst)
-{
-    float32 product = float32_mul(n, m, fpst);
-    return float32_add(d, product, fpst);
-}
-
-float32 HELPER(vfp_mlss)(float32 d, float32 n, float32 m, float_status *fpst)
-{
-    float32 product = float32_mul(n, m, fpst);
-    return float32_add(d, float32_chs(product), fpst);
-}
-
-float32 HELPER(vfp_nmlss)(float32 d, float32 n, float32 m, float_status *fpst)
-{
-    float32 product = float32_mul(n, m, fpst);
-    return float32_add(float32_chs(d), product, fpst);
-}
-
-float32 HELPER(vfp_nmlas)(float32 d, float32 n, float32 m, float_status *fpst)
-{
-    float32 product = float32_mul(n, m, fpst);
-    return float32_add(float32_chs(d), float32_chs(product), fpst);
-}
-
 /* Diagnostic helpers are selected only by LT_AUDIO_PATH_PROF at translation.
  * Sample each operation every 1021 calls (prime to avoid short-vector aliasing).
  * Only CPU 0 owns these counters. Clocks cover the original operation alone;
