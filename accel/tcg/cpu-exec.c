@@ -1160,6 +1160,7 @@ static inline bool icount_exit_request(CPUState *cpu)
 #ifndef CONFIG_USER_ONLY
 extern bool tcg_masked_irq_fast;
 extern bool tcg_irq_check_prof;
+extern bool tcg_irq_delivery_fast;
 
 typedef struct IRQCheckSample {
     uint64_t begin_ns;
@@ -1169,6 +1170,7 @@ typedef struct IRQCheckSample {
     bool skipped;
     bool delivered;
     bool special;
+    bool unlocked;
 } IRQCheckSample;
 
 /* Independent CPU-0 diagnostic: no instruction accounting or BQL tables. */
@@ -1176,7 +1178,8 @@ static void irq_check_profile(const IRQCheckSample *sample)
 {
     static struct {
         uint64_t begin_ns, checks, masked, skipped, delivered, unhandled;
-        uint64_t special, masked_delivered, check_ns, wait_ns;
+        uint64_t special, masked_delivered, unlocked, check_ns, wait_ns;
+        uint64_t delivered_ns, delivered_wait_ns;
         uint64_t masked_ns, masked_wait_ns, max_check_ns;
     } p;
     uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
@@ -1194,8 +1197,13 @@ static void irq_check_profile(const IRQCheckSample *sample)
     p.special += sample->special;
     p.unhandled += !sample->skipped && !sample->delivered && !sample->special;
     p.masked_delivered += sample->masked && sample->delivered;
+    p.unlocked += sample->unlocked;
     p.check_ns += elapsed;
     p.wait_ns += wait;
+    if (sample->delivered) {
+        p.delivered_ns += elapsed;
+        p.delivered_wait_ns += wait;
+    }
     if (sample->masked) {
         p.masked_ns += elapsed;
         p.masked_wait_ns += wait;
@@ -1208,11 +1216,14 @@ static void irq_check_profile(const IRQCheckSample *sample)
                 " unhandled %" PRIu64 " special %" PRIu64
                 " masked-delivered %" PRIu64 " check-ns %" PRIu64
                 " wait-ns %" PRIu64 " masked-ns %" PRIu64
-                " masked-wait-ns %" PRIu64 " max-check-ns %" PRIu64 "\n",
+                " masked-wait-ns %" PRIu64 " max-check-ns %" PRIu64
+                " unlocked %" PRIu64 " delivered-ns %" PRIu64
+                " delivered-wait-ns %" PRIu64 "\n",
                 tcg_masked_irq_fast ? "on" : "off", p.begin_ns, now,
                 p.checks, p.masked, p.skipped, p.delivered, p.unhandled,
                 p.special, p.masked_delivered, p.check_ns, p.wait_ns,
-                p.masked_ns, p.masked_wait_ns, p.max_check_ns);
+                p.masked_ns, p.masked_wait_ns, p.max_check_ns, p.unlocked,
+                p.delivered_ns, p.delivered_wait_ns);
         memset(&p, 0, sizeof(p));
         p.begin_ns = now;
     }
@@ -1278,6 +1289,38 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
             }
             if (profile) {
                 sample.skipped = true;
+                irq_check_profile(&sample);
+            }
+            goto interrupts_done;
+        }
+        if (tcg_irq_delivery_fast && replay_mode == REPLAY_MODE_NONE &&
+            !cpu->singlestep_enabled &&
+            tcg_ops->cpu_exec_interrupt_can_run_unlocked &&
+            tcg_ops->cpu_exec_interrupt_can_run_unlocked(cpu, request_snapshot)) {
+            /*
+             * The target only samples physical levels and changes CPU-owned
+             * state. Keep IRQ/FIQ pending: the guest's later MMIO ack still
+             * takes BQL. Special requests arriving meanwhile retain their kick
+             * and the exit_request check below; never process them here.
+             */
+            if (tcg_ops->cpu_exec_interrupt(cpu, request_snapshot)) {
+                sample.delivered = true;
+                if (unlikely(it_acct_on)) {
+                    it_acct_irqs++;
+                }
+                if (!tcg_ops->need_replay_interrupt ||
+                    tcg_ops->need_replay_interrupt(request_snapshot)) {
+                    replay_interrupt();
+                }
+                cpu->exception_index = -1;
+                *last_tb = NULL;
+            }
+            if (sample.delivered || (request_snapshot & CPU_INTERRUPT_EXITTB)) {
+                cpu_reset_interrupt(cpu, CPU_INTERRUPT_EXITTB);
+                *last_tb = NULL;
+            }
+            if (profile) {
+                sample.unlocked = true;
                 irq_check_profile(&sample);
             }
             goto interrupts_done;

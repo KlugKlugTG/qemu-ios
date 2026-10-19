@@ -181,6 +181,15 @@ struct TCGCPUOps {
     /** @cpu_exec_interrupt: Callback for processing interrupts in cpu_exec */
     bool (*cpu_exec_interrupt)(CPUState *cpu, int interrupt_request);
     /**
+     * @cpu_exec_interrupt_can_run_unlocked: Optional vCPU-local predicate.
+     * True permits cpu_exec_interrupt for this atomic request snapshot without
+     * BQL. The target must neither access device state nor acknowledge an IRQ
+     * line, and must exclude callbacks requiring BQL. New requests retain their
+     * kicks and are processed on the next check. NULL keeps the locked path.
+     */
+    bool (*cpu_exec_interrupt_can_run_unlocked)(CPUState *cpu,
+                                               int interrupt_request);
+    /**
      * @cpu_interrupts_masked: Optional conservative precheck on the vCPU
      * thread without BQL. True means this snapshot contains only external
      * interrupts which cannot currently be delivered, optionally with EXITTB.

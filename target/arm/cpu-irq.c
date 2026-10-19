@@ -168,6 +168,31 @@ static inline bool arm_excp_unmasked(CPUState *cs, unsigned int excp_idx,
     return unmasked || pstate_unmasked;
 }
 
+bool arm_cpu_exec_interrupt_can_run_unlocked(CPUState *cs, int interrupt_request)
+{
+    CPUARMState *env = cpu_env(cs);
+    ARMCPU *cpu = env_archcpu(env);
+
+    /*
+     * ARMv6 A/R physical IRQ/FIQ entry uses the same CPU-owned state as
+     * synchronous exception entry. It does not query or acknowledge a VIC.
+     * Exclude newer/M-profile delivery, virtual/NMI/special requests and EL
+     * hooks, which can access devices. The generic caller excludes replay,
+     * single stepping and machines with more than one possible vCPU.
+     *
+     * Sample the level with interrupt_request: a later deassertion does not
+     * undo an already sampled IRQ; a newly asserted request retains its kick.
+     */
+    return arm_feature(env, ARM_FEATURE_V6) &&
+           !arm_feature(env, ARM_FEATURE_V7) &&
+           !arm_feature(env, ARM_FEATURE_M) &&
+           (interrupt_request & (CPU_INTERRUPT_HARD | CPU_INTERRUPT_FIQ)) &&
+           !(interrupt_request & ~(CPU_INTERRUPT_HARD | CPU_INTERRUPT_FIQ |
+                                  CPU_INTERRUPT_EXITTB)) &&
+           QLIST_EMPTY(&cpu->pre_el_change_hooks) &&
+           QLIST_EMPTY(&cpu->el_change_hooks);
+}
+
 bool arm_cpu_interrupts_masked(CPUState *cs, int interrupt_request)
 {
     CPUARMState *env = cpu_env(cs);
