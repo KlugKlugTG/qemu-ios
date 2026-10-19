@@ -31,6 +31,8 @@ enum IOSFramePathEvent {
     IOS_FP_NATIVE_WAIT,
     IOS_FP_AHB_STAGE_BEGIN,
     IOS_FP_AHB_STAGE_END,
+    IOS_FP_FMSS_BEGIN,
+    IOS_FP_FMSS_END,
 };
 
 void qemu_ios_native_wait_init(void) __attribute__((weak));
