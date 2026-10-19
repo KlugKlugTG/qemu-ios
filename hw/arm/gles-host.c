@@ -705,10 +705,9 @@ static void gles_read_switches(void)
     gles_context_prof = v && strcmp(v, "off") && strcmp(v, "0");
     v = getenv("LT_GLES_PRESENT_PROF");
     gles_present_prof = v && strcmp(v, "off") && strcmp(v, "0");
-    fprintf(stderr, "[gles] present-prof=%s\n",
+    fprintf(stderr, "[gles] client-array-cache=%s strict=%d present-prof=%s\n",
+            gles_array_cache ? "on" : "off", gles_strict,
             gles_present_prof ? "on" : "off");
-    fprintf(stderr, "[gles] client-array-cache=%s strict=%d\n",
-            gles_array_cache ? "on" : "off", gles_strict);
     v = getenv("IT_GLES_SWIZZLE");
     gles_swizzle_mode = v ? atoi(v) : 0;
     gles_swizzle = (gles_swizzle_mode == 1);

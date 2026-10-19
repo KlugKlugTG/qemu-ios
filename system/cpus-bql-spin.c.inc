@@ -62,12 +62,10 @@ static void bql_spin_init(void)
         bql_spin_on = true;
         qatomic_set(&bql_mutex_lock_func, bql_spin_lock);
     }
-    fprintf(stderr, "[bql-spin] requested=%s active=%s cpu=0 budget-ns=%d\n",
-            requested ? "on" : "off", bql_spin_on ? "on" : "off",
-            bql_spin_budget_ns);
-    fprintf(stderr, "[bql-spin-budget] extended=%s active=%s\n",
-            extended_requested ? "on" : "off",
-            bql_spin_on && extended_requested ? "on" : "off");
+    if (requested) {
+        fprintf(stderr, "[bql-spin] active=%s cpu=0 budget-ns=%d\n",
+                bql_spin_on ? "on" : "off", bql_spin_budget_ns);
+    }
     const char *profile = getenv("LT_BQL_FALLBACK_PROF");
     const char *wait = getenv("LT_NATIVE_WAIT_PROF");
     bool profile_requested = profile && !strcmp(profile, "on");
