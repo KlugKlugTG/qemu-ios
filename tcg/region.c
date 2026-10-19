@@ -29,6 +29,7 @@
 #include "qemu/memalign.h"
 #include "qemu/cacheinfo.h"
 #include "qemu/qtree.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "tcg/tcg.h"
 #include "exec/translation-block.h"
@@ -49,8 +50,16 @@
 struct tcg_region_tree {
     QemuMutex lock;
     QTree *tree;
+    /* Protected by lock, and cleared before every tree mutation. */
+    uintptr_t lookup_pc;
+    TranslationBlock *lookup_tb;
+    uint64_t prof_calls, prof_hits, prof_samples, prof_ns, prof_max_ns;
+    int64_t prof_begin_ns;
     /* padding to avoid false sharing is computed at run-time */
 };
+
+static bool host_pc_cache;
+static bool host_pc_prof;
 
 /*
  * We divide code_gen_buffer into equally-sized "regions" that TCG threads
@@ -179,13 +188,20 @@ static void tb_destroy(gpointer value)
 
 static void tcg_region_trees_init(void)
 {
+    const char *cache = getenv("LT_HOST_PC_CACHE");
+    const char *prof = getenv("LT_HOST_PC_CACHE_PROF");
     size_t i;
 
+    host_pc_cache = cache && !strcmp(cache, "on");
+    host_pc_prof = prof && !strcmp(prof, "on");
+    fprintf(stderr, "[host-pc] cache=%s prof=%s\n",
+            host_pc_cache ? "on" : "off", host_pc_prof ? "on" : "off");
     tree_size = ROUND_UP(sizeof(struct tcg_region_tree), qemu_dcache_linesize);
     region_trees = qemu_memalign(qemu_dcache_linesize, region.n * tree_size);
     for (i = 0; i < region.n; i++) {
         struct tcg_region_tree *rt = region_trees + i * tree_size;
 
+        memset(rt, 0, sizeof(*rt));
         qemu_mutex_init(&rt->lock);
         rt->tree = q_tree_new_full(tb_tc_cmp, NULL, NULL, tb_destroy);
     }
@@ -226,6 +242,7 @@ void tcg_tb_insert(TranslationBlock *tb)
 
     g_assert(rt != NULL);
     qemu_mutex_lock(&rt->lock);
+    rt->lookup_tb = NULL;
     q_tree_insert(rt->tree, &tb->tc, tb);
     qemu_mutex_unlock(&rt->lock);
 }
@@ -236,6 +253,7 @@ void tcg_tb_remove(TranslationBlock *tb)
 
     g_assert(rt != NULL);
     qemu_mutex_lock(&rt->lock);
+    rt->lookup_tb = NULL;
     q_tree_remove(rt->tree, &tb->tc);
     qemu_mutex_unlock(&rt->lock);
 }
@@ -250,13 +268,56 @@ TranslationBlock *tcg_tb_lookup(uintptr_t tc_ptr)
     struct tcg_region_tree *rt = tc_ptr_to_region_tree((void *)tc_ptr);
     TranslationBlock *tb;
     struct tb_tc s = { .ptr = (void *)tc_ptr };
+    bool sample, hit;
+    int64_t start;
 
     if (rt == NULL) {
         return NULL;
     }
 
     qemu_mutex_lock(&rt->lock);
-    tb = q_tree_lookup(rt->tree, &s);
+    if (host_pc_prof && !rt->prof_begin_ns) {
+        rt->prof_begin_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
+    sample = host_pc_prof && (++rt->prof_calls % 256 == 0);
+    start = sample ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
+    hit = (host_pc_cache || host_pc_prof) && rt->lookup_tb &&
+          rt->lookup_pc == tc_ptr;
+
+    /* Keep the existing lock and all architectural state restoration. Only
+     * the tree search for the identical host address can be reused. Tree
+     * insertion/removal/reset clears the entry under this same lock before
+     * any old TB metadata can be removed or its storage reused. */
+    tb = host_pc_cache && hit ? rt->lookup_tb : q_tree_lookup(rt->tree, &s);
+    if (host_pc_cache || host_pc_prof) {
+        rt->lookup_pc = tc_ptr;
+        rt->lookup_tb = tb;
+    }
+    if (host_pc_prof) {
+        rt->prof_hits += hit;
+        if (sample) {
+            int64_t end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            uint64_t elapsed = end - start;
+
+            rt->prof_samples++;
+            rt->prof_ns += elapsed;
+            rt->prof_max_ns = MAX(rt->prof_max_ns, elapsed);
+            if (end - rt->prof_begin_ns >= 5 * NANOSECONDS_PER_SECOND) {
+                fprintf(stderr, "[host-pc-sample] cache=%s tree=%zu begin-ns=%" PRId64
+                        " end-ns=%" PRId64 " calls=%" PRIu64
+                        " candidates=%" PRIu64 " samples=%" PRIu64
+                        " total-ns=%" PRIu64 " max-ns=%" PRIu64 "\n",
+                        host_pc_cache ? "on" : "off",
+                        (size_t)((void *)rt - region_trees) / tree_size,
+                        rt->prof_begin_ns, end,
+                        rt->prof_calls, rt->prof_hits, rt->prof_samples,
+                        rt->prof_ns, rt->prof_max_ns);
+                rt->prof_calls = rt->prof_hits = rt->prof_samples = 0;
+                rt->prof_ns = rt->prof_max_ns = 0;
+                rt->prof_begin_ns = end;
+            }
+        }
+    }
     qemu_mutex_unlock(&rt->lock);
     return tb;
 }
@@ -319,6 +380,7 @@ static void tcg_region_tree_reset_all(void)
     for (i = 0; i < region.n; i++) {
         struct tcg_region_tree *rt = region_trees + i * tree_size;
 
+        rt->lookup_tb = NULL;
         /* Increment the refcount first so that destroy acts as a reset */
         q_tree_ref(rt->tree);
         q_tree_destroy(rt->tree);
