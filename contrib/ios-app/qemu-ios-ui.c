@@ -689,9 +689,11 @@ static void ios_capture(DisplaySurface *surface)
     ios.serial++;
     ios_frame_count(&ios_frame_counters.publications);
     ios.timestamp_ns = ios_frame_due(qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+    /* Stamp before unlocking: a frontend can copy as soon as the lock drops.
+     * A later marker can be descheduled and appear after its frontend copy. */
+    ios_frame_path(IOS_FP_PUBLISH, ios.serial, ios.timestamp_ns, 0);
     qemu_mutex_unlock(&ios.frame_lock);
 
-    ios_frame_path(IOS_FP_PUBLISH, ios.serial, ios.timestamp_ns, 0);
     ios_frame_trace(ios.timestamp_ns, ios.serial);
     ios_profile_frame(ios.timestamp_ns, ios.serial);
     ios_report_first_lit_frame(dst, w, h);
