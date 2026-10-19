@@ -372,12 +372,6 @@ static inline const char *gles_id_name(uint32_t id)
 #define GLES_OP_BATCH                   (GLES_OP_BASE + 9)
 #define GLES_BATCH_MAX_WORDS            4096
 
-/* Routine present tally policy: args = cumulative CA successes, failures.
- * 1 permits suppressing periodic success-only logs; 0 keeps them. Older
- * hosts refuse this op, so guests must suppress only on an exact 1 reply.
- * No rendering/context state is touched. */
-#define GLES_OP_TALLY_POLICY            (GLES_OP_BASE + 10)
-
 /* Surface pixel formats, as IOSurfaceGetPixelFormat reports them (FourCC). */
 #define GLES_SURFACE_BGRA32             0x42475241  /* 'BGRA' */
 #define GLES_SURFACE_RGBA32             0x52474241  /* 'RGBA' */

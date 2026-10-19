@@ -400,7 +400,6 @@ static const char *profile_gl_name(uint32_t slot)
     case 0x1006: return "newContext";
     case 0x1007: return "deleteContext";
     case 0x1008: return "drawableStorage";
-    case 0x100a: return "tallyPolicy";
     default: return "unknown";
     }
 }

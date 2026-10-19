@@ -102,7 +102,6 @@ static unsigned slen(const char *s) { unsigned n = 0; while (s && s[n]) n++; ret
 #define GLES_OP_DELETE_SHAREGROUP 0x1005
 #define GLES_OP_NEW_CONTEXT 0x1006
 #define GLES_OP_DELETE_CONTEXT 0x1007
-#define GLES_OP_TALLY_POLICY 0x100a
 
 /* api and sg are glishim.c's (the GLEngine replacement, which #includes this
  * file); the MBX path leaves them zero. */
@@ -1780,18 +1779,10 @@ static int GLESPresentView(void *gc, void *view)
              */
             if (rr) present_ok++; else present_fail++;
             if (!present_logged || (present_ok + present_fail) % 300 == 0) {
-                long long quiet = qc(GLES_OP_TALLY_POLICY, 0, 2,
-                                     A(present_ok, present_fail));
-                /* The first outcome and any failed-present history remain
-                 * visible. Only an exact opt-in host reply suppresses the
-                 * repeated all-success tally; old hosts keep the old log.
-                 * Counters, CA calls and return values are unchanged. */
-                if (!present_logged || present_fail || quiet != 1) {
-                    present_logged = 1;
-                    w("[mbxshim] present tally: ok="); wd(present_ok);
-                    w(" failed="); wd(present_fail);
-                    w(" (last -> "); wd((unsigned)rr); w(")\n");
-                }
+                present_logged = 1;
+                w("[mbxshim] present tally: ok="); wd(present_ok);
+                w(" failed="); wd(present_fail);
+                w(" (last -> "); wd((unsigned)rr); w(")\n");
             }
             return rr != 0;
         }
