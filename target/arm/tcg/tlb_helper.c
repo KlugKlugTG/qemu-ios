@@ -345,6 +345,14 @@ static void arm_alignment_path_begin(CPUARMState *env)
     alignment_active++;
     ios_frame_path(IOS_FP_ALIGNMENT_BEGIN, slot->id,
                    ((uint64_t)thread << 32) | slot->pc, slot->ttbr0);
+    /* Sparse read-only register snapshots use the already restored fault
+     * state. These are registers at the fault, not function-entry arguments.
+     * No debugger, guest memory walk or additional generated code is needed. */
+    ios_frame_path(IOS_FP_ALIGNMENT_ARGS, slot->id,
+                   ((uint64_t)env->regs[0] << 32) | env->regs[1],
+                   ((uint64_t)env->regs[2] << 32) | env->regs[3]);
+    ios_frame_path(IOS_FP_ALIGNMENT_CALLER, slot->id,
+                   ((uint64_t)env->regs[14] << 32) | env->regs[13], slot->context);
 }
 
 void arm_alignment_path_return(CPUARMState *env)
