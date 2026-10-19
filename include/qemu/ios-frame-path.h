@@ -35,6 +35,10 @@ enum IOSFramePathEvent {
     IOS_FP_FMSS_END,
     IOS_FP_SURFACE_MAP_BEGIN,
     IOS_FP_SURFACE_MAP_END,
+    IOS_FP_BT_COMMAND,
+    IOS_FP_BT_QUEUE,
+    IOS_FP_BT_FLUSH,
+    IOS_FP_BT_STATE,
 };
 
 void qemu_ios_native_wait_init(void) __attribute__((weak));

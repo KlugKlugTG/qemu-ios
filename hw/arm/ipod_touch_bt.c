@@ -29,6 +29,7 @@
 #include "hw/core/sysbus.h"
 #include "system/reset.h"
 #include "migration/vmstate.h"
+#include "qemu/ios-frame-path.h"
 #include "hw/arm/ipod_touch_2g.h"
 #include "hw/arm/ipod_touch_1g.h"
 #include "trace.h"
@@ -87,6 +88,7 @@ struct ItBtChardev {
      */
     bool csr;
     bool framing_reported;
+    bool path_on;          /* process diagnostic; not guest/migration state */
 };
 typedef struct ItBtChardev ItBtChardev;
 
@@ -95,6 +97,17 @@ DECLARE_INSTANCE_CHECKER(ItBtChardev, IT_BT_CHARDEV, TYPE_CHARDEV_IT_BT)
 static int bt_trace(void)
 {
     return trace_event_get_state_backends(TRACE_IPOD_TOUCH_BT_LOG);
+}
+
+/* Record only reply prefixes, never guest firmware command payloads. The
+ * shared frame-path buffer flushes after device/vCPU activity has stopped. */
+static uint64_t bt_reply_prefix(const uint8_t *buf, unsigned len)
+{
+    uint64_t prefix = 0;
+    for (unsigned i = 0; i < MIN(len, 8); i++) {
+        prefix |= (uint64_t)buf[i] << (8 * i);
+    }
+    return prefix;
 }
 
 /*
@@ -221,10 +234,19 @@ static void bt_flush(ItBtChardev *bt)
         int have = bt->resp_tail - bt->resp_head;
 
         if (can <= 0) {
+            if (bt->path_on) {
+                ios_frame_path(IOS_FP_BT_STATE, 1, have, bt->latency_ns);
+            }
             return;
         }
         if (can > have) {
             can = have;
+        }
+        if (bt->path_on) {
+            /* Injection boundary; receiving UART/DMA work can run within
+             * qemu_chr_be_write. This does not prove userspace consumed it. */
+            ios_frame_path(IOS_FP_BT_FLUSH, can,
+                           bt_reply_prefix(bt->resp + bt->resp_head, can), have);
         }
         qemu_chr_be_write(chr, bt->resp + bt->resp_head, can);
         bt->resp_head += can;
@@ -235,12 +257,20 @@ static void bt_flush(ItBtChardev *bt)
 static void bt_queue(ItBtChardev *bt, const uint8_t *buf, unsigned len)
 {
     if (bt->resp_tail + len > BT_RESP_MAX) {
+        if (bt->path_on) {
+            ios_frame_path(IOS_FP_BT_STATE, 2, len,
+                           bt->resp_tail - bt->resp_head);
+        }
         /* Nothing this model emits comes close; drop rather than corrupt. */
         fprintf(stderr, "[BT] response buffer full, dropping %u bytes\n", len);
         return;
     }
     memcpy(bt->resp + bt->resp_tail, buf, len);
     bt->resp_tail += len;
+    if (bt->path_on) {
+        ios_frame_path(IOS_FP_BT_QUEUE, len, bt_reply_prefix(buf, len),
+                       bt->resp_tail - bt->resp_head);
+    }
     bt_arm(bt);
 }
 
@@ -386,6 +416,11 @@ static int bt_chr_write(Chardev *chr, const uint8_t *buf, int len)
         if (bt->cmd_len >= 4 && bt->cmd_len == 4u + bt->cmd[3]) {
             uint16_t opcode = bt->cmd[1] | (bt->cmd[2] << 8);
 
+            if (bt->path_on) {
+                ios_frame_path(IOS_FP_BT_COMMAND, opcode, bt->cmd[3],
+                               bt->latency_ns);
+            }
+
             if (bt_trace()) {
                 TRACE_PRINTF(trace_ipod_touch_bt_log, "[BT] cmd ogf=0x%02x ocf=0x%03x (0x%04x) "
                         "plen=%u\n", opcode >> 10, opcode & 0x3ff, opcode,
@@ -419,6 +454,11 @@ static void bt_chr_accept_input(Chardev *chr)
 static void bt_machine_reset(void *opaque)
 {
     ItBtChardev *bt = IT_BT_CHARDEV(opaque);
+
+    if (bt->path_on) {
+        ios_frame_path(IOS_FP_BT_STATE, 0, bt->cmd_len,
+                       bt->resp_tail - bt->resp_head);
+    }
 
     bt->cmd_len = 0;
     bt->framing_reported = false;
@@ -468,6 +508,16 @@ static void bt_chr_finalize(Object *obj)
 static bool bt_chr_open(Chardev *chr, ChardevBackend *backend,
                         Error **errp)
 {
+    const char *mode = getenv("LT_BT_PATH");
+    const char *path = getenv("LT_FRAME_PATH");
+    bool requested = mode && !strcmp(mode, "on");
+    IT_BT_CHARDEV(chr)->path_on = requested && path && *path &&
+        strcmp(path, "off") && strcmp(path, "0") && qemu_ios_frame_path_event;
+    if (requested) {
+        fprintf(stderr, "[bt-path] requested=on configured=%s; "
+                "requires active LT_FRAME_PATH\n",
+                IT_BT_CHARDEV(chr)->path_on ? "on" : "off");
+    }
     IT_BT_CHARDEV(chr)->latency_ns = 2000000;
     IT_BT_CHARDEV(chr)->timer =
         timer_new_ns(QEMU_CLOCK_VIRTUAL, bt_timer, chr);

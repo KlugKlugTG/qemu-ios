@@ -33,16 +33,18 @@ void qemu_ios_frame_path_init(void)
     const char *ahb = getenv("LT_GLES_AHB_PATH");
     const char *fmss = getenv("LT_FMSS_PATH");
     const char *surface = getenv("LT_GLES_SURFACE_PATH");
+    const char *bt = getenv("LT_BT_PATH");
     bool audio_on = audio && strcmp(audio, "off") && strcmp(audio, "0");
     bool guest_on = guest && *guest && strcmp(guest, "off") && strcmp(guest, "0");
     bool wait_on = wait && (!strcmp(wait, "on") || !strcmp(wait, "conditions"));
     bool ahb_on = ahb && !strcmp(ahb, "on");
     bool fmss_on = fmss && !strcmp(fmss, "on");
     bool surface_on = surface && !strcmp(surface, "on");
+    bool bt_on = bt && !strcmp(bt, "on");
     ios_fp_context = context && strcmp(context, "off") && strcmp(context, "0");
     ios_fp_capacity = IOS_FP_CAPACITY *
                       (audio_on || guest_on || wait_on ? 16 :
-                       ios_fp_context || ahb_on || fmss_on || surface_on ? 8 : 1);
+                       ios_fp_context || ahb_on || fmss_on || surface_on || bt_on ? 8 : 1);
     ios_fp_records = g_try_new0(struct IOSFramePathRecord, ios_fp_capacity);
     if (!ios_fp_records) {
         fprintf(stderr, "[frame-path] allocation failed\n");
@@ -95,6 +97,7 @@ void qemu_ios_frame_path_finish(void)
         "ahb-stage-begin", "ahb-stage-end",
         "fmss-begin", "fmss-end",
         "surface-map-begin", "surface-map-end",
+        "bt-command", "bt-queue", "bt-flush", "bt-state",
     };
     qatomic_store_release(&ios_fp_on, false);
     if (qemu_ios_native_wait_finish) {
