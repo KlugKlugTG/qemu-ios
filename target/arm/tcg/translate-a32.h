@@ -163,7 +163,7 @@ DO_GEN_ST(32, MO_UL)
 #endif
 
 /* Set NZCV flags from the high 4 bits of var.  */
-#define gen_set_nzcv(var) gen_set_cpsr(var, CPSR_NZCV)
+void gen_set_nzcv(TCGv_i32 var);
 
 /* Swap low and high halfwords.  */
 static inline void gen_swap_half(TCGv_i32 dest, TCGv_i32 var)

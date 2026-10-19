@@ -354,6 +354,20 @@ void gen_set_cpsr(TCGv_i32 var, uint32_t mask)
     gen_helper_cpsr_write(tcg_env, var, tcg_constant_i32(mask));
 }
 
+/*
+ * The flags from bits 31..28 of var (VMRS APSR_nzcv, MRC to r15) straight into the flag globals,
+ * as A64 does, instead of through the cpsr_write helper.
+ */
+void gen_set_nzcv(TCGv_i32 var)
+{
+    tcg_gen_andi_i32(cpu_NF, var, CPSR_N);
+    tcg_gen_andi_i32(cpu_ZF, var, CPSR_Z);
+    tcg_gen_setcondi_i32(TCG_COND_EQ, cpu_ZF, cpu_ZF, 0);
+    tcg_gen_extract_i32(cpu_CF, var, 29, 1);
+    tcg_gen_andi_i32(cpu_VF, var, CPSR_V);
+    tcg_gen_shli_i32(cpu_VF, cpu_VF, 3);
+}
+
 static void gen_rebuild_hflags(DisasContext *s, bool new_el)
 {
     bool m_profile = arm_dc_feature(s, ARM_FEATURE_M);
@@ -5895,6 +5909,14 @@ static bool trans_CPS(DisasContext *s, arg_CPS *a)
     if (a->M) {
         mask |= CPSR_M;
         val |= a->mode;
+    }
+    if (mask && !(mask & ~(CPSR_A | CPSR_I | CPSR_F)) && val == mask) {
+        /*
+         * cpsid: masking makes no interrupt pending and changes nothing the block was
+         * translated for, so keep translating instead of ending the block.
+         */
+        gen_set_cpsr(tcg_constant_i32(val), mask);
+        return true;
     }
     if (mask) {
         gen_set_psr_im(s, mask, 0, val);

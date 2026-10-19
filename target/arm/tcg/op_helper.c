@@ -599,9 +599,17 @@ uint32_t HELPER(cpsr_read)(CPUARMState *env)
 
 void HELPER(cpsr_write)(CPUARMState *env, uint32_t val, uint32_t mask)
 {
+    uint32_t changed = (cpsr_read(env) ^ val) & mask;
+
     cpsr_write(env, val, mask, CPSRWriteByInstr);
-    /* TODO: Not all cpsr bits are relevant to hflags.  */
-    arm_rebuild_hflags(env);
+    /*
+     * The flags and the A/I/F masks are not part of hflags. iOS's kernel masks and restores
+     * interrupts around every lock (cpsid if ... msr cpsr_fc), and a rebuild for each one shows
+     * in a profile.
+     */
+    if (changed & ~(CPSR_NZCV | CPSR_Q | CPSR_GE | CPSR_A | CPSR_I | CPSR_F)) {
+        arm_rebuild_hflags(env);
+    }
 }
 
 /* Write the CPSR for a 32-bit exception return */
