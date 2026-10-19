@@ -661,6 +661,7 @@ static int gles_strict = -1;
 static bool gles_array_cache;
 /* Focused wall timings, independent of per-draw and live capture timers. */
 static bool gles_context_prof;
+static bool gles_present_prof;
 static struct {
     uint64_t count, switches, init, current, dispatch, max_current, max_dispatch;
 } gles_context_times[3];
@@ -701,6 +702,10 @@ static void gles_read_switches(void)
     gles_array_cache = !v || (strcmp(v, "off") && strcmp(v, "0"));
     v = getenv("LT_GLES_CONTEXT_PROF");
     gles_context_prof = v && strcmp(v, "off") && strcmp(v, "0");
+    v = getenv("LT_GLES_PRESENT_PROF");
+    gles_present_prof = v && strcmp(v, "off") && strcmp(v, "0");
+    fprintf(stderr, "[gles] present-prof=%s\n",
+            gles_present_prof ? "on" : "off");
     fprintf(stderr, "[gles] client-array-cache=%s strict=%d\n",
             gles_array_cache ? "on" : "off", gles_strict);
     v = getenv("IT_GLES_SWIZZLE");
@@ -3704,9 +3709,93 @@ static void gles_report_progress(void)
  * nowhere, and silently returning 0 would make a black screen look like a
  * successful present.
  */
-static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride,
+enum {
+    PRESENT_PREP, PRESENT_ACQUIRE, PRESENT_READBACK, PRESENT_CONVERT,
+    PRESENT_COPY, PRESENT_TAIL, PRESENT_PHASES
+};
+
+typedef struct GLESPresentSample {
+    uint64_t begin, cursor, ns[PRESENT_PHASES];
+    unsigned path; /* 0 invalid, 1 mapped surface, 2 readback, 3 test pattern */
+} GLESPresentSample;
+
+/* No clocks when disabled; never sample inside the row loop. Acquire includes
+ * GPU completion and mapping. Copy includes per-row platform byte swapping.
+ * These are wall times, including descheduling, not exclusive CPU costs. */
+static void gles_present_mark(GLESPresentSample *s, unsigned phase)
+{
+    if (s) {
+        uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        s->ns[phase] += now - s->cursor;
+        s->cursor = now;
+    }
+}
+
+static void gles_present_record(GLESPresentSample *s, int result)
+{
+    static struct {
+        uint64_t calls, errors, retries, total, max_total, max_end;
+        uint64_t ns[PRESENT_PHASES], max_ns[PRESENT_PHASES];
+        uint64_t worst_ns[PRESENT_PHASES];
+    } paths[4];
+    static uint64_t begin;
+    static const char *const names[] = {
+        "invalid", "mapped", "readback", "test"
+    };
+
+    gles_present_mark(s, PRESENT_TAIL);
+    if (!begin) {
+        begin = s->begin;
+    }
+    unsigned path = s->path;
+    uint64_t total = s->cursor - s->begin;
+    paths[path].calls++;
+    paths[path].errors += result != 0;
+    paths[path].retries += result != 0 && gles_guest_fault_pending();
+    paths[path].total += total;
+    if (total > paths[path].max_total) {
+        paths[path].max_total = total;
+        paths[path].max_end = s->cursor;
+        memcpy(paths[path].worst_ns, s->ns, sizeof(s->ns));
+    }
+    for (unsigned i = 0; i < PRESENT_PHASES; i++) {
+        paths[path].ns[i] += s->ns[i];
+        paths[path].max_ns[i] = MAX(paths[path].max_ns[i], s->ns[i]);
+    }
+    if (s->cursor - begin < 5000000000ULL) {
+        return;
+    }
+    for (unsigned p = 0; p < ARRAY_SIZE(paths); p++) {
+        if (!paths[p].calls) {
+            continue;
+        }
+        fprintf(stderr, "[gles-present] path=%s begin-ns %" PRIu64
+                " end-ns %" PRIu64 " calls %" PRIu64 " errors %" PRIu64
+                " retries %" PRIu64 " total-ns %" PRIu64
+                " max-total-ns %" PRIu64 " max-end-ns %" PRIu64,
+                names[p], begin, s->cursor, paths[p].calls, paths[p].errors,
+                paths[p].retries, paths[p].total, paths[p].max_total,
+                paths[p].max_end);
+        static const char *const phases[] = {
+            "prep", "acquire", "readback", "convert", "copy", "tail"
+        };
+        for (unsigned i = 0; i < PRESENT_PHASES; i++) {
+            fprintf(stderr, " %s-ns %" PRIu64 " max-%s-ns %" PRIu64
+                    " worst-%s-ns %" PRIu64,
+                    phases[i], paths[p].ns[i], phases[i], paths[p].max_ns[i],
+                    phases[i], paths[p].worst_ns[i]);
+        }
+        fputc('\n', stderr);
+    }
+    fprintf(stderr, "[gles-present] end begin-ns %" PRIu64
+            " end-ns %" PRIu64 "\n", begin, s->cursor);
+    memset(paths, 0, sizeof(paths));
+    begin = s->cursor;
+}
+
+static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t stride,
                                    uint32_t width, uint32_t height,
-                                   uint32_t format)
+                                   uint32_t format, GLESPresentSample *sample)
 {
     uint32_t y;
     /* Bytes per pixel of the DESTINATION surface. CA picks this from the
@@ -3793,6 +3882,8 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
         const uint8_t *frame = NULL;
         size_t fstride = 0;
 
+        gles_present_mark(sample, PRESENT_PREP);
+
         /*
          * The frame, from the render target itself where the host allows it.
          *
@@ -3807,7 +3898,11 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
         if (bpp == 4 && bgra && !gles_swizzle) {
             frame = gles_frame_lock(&fstride);
         }
+        gles_present_mark(sample, PRESENT_ACQUIRE);
         if (frame) {
+            if (sample) {
+                sample->path = 1;
+            }
             for (y = 0; y < rh; y++) {
                 /* GL's origin is bottom-left, the surface's is top-left. */
                 const uint8_t *src = frame + (size_t)(rh - 1 - y) * fstride;
@@ -3820,10 +3915,12 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                         fprintf(stderr, "[gles] present-surface: write failed at "
                                 "row %u (guest 0x%08x)\n", y, base + y * stride);
                     }
+                    gles_present_mark(sample, PRESENT_COPY);
                     gles_platform_frame_unlock();
                     return -1;
                 }
             }
+            gles_present_mark(sample, PRESENT_COPY);
             gles_report_frame_pixels(frame, fstride, rw, rh, bpp, bgra, base,
                                      "surface-IOSurface");
             gles_dump_frame(frame, fstride, rw, rh, bgra);
@@ -3852,6 +3949,9 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                 t = e ? atoi(e) : 0;
             }
             if (t) {
+                if (sample) {
+                    sample->path = 3;
+                }
                 size_t i, n = (size_t)rw * rh;
                 uint16_t *p16 = (uint16_t *)gh.readback;
 
@@ -3873,6 +3973,10 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
          * offscreen target the guest left bound. */
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, gh.fbo);
         glFinish();
+        if (sample) {
+            sample->path = 2;
+        }
+        gles_present_mark(sample, PRESENT_ACQUIRE);
 
         /*
          * Ask GL for the byte order the destination wants instead of reading
@@ -3897,6 +4001,7 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
             glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, gh.readback);
         }
         glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
+        gles_present_mark(sample, PRESENT_READBACK);
         /*
          * The old path, kept switchable so the two can be compared inside one
          * run. This machine never goes quiet -- eight emulators at once while
@@ -3914,6 +4019,7 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                 p[2] = r;
             }
         }
+        gles_present_mark(sample, PRESENT_CONVERT);
 
         for (y = 0; y < rh; y++) {
             /* GL's origin is bottom-left, the surface's is top-left. Only the
@@ -3928,9 +4034,11 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                     fprintf(stderr, "[gles] present-surface: write failed at row %u "
                             "(guest 0x%08x)\n", y, base + y * stride);
                 }
+                gles_present_mark(sample, PRESENT_COPY);
                 return -1;
             }
         }
+        gles_present_mark(sample, PRESENT_COPY);
         gles_report_frame_pixels(gh.readback, (size_t)rw * bpp, rw, rh,
                                  bpp, bgra, base, "surface-readback");
         /* The dump writes 32-bit pixels; a 565 frame is not its format. */
@@ -3947,6 +4055,22 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
     gles_note_frame_gap();
     gles_report_progress();
     return 0;
+}
+
+static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride,
+                                   uint32_t width, uint32_t height,
+                                   uint32_t format)
+{
+    if (!gles_present_prof) {
+        return gles_present_to_surface_impl(cpu, base, stride, width, height,
+                                            format, NULL);
+    }
+    GLESPresentSample sample = { 0 };
+    sample.begin = sample.cursor = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int result = gles_present_to_surface_impl(cpu, base, stride, width, height,
+                                              format, &sample);
+    gles_present_record(&sample, result);
+    return result;
 }
 
 /* ----------------------------------------------------------------- dispatch */
