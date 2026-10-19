@@ -30,12 +30,15 @@ void qemu_ios_frame_path_init(void)
     const char *audio = getenv("LT_AUDIO_PATH_PROF");
     const char *guest = getenv("LT_GUEST_TRACE_PC");
     const char *wait = getenv("LT_NATIVE_WAIT_PROF");
+    const char *ahb = getenv("LT_GLES_AHB_PATH");
     bool audio_on = audio && strcmp(audio, "off") && strcmp(audio, "0");
     bool guest_on = guest && *guest && strcmp(guest, "off") && strcmp(guest, "0");
     bool wait_on = wait && !strcmp(wait, "on");
+    bool ahb_on = ahb && !strcmp(ahb, "on");
     ios_fp_context = context && strcmp(context, "off") && strcmp(context, "0");
     ios_fp_capacity = IOS_FP_CAPACITY *
-                      (audio_on || guest_on || wait_on ? 16 : ios_fp_context ? 8 : 1);
+                      (audio_on || guest_on || wait_on ? 16 :
+                       ios_fp_context || ahb_on ? 8 : 1);
     ios_fp_records = g_try_new0(struct IOSFramePathRecord, ios_fp_capacity);
     if (!ios_fp_records) {
         fprintf(stderr, "[frame-path] allocation failed\n");
@@ -85,6 +88,7 @@ void qemu_ios_frame_path_finish(void)
         "alignment-args", "alignment-caller",
         "guest-pc", "guest-regs", "guest-stack", "shim-tally",
         "native-wait",
+        "ahb-stage-begin", "ahb-stage-end",
     };
     qatomic_store_release(&ios_fp_on, false);
     if (qemu_ios_native_wait_finish) {

@@ -26,6 +26,19 @@ typedef struct GLESAhb {
     bool rgba;          /* R8G8B8A8 storage: rows need a byte swap for BGRA */
 } GLESAhb;
 
+/* Optional bounded frame-path markers, separate from user profiling. Off adds
+ * no clock reads; enabled producers only append to the existing memory trace.
+ * Stages: 1 GPU completion, 2 description, 3 CPU map, 4 CPU unmap. */
+static bool gles_ahb_path_on;
+
+static inline void gles_ahb_path(unsigned event, GLESAhb *a, unsigned stage,
+                                 int result)
+{
+    if (gles_ahb_path_on) {
+        ios_frame_path(event, (uintptr_t)a->buffer, stage, (uint32_t)result);
+    }
+}
+
 static struct {
     int state;          /* 0 not probed, 1 usable, -1 not */
     int (*allocate)(const AHardwareBuffer_Desc *, AHardwareBuffer **);
@@ -76,6 +89,14 @@ static bool gles_ahb_usable(void)
             gles_ahb_api.create_image && gles_ahb_api.destroy_image &&
             gles_ahb_api.target_texture) {
             gles_ahb_api.state = 1;
+            const char *mode = getenv("LT_GLES_AHB_PATH");
+            const char *path = getenv("LT_FRAME_PATH");
+            bool requested = mode && !strcmp(mode, "on");
+            gles_ahb_path_on = requested && path && *path &&
+                               strcmp(path, "off") && strcmp(path, "0") &&
+                               qemu_ios_frame_path_event;
+            fprintf(stderr, "[gles-ahb-path] requested=%s active=%s\n",
+                    requested ? "on" : "off", gles_ahb_path_on ? "on" : "off");
         }
     }
     return gles_ahb_api.state > 0;
@@ -144,10 +165,18 @@ static const uint8_t *gles_ahb_lock(GLESAhb *a, size_t *stride)
     void *p = NULL;
 
     /* No implicit sync between GPU writes and a CPU lock: wait for the frame. */
+    gles_ahb_path(IOS_FP_AHB_STAGE_BEGIN, a, 1, 0);
     glFinish();
+    gles_ahb_path(IOS_FP_AHB_STAGE_END, a, 1, 0);
+    gles_ahb_path(IOS_FP_AHB_STAGE_BEGIN, a, 2, 0);
     gles_ahb_api.describe(a->buffer, &desc);
-    if (gles_ahb_api.lock(a->buffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1,
-                          NULL, &p) != 0) {
+    gles_ahb_path(IOS_FP_AHB_STAGE_END, a, 2, 0);
+    gles_ahb_path(IOS_FP_AHB_STAGE_BEGIN, a, 3, 0);
+    int result = gles_ahb_api.lock(a->buffer,
+                                 AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1,
+                                 NULL, &p);
+    gles_ahb_path(IOS_FP_AHB_STAGE_END, a, 3, result);
+    if (result != 0) {
         return NULL;
     }
     *stride = (size_t)desc.stride * 4;
@@ -156,5 +185,7 @@ static const uint8_t *gles_ahb_lock(GLESAhb *a, size_t *stride)
 
 static void gles_ahb_unlock(GLESAhb *a)
 {
-    gles_ahb_api.unlock(a->buffer, NULL);
+    gles_ahb_path(IOS_FP_AHB_STAGE_BEGIN, a, 4, 0);
+    int result = gles_ahb_api.unlock(a->buffer, NULL);
+    gles_ahb_path(IOS_FP_AHB_STAGE_END, a, 4, result);
 }
