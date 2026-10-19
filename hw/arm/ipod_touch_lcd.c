@@ -1,5 +1,6 @@
 #include "hw/arm/ipod_touch_lcd.h"
 #include "qemu/main-loop.h"
+#include "qemu/ios-frame-path.h"
 #include "hw/arm/panel-gamma.h"
 #include "hw/core/qdev-properties.h"
 #include "migration/vmstate.h"
@@ -519,6 +520,7 @@ static void ipod_touch_lcd_write(void *opaque, hwaddr addr, uint64_t val, unsign
             break;
         case 0x24:
             if (val != s->w1_framebuffer_base) {
+                ios_frame_path(IOS_FP_LCD_FLIP, s->w1_framebuffer_base, val, 0);
                 lcd_ft("flip", (uint32_t)val);
             }
             s->w1_framebuffer_base = val;
@@ -843,6 +845,33 @@ static bool lcd_blit_unlock(IPodTouchLCDState *lcd)
     return true;
 }
 
+static bool lcd_snapshot_switches_read;
+static bool lcd_snapshot_prof;
+static bool lcd_snapshot_stages;
+static struct {
+    uint64_t n, forced, ns, forced_ns, max_ns, begin_ns, next_ns;
+    uint64_t empty, dirty_pages;
+    DirtySnapshotTimings stages;
+} lcd_snapshot_times;
+
+static void lcd_snapshot_switches(void)
+{
+    if (!lcd_snapshot_switches_read) {
+        const char *prof = getenv("LT_LCD_SNAPSHOT_PROF");
+        const char *stages = getenv("LT_LCD_SNAPSHOT_STAGES");
+
+        lcd_snapshot_switches_read = true;
+        lcd_snapshot_prof = prof && strcmp(prof, "off") && strcmp(prof, "0");
+        lcd_snapshot_stages = stages && strcmp(stages, "off") &&
+                              strcmp(stages, "0");
+        lcd_snapshot_prof |= lcd_snapshot_stages;
+        fprintf(stderr, "[lcd] forced-snapshot-skip=off snapshot-prof=%s\n",
+                lcd_snapshot_prof ? "on" : "off");
+        fprintf(stderr, "[lcd] snapshot-stages=%s\n",
+                lcd_snapshot_stages ? "on" : "off");
+    }
+}
+
 /*
  * framebuffer_update_display() for a top-to-bottom, left-to-right scanout,
  * with the conversion unlocked (lcd_blit_unlock). Taking the dirty snapshot
@@ -863,10 +892,76 @@ static void lcd_update_display(IPodTouchLCDState *lcd, DisplaySurface *ds,
     }
     uint8_t *src = (uint8_t *)memory_region_get_ram_ptr(mem) + addr;
     uint8_t *dest = surface_data(ds);
-    g_autofree DirtyBitmapSnapshot *snap =
-        memory_region_snapshot_and_clear_dirty(mem, addr, (hwaddr)src_width * rows,
-                                               DIRTY_MEMORY_VGA);
+    lcd_snapshot_switches();
+    /* Always clear the snapshot, including forced repaints. Retaining its
+     * dirty bits made Jetpack slower and increased hitches in paired runs. */
+    DirtySnapshotTimings stages = { 0 };
+    uint64_t t0 = lcd_snapshot_prof ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
+    g_autofree DirtyBitmapSnapshot *snap = NULL;
+    if (lcd_snapshot_stages) {
+        snap = memory_region_snapshot_and_clear_dirty_profiled(
+            mem, addr, (hwaddr)src_width * rows, DIRTY_MEMORY_VGA, &stages);
+    } else {
+        snap = memory_region_snapshot_and_clear_dirty(
+            mem, addr, (hwaddr)src_width * rows, DIRTY_MEMORY_VGA);
+    }
+    uint64_t snapshot_end = lcd_snapshot_prof ?
+        qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
+    if (lcd_snapshot_prof) {
+        uint64_t ns = snapshot_end - t0;
+
+        lcd_snapshot_times.n++;
+        lcd_snapshot_times.forced += !!invalidate;
+        lcd_snapshot_times.ns += ns;
+        lcd_snapshot_times.forced_ns += invalidate ? ns : 0;
+        lcd_snapshot_times.max_ns = MAX(lcd_snapshot_times.max_ns, ns);
+        if (lcd_snapshot_stages) {
+            lcd_snapshot_times.empty += stages.dirty_pages == 0;
+            lcd_snapshot_times.dirty_pages += stages.dirty_pages;
+            lcd_snapshot_times.stages.presync_ns += stages.presync_ns;
+            lcd_snapshot_times.stages.setup_ns += stages.setup_ns;
+            lcd_snapshot_times.stages.bitmap_ns += stages.bitmap_ns;
+            lcd_snapshot_times.stages.reset_ns += stages.reset_ns;
+            lcd_snapshot_times.stages.clear_ns += stages.clear_ns;
+            lcd_snapshot_times.stages.barrier_ns += stages.barrier_ns;
+        }
+    }
     bool unlocked = lcd_blit_unlock(lcd);
+
+    if (lcd_snapshot_prof && snapshot_end >= lcd_snapshot_times.next_ns) {
+        if (lcd_snapshot_times.next_ns) {
+            /* Retain zero-valued skip fields for existing log readers. */
+            fprintf(stderr, "[lcd-snapshot] skip-forced=off begin-ns %" PRIu64
+                    " end-ns %" PRIu64 " n %" PRIu64
+                    " forced %" PRIu64 " skipped 0 ns %" PRIu64
+                    " forced-ns %" PRIu64 " max-ns %" PRIu64 "\n",
+                    lcd_snapshot_times.begin_ns, snapshot_end,
+                    lcd_snapshot_times.n, lcd_snapshot_times.forced,
+                    lcd_snapshot_times.ns,
+                    lcd_snapshot_times.forced_ns, lcd_snapshot_times.max_ns);
+            if (lcd_snapshot_stages) {
+                fprintf(stderr, "[lcd-stages] begin-ns %" PRIu64
+                        " end-ns %" PRIu64 " n %" PRIu64
+                        " skipped 0 empty %" PRIu64
+                        " dirty-pages %" PRIu64 " presync-ns %" PRIu64
+                        " setup-ns %" PRIu64 " bitmap-ns %" PRIu64
+                        " reset-ns %" PRIu64 " clear-ns %" PRIu64
+                        " barrier-ns %" PRIu64 "\n",
+                        lcd_snapshot_times.begin_ns, snapshot_end,
+                        lcd_snapshot_times.n,
+                        lcd_snapshot_times.empty, lcd_snapshot_times.dirty_pages,
+                        lcd_snapshot_times.stages.presync_ns,
+                        lcd_snapshot_times.stages.setup_ns,
+                        lcd_snapshot_times.stages.bitmap_ns,
+                        lcd_snapshot_times.stages.reset_ns,
+                        lcd_snapshot_times.stages.clear_ns,
+                        lcd_snapshot_times.stages.barrier_ns);
+            }
+        }
+        memset(&lcd_snapshot_times, 0, sizeof(lcd_snapshot_times));
+        lcd_snapshot_times.begin_ns = snapshot_end;
+        lcd_snapshot_times.next_ns = snapshot_end + 5000000000ULL;
+    }
 
     for (int i = 0; i < rows; i++) {
         if (invalidate || memory_region_snapshot_get_dirty(mem, snap, addr, src_width)) {
@@ -971,7 +1066,7 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
     lcd_frame_count(&lcd->frame_counters.rotated_updates);
 }
 
-static void lcd_refresh(void *opaque)
+static void lcd_refresh_impl(void *opaque)
 {
     // printf("%s: refreshing LCD screen\n", __func__);
 
@@ -1159,6 +1254,14 @@ static void lcd_refresh(void *opaque)
     }
 }
 
+static void lcd_refresh(void *opaque)
+{
+    IPodTouchLCDState *lcd = opaque;
+    ios_frame_path(IOS_FP_SCAN_BEGIN, lcd->scanout_base, lcd_in_vsync_present, 0);
+    lcd_refresh_impl(opaque);
+    ios_frame_path(IOS_FP_SCAN_END, lcd->scanout_base, lcd_in_vsync_present, 0);
+}
+
 static const MemoryRegionOps lcd_ops = {
     .read = ipod_touch_lcd_read,
     .write = ipod_touch_lcd_write,
@@ -1331,6 +1434,8 @@ static void refresh_timer_tick(void *opaque)
     IPodTouchLCDState *s = (IPodTouchLCDState *)opaque;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
+    ios_frame_path(IOS_FP_VSYNC_BEGIN, s->scanout_base, s->w1_framebuffer_base,
+                    now > s->next_vsync ? now - s->next_vsync : 0);
     /* The virtual clock is the host's less time spent paused, so the deadline
      * maps across by how late this tick runs. */
     if (ipod_lcd_vsync_due && !lcd_vsync_legacy() && s->next_vsync <= now) {
@@ -1380,6 +1485,7 @@ static void refresh_timer_tick(void *opaque)
     /* IT_LCD_VSYNC_LEGACY restores the old re-arm-from-now behavior, so the
      * two can be A/B'd from one binary. Bisecting only. */
     if (lcd_vsync_legacy()) {
+        ios_frame_path(IOS_FP_VSYNC_END, s->scanout_base, 0, 0);
         s->next_vsync = now + LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
         timer_mod(s->refresh_timer, s->next_vsync);
         return;
@@ -1396,6 +1502,7 @@ static void refresh_timer_tick(void *opaque)
         s->next_vsync = now + LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
     }
     timer_mod(s->refresh_timer, s->next_vsync);
+    ios_frame_path(IOS_FP_VSYNC_END, s->scanout_base, 0, 0);
 }
 
 /*

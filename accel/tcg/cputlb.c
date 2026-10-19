@@ -2060,7 +2060,30 @@ static uint64_t int_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
  * memory_region_enable_lockless_io is dispatched without the BQL; its
  * callbacks take it where they need it.
  */
+typedef struct ItAcctMMIOScope {
+    void *previous;
+} ItAcctMMIOScope;
+
+static inline ItAcctMMIOScope it_acct_mmio_enter(MemoryRegion *mr)
+{
+    ItAcctMMIOScope scope = { it_acct_mmio_mr };
+
+    it_acct_mmio_mr = mr;
+    return scope;
+}
+
+static inline void it_acct_mmio_leave(ItAcctMMIOScope *scope)
+{
+    it_acct_mmio_mr = scope->previous;
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(ItAcctMMIOScope, it_acct_mmio_leave)
+
+/* Lockless callbacks may acquire the BQL themselves. Keep their region for
+ * that acquisition, then restore it even when no acquisition consumed it.
+ * Otherwise a timer-counter read can mislabel a subsequent interrupt lock. */
 #define MMIO_BQL_LOCK_GUARD(mr) \
+    g_auto(ItAcctMMIOScope) _it_acct_mmio_scope = it_acct_mmio_enter(mr); \
     g_autoptr(BQLLockAuto) _bql_lock_auto __attribute__((unused)) \
         = (mr)->lockless_io ? NULL : bql_auto_lock(__FILE__, __LINE__)
 
@@ -2077,7 +2100,6 @@ static uint64_t do_ld_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
     section = io_prepare(&mr_offset, cpu, full, addr, ra);
     mr = section->mr;
 
-    it_acct_mmio_mr = mr;
     MMIO_BQL_LOCK_GUARD(mr);
     return int_ld_mmio_beN(cpu, full, ret_be, addr, size, mmu_idx,
                            type, ra, mr, mr_offset);
@@ -2097,7 +2119,6 @@ static Int128 do_ld16_mmio_beN(CPUState *cpu, CPUTLBEntryFull *full,
     section = io_prepare(&mr_offset, cpu, full, addr, ra);
     mr = section->mr;
 
-    it_acct_mmio_mr = mr;
     MMIO_BQL_LOCK_GUARD(mr);
     a = int_ld_mmio_beN(cpu, full, ret_be, addr, size - 8, mmu_idx,
                         MMU_DATA_LOAD, ra, mr, mr_offset);
@@ -2593,7 +2614,6 @@ static uint64_t do_st_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
     section = io_prepare(&mr_offset, cpu, full, addr, ra);
     mr = section->mr;
 
-    it_acct_mmio_mr = mr;
     MMIO_BQL_LOCK_GUARD(mr);
     return int_st_mmio_leN(cpu, full, val_le, addr, size, mmu_idx,
                            ra, mr, mr_offset);
@@ -2612,7 +2632,6 @@ static uint64_t do_st16_mmio_leN(CPUState *cpu, CPUTLBEntryFull *full,
     section = io_prepare(&mr_offset, cpu, full, addr, ra);
     mr = section->mr;
 
-    it_acct_mmio_mr = mr;
     MMIO_BQL_LOCK_GUARD(mr);
     int_st_mmio_leN(cpu, full, int128_getlo(val_le), addr, 8,
                     mmu_idx, ra, mr, mr_offset);

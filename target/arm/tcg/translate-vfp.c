@@ -28,6 +28,54 @@
 #include "decode-vfp.c.inc"
 #include "decode-vfp-uncond.c.inc"
 
+/* Translation-time selection leaves ordinary arithmetic helpers unchanged. */
+static bool vfp_audio_path_profile(void)
+{
+    static gsize mode;
+
+    if (g_once_init_enter(&mode)) {
+        const char *v = getenv("LT_AUDIO_PATH_PROF");
+        bool on = v && strcmp(v, "off") && strcmp(v, "0");
+
+        if (on) {
+            fprintf(stderr, "[audio-path] on sample-period=1021; "
+                    "baseline f32 add/sub/mul, no arithmetic shortcuts\n");
+        }
+        g_once_init_leave(&mode, 1 + on);
+    }
+    return mode == 2;
+}
+
+static void gen_vfp_adds_selected(TCGv_i32 dst, TCGv_i32 a, TCGv_i32 b,
+                                 TCGv_ptr fpst)
+{
+    if (vfp_audio_path_profile()) {
+        gen_helper_vfp_adds_path(dst, tcg_env, a, b, fpst);
+    } else {
+        gen_helper_vfp_adds(dst, a, b, fpst);
+    }
+}
+
+static void gen_vfp_subs_selected(TCGv_i32 dst, TCGv_i32 a, TCGv_i32 b,
+                                 TCGv_ptr fpst)
+{
+    if (vfp_audio_path_profile()) {
+        gen_helper_vfp_subs_path(dst, tcg_env, a, b, fpst);
+    } else {
+        gen_helper_vfp_subs(dst, a, b, fpst);
+    }
+}
+
+static void gen_vfp_muls_selected(TCGv_i32 dst, TCGv_i32 a, TCGv_i32 b,
+                                  TCGv_ptr fpst)
+{
+    if (vfp_audio_path_profile()) {
+        gen_helper_vfp_muls_path(dst, tcg_env, a, b, fpst);
+    } else {
+        gen_helper_vfp_muls(dst, a, b, fpst);
+    }
+}
+
 static inline void vfp_load_reg64(TCGv_i64 var, int reg)
 {
     tcg_gen_ld_i64(var, tcg_env, vfp_reg_offset(true, reg));
@@ -1736,8 +1784,8 @@ static void gen_VMLA_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
     /* Note that order of inputs to the add matters for NaNs */
     TCGv_i32 tmp = tcg_temp_new_i32();
 
-    gen_helper_vfp_muls(tmp, vn, vm, fpst);
-    gen_helper_vfp_adds(vd, vd, tmp, fpst);
+    gen_vfp_muls_selected(tmp, vn, vm, fpst);
+    gen_vfp_adds_selected(vd, vd, tmp, fpst);
 }
 
 static bool trans_VMLA_sp(DisasContext *s, arg_VMLA_sp *a)
@@ -1785,9 +1833,9 @@ static void gen_VMLS_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
      */
     TCGv_i32 tmp = tcg_temp_new_i32();
 
-    gen_helper_vfp_muls(tmp, vn, vm, fpst);
+    gen_vfp_muls_selected(tmp, vn, vm, fpst);
     gen_vfp_negs(tmp, tmp);
-    gen_helper_vfp_adds(vd, vd, tmp, fpst);
+    gen_vfp_adds_selected(vd, vd, tmp, fpst);
 }
 
 static bool trans_VMLS_sp(DisasContext *s, arg_VMLS_sp *a)
@@ -1843,9 +1891,9 @@ static void gen_VNMLS_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
      */
     TCGv_i32 tmp = tcg_temp_new_i32();
 
-    gen_helper_vfp_muls(tmp, vn, vm, fpst);
+    gen_vfp_muls_selected(tmp, vn, vm, fpst);
     gen_vfp_negs(vd, vd);
-    gen_helper_vfp_adds(vd, vd, tmp, fpst);
+    gen_vfp_adds_selected(vd, vd, tmp, fpst);
 }
 
 static bool trans_VNMLS_sp(DisasContext *s, arg_VNMLS_sp *a)
@@ -1894,10 +1942,10 @@ static void gen_VNMLA_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
     /* VNMLA: -fd + -(fn * fm) */
     TCGv_i32 tmp = tcg_temp_new_i32();
 
-    gen_helper_vfp_muls(tmp, vn, vm, fpst);
+    gen_vfp_muls_selected(tmp, vn, vm, fpst);
     gen_vfp_negs(tmp, tmp);
     gen_vfp_negs(vd, vd);
-    gen_helper_vfp_adds(vd, vd, tmp, fpst);
+    gen_vfp_adds_selected(vd, vd, tmp, fpst);
 }
 
 static bool trans_VNMLA_sp(DisasContext *s, arg_VNMLA_sp *a)
@@ -1928,7 +1976,7 @@ static bool trans_VMUL_hp(DisasContext *s, arg_VMUL_sp *a)
 
 static bool trans_VMUL_sp(DisasContext *s, arg_VMUL_sp *a)
 {
-    return do_vfp_3op_sp(s, gen_helper_vfp_muls, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_sp(s, gen_vfp_muls_selected, a->vd, a->vn, a->vm, false);
 }
 
 static bool trans_VMUL_dp(DisasContext *s, arg_VMUL_dp *a)
@@ -1951,7 +1999,7 @@ static bool trans_VNMUL_hp(DisasContext *s, arg_VNMUL_sp *a)
 static void gen_VNMUL_sp(TCGv_i32 vd, TCGv_i32 vn, TCGv_i32 vm, TCGv_ptr fpst)
 {
     /* VNMUL: -(fn * fm) */
-    gen_helper_vfp_muls(vd, vn, vm, fpst);
+    gen_vfp_muls_selected(vd, vn, vm, fpst);
     gen_vfp_negs(vd, vd);
 }
 
@@ -1979,7 +2027,7 @@ static bool trans_VADD_hp(DisasContext *s, arg_VADD_sp *a)
 
 static bool trans_VADD_sp(DisasContext *s, arg_VADD_sp *a)
 {
-    return do_vfp_3op_sp(s, gen_helper_vfp_adds, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_sp(s, gen_vfp_adds_selected, a->vd, a->vn, a->vm, false);
 }
 
 static bool trans_VADD_dp(DisasContext *s, arg_VADD_dp *a)
@@ -1994,7 +2042,7 @@ static bool trans_VSUB_hp(DisasContext *s, arg_VSUB_sp *a)
 
 static bool trans_VSUB_sp(DisasContext *s, arg_VSUB_sp *a)
 {
-    return do_vfp_3op_sp(s, gen_helper_vfp_subs, a->vd, a->vn, a->vm, false);
+    return do_vfp_3op_sp(s, gen_vfp_subs_selected, a->vd, a->vn, a->vm, false);
 }
 
 static bool trans_VSUB_dp(DisasContext *s, arg_VSUB_dp *a)

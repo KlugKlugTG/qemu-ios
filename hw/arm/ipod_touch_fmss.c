@@ -4,6 +4,7 @@
 #include "qemu/log.h"
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
+#include "qemu/ios-frame-path.h"
 #include "system/runstate.h"
 #include "system/address-spaces.h"
 #include <sys/stat.h>
@@ -40,6 +41,45 @@ FMSS_ENV_FLAG(fmss_usedspare, "FMSS_USEDSPARE")
 FMSS_ENV_FLAG(fmss_basespare, "FMSS_BASESPARE")
 FMSS_ENV_FLAG(fmss_legacy_on, "FMSS_LEGACY")
 FMSS_ENV_FLAG(fmss_physical,  "FMSS_PHYSICAL")
+
+/* Optional call boundaries, including early-return and failure paths. Producers
+ * append only to the existing bounded memory trace; storage behavior is intact.
+ * a=call ID, b=(operation << 32)|chip select, c=page (block for erase).
+ * Operations: 1=load, 2=store, 3=erase, 4=fsync (nested in store/erase).
+ * End means returned, not I/O success. */
+static bool fmss_path_on;
+static uint64_t fmss_path_sequence;
+
+static uint64_t fmss_path_begin(unsigned operation, uint32_t cs, uint32_t page)
+{
+    if (!fmss_path_on) {
+        return 0;
+    }
+    uint64_t id = ++fmss_path_sequence;
+    ios_frame_path(IOS_FP_FMSS_BEGIN, id, (uint64_t)operation << 32 | cs, page);
+    return id;
+}
+
+static void fmss_path_end(uint64_t id, unsigned operation, uint32_t cs,
+                          uint32_t page)
+{
+    if (id) {
+        ios_frame_path(IOS_FP_FMSS_END, id, (uint64_t)operation << 32 | cs, page);
+    }
+}
+
+static int fmss_sync_file(FILE *file, uint32_t cs, uint32_t page_or_block)
+{
+    if (!fmss_path_on) {
+        return fsync(fileno(file));
+    }
+    uint64_t id = fmss_path_begin(4, cs, page_or_block);
+    int result = fsync(fileno(file));
+    int saved_errno = errno;
+    fmss_path_end(id, 4, cs, page_or_block);
+    errno = saved_errno;
+    return result;
+}
 
 /* The tracing switches are trace events now: -trace 'ipod_touch_fmss_*'. */
 #define FMSS_TRACE_FLAG(fn, id)                                               \
@@ -517,7 +557,7 @@ static bool fmss_io_error(const char *path, int err)
 }
 
 /* Drop every overlay page of a block and mark it erased. */
-static bool fmss_erase_block(IPodTouchFMSSState *s, uint32_t cs, uint32_t block)
+static bool fmss_erase_block_inner(IPodTouchFMSSState *s, uint32_t cs, uint32_t block)
 {
     char path[1152], tmp[1200];
     uint32_t first = block * NAND_PAGES_PER_BLOCK;
@@ -541,7 +581,7 @@ static bool fmss_erase_block(IPodTouchFMSSState *s, uint32_t cs, uint32_t block)
         return fmss_io_error(path, errno);
     }
     int err = 0;
-    if (fflush(f) != 0 || fsync(fileno(f)) != 0) {
+    if (fflush(f) != 0 || fmss_sync_file(f, cs, block) != 0) {
         err = errno;
     }
     if (fclose(f) != 0 && !err) {
@@ -571,6 +611,14 @@ static bool fmss_erase_block(IPodTouchFMSSState *s, uint32_t cs, uint32_t block)
 
     fmss_remember_erased(s, cs, block);
     return true;
+}
+
+static bool fmss_erase_block(IPodTouchFMSSState *s, uint32_t cs, uint32_t block)
+{
+    uint64_t id = fmss_path_begin(3, cs, block);
+    bool result = fmss_erase_block_inner(s, cs, block);
+    fmss_path_end(id, 3, cs, block);
+    return result;
 }
 
 /*
@@ -623,10 +671,12 @@ static void fmss_load_page(IPodTouchFMSSState *s, uint32_t cs, uint32_t page_nr,
                            uint8_t *data, uint8_t *spare)
 {
     int64_t t0;
+    uint64_t id = fmss_path_begin(1, cs, page_nr);
 
     if (!fmss_stats_on()) {
         fmss_load_page_inner(s, cs, page_nr, data, spare);
         fmss_fix_generated_free_pool(s, cs, page_nr, data, spare);
+        fmss_path_end(id, 1, cs, page_nr);
         return;
     }
     t0 = qemu_clock_get_ns(QEMU_CLOCK_HOST);
@@ -634,6 +684,7 @@ static void fmss_load_page(IPodTouchFMSSState *s, uint32_t cs, uint32_t page_nr,
     fmss_fix_generated_free_pool(s, cs, page_nr, data, spare);
     fmss_stats.ns += qemu_clock_get_ns(QEMU_CLOCK_HOST) - t0;
     fmss_stats.reads++;
+    fmss_path_end(id, 1, cs, page_nr);
     fmss_stats_report();
 }
 
@@ -1076,7 +1127,7 @@ static bool fmss_generated_layout(IPodTouchFMSSState *s, uint32_t logical,
 }
 
 /* Store one physical page (data + spare) into the overlay, atomically. */
-static bool fmss_store_page(IPodTouchFMSSState *s, uint32_t cs, uint32_t page_nr,
+static bool fmss_store_page_inner(IPodTouchFMSSState *s, uint32_t cs, uint32_t page_nr,
                             const uint8_t *data, const uint8_t *spare)
 {
     char dir[1088], filename[1152], tmp[1200];
@@ -1105,7 +1156,7 @@ static bool fmss_store_page(IPodTouchFMSSState *s, uint32_t cs, uint32_t page_nr
     int err = 0;
     if (fwrite(data, 1, NAND_BYTES_PER_PAGE, f) != NAND_BYTES_PER_PAGE ||
         fwrite(spare, 1, NAND_BYTES_PER_SPARE, f) != NAND_BYTES_PER_SPARE ||
-        fflush(f) != 0 || fsync(fileno(f)) != 0) {
+        fflush(f) != 0 || fmss_sync_file(f, cs, page_nr) != 0) {
         err = errno ? errno : EIO;
     }
     if (fclose(f) != 0 && !err) {
@@ -1161,6 +1212,15 @@ static bool fmss_store_page(IPodTouchFMSSState *s, uint32_t cs, uint32_t page_nr
         g_hash_table_add(s->overlay_pages, fmss_block_key(cs, page_nr));
     }
     return true;
+}
+
+static bool fmss_store_page(IPodTouchFMSSState *s, uint32_t cs, uint32_t page_nr,
+                            const uint8_t *data, const uint8_t *spare)
+{
+    uint64_t id = fmss_path_begin(2, cs, page_nr);
+    bool result = fmss_store_page_inner(s, cs, page_nr, data, spare);
+    fmss_path_end(id, 2, cs, page_nr);
+    return result;
 }
 
 /* Four chips, 4096 erase blocks per chip. This is a sanity bound, not a
@@ -1638,6 +1698,15 @@ static const MemoryRegionOps fmss_ops = {
 
 static void ipod_touch_fmss_realize(DeviceState *dev, Error **errp)
 {
+    const char *mode = getenv("LT_FMSS_PATH");
+    const char *path = getenv("LT_FRAME_PATH");
+    bool requested = mode && !strcmp(mode, "on");
+    fmss_path_on = requested && path && *path && strcmp(path, "off") &&
+                   strcmp(path, "0") && qemu_ios_frame_path_event;
+    if (requested) {
+        fprintf(stderr, "[fmss-path] requested=on configured=%s; "
+                "requires active LT_FRAME_PATH\n", fmss_path_on ? "on" : "off");
+    }
     fmss_try_map_packed(IPOD_TOUCH_FMSS(dev));
 }
 

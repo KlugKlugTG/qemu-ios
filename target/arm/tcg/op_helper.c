@@ -26,6 +26,109 @@
 #include "accel/tcg/cpu-ldst.h"
 #include "accel/tcg/probe.h"
 #include "cpregs.h"
+#include "qemu/ios-frame-path.h"
+#include "qemu/timer.h"
+
+static int64_t guest_pc_begin_ns;
+
+/* Instruction-boundary register snapshots at an explicitly selected small set
+ * of guest PCs. No guest memory access, breakpoints, or per-instruction runtime
+ * condition when disabled. Bit 0 selects Thumb state, as in a function pointer.
+ * These are reached-PC observations, not proof that the instruction completes.
+ */
+bool arm_guest_pc_selected(uint32_t pc)
+{
+    static gsize initialized;
+    static uint32_t points[32];
+    static unsigned count;
+
+    if (g_once_init_enter(&initialized)) {
+        const char *setting = getenv("LT_GUEST_TRACE_PC");
+
+        if (setting && *setting && strcmp(setting, "off") &&
+            strcmp(setting, "0")) {
+            g_auto(GStrv) fields = g_strsplit(setting, ",", 33);
+            bool valid = true;
+            unsigned n;
+            uint64_t delay_ms = 0;
+            const char *delay = getenv("LT_GUEST_TRACE_DELAY_MS");
+
+            if (delay && *delay) {
+                char *end;
+
+                errno = 0;
+                delay_ms = strtoull(delay, &end, 10);
+                valid = !errno && !*end && delay_ms <= 600000;
+            }
+
+            for (n = 0; fields[n]; n++) {
+                char *end, *field = g_strstrip(fields[n]);
+                uint64_t value;
+
+                errno = 0;
+                value = strtoull(field, &end, 0);
+                if (n == ARRAY_SIZE(points) || !*field || *end || errno ||
+                    value > UINT32_MAX || (!(value & 1) && (value & 3))) {
+                    valid = false;
+                    break;
+                }
+                points[n] = value;
+            }
+            if (valid) {
+                count = n;
+                if (delay_ms) {
+                    guest_pc_begin_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) +
+                                        delay_ms * 1000000;
+                }
+            }
+            fprintf(stderr, "[guest-pc] points=%u config=%s before-instruction "
+                    "delay-ms=%" PRIu64 "\n", count,
+                    valid ? "valid" : "invalid", delay_ms);
+        }
+        g_once_init_leave(&initialized, 1);
+    }
+    for (unsigned i = 0; i < count; i++) {
+        if (points[i] == pc) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void HELPER(guest_pc_trace)(CPUARMState *env, uint32_t pc)
+{
+    static uint64_t sequence;
+    bool secure;
+    uint32_t thread, cidr, ttbr0;
+    uint64_t id;
+
+    /* The iPod target is one AArch32 vCPU. Avoid ambiguous producer identities
+     * when this diagnostic is accidentally used on a larger machine. */
+    if (env_cpu(env)->cpu_index != 0 || is_a64(env)) {
+        return;
+    }
+    /* Drop whole observations before the requested diagnostic window. Keep
+     * triplets indivisible and IDs contiguous, even at the delay boundary. */
+    if (guest_pc_begin_ns) {
+        if (qemu_clock_get_ns(QEMU_CLOCK_REALTIME) < guest_pc_begin_ns) {
+            return;
+        }
+        guest_pc_begin_ns = 0;
+    }
+    secure = arm_is_secure(env);
+    thread = (secure ? env->cp15.tpidrprw_s : env->cp15.tpidrprw_ns) & ~3u;
+    cidr = secure ? env->cp15.contextidr_s : env->cp15.contextidr_ns;
+    ttbr0 = secure ? env->cp15.ttbr0_s : env->cp15.ttbr0_ns;
+    id = ++sequence;
+    ios_frame_path(IOS_FP_GUEST_PC, id, ((uint64_t)pc << 32) | thread,
+                   ((uint64_t)cidr << 32) | ttbr0);
+    ios_frame_path(IOS_FP_GUEST_REGS, id,
+                   ((uint64_t)env->regs[0] << 32) | env->regs[1],
+                   ((uint64_t)env->regs[2] << 32) | env->regs[3]);
+    ios_frame_path(IOS_FP_GUEST_STACK, id,
+                   ((uint64_t)env->regs[14] << 32) | env->regs[13],
+                   ((uint64_t)env->regs[12] << 32) | (env->uncached_cpsr & CPSR_M));
+}
 
 #define SIGNBIT (uint32_t)0x80000000
 #define SIGNBIT64 ((uint64_t)1 << 63)
@@ -659,6 +762,13 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
         arm_call_el_change_hook(cpu);
         bql_unlock();
     }
+}
+
+/* Translation selects this wrapper only for alignment return diagnostics. */
+void HELPER(cpsr_write_eret_path)(CPUARMState *env, uint32_t val)
+{
+    HELPER(cpsr_write_eret)(env, val);
+    arm_alignment_path_return(env);
 }
 
 /* Access to user mode registers from privileged modes.  */

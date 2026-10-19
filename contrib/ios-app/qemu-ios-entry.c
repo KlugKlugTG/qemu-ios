@@ -14,6 +14,9 @@
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
 #include "qemu/rcu.h"
+#include "qemu/cutils.h"
+#include "qapi/error.h"
+#include "exec/gdbstub.h"
 #include "system/replay.h"
 #include "system/system.h"
 #ifdef CONFIG_TCG
@@ -30,6 +33,30 @@ bool qemu_rcu_embedded_main(void)
 }
 #endif
 
+/* Narrow developer diagnostic: attach only after a frame capture to inspect
+ * the guest's proc/task/pmap structures. No listener unless explicitly armed;
+ * bind loopback so Android access can use an adb forward. */
+static void guest_gdb_init(void)
+{
+    const char *value = getenv("LT_GUEST_GDB_PORT");
+    if (!value || !*value || !strcmp(value, "off") || !strcmp(value, "0")) {
+        return;
+    }
+    unsigned port;
+    if (qemu_strtoui(value, NULL, 10, &port) || port < 1024 || port > 65535) {
+        fprintf(stderr, "[guest-gdb] invalid LT_GUEST_GDB_PORT\n");
+        return;
+    }
+    g_autofree char *endpoint = g_strdup_printf("tcp:127.0.0.1:%u", port);
+    Error *err = NULL;
+    if (!gdbserver_start(endpoint, &err)) {
+        fprintf(stderr, "[guest-gdb] %s\n", error_get_pretty(err));
+        error_free(err);
+        return;
+    }
+    fprintf(stderr, "[guest-gdb] listening 127.0.0.1:%u; attach after capture\n", port);
+}
+
 int qemu_ios_main(int argc, char **argv)
 {
     int status;
@@ -41,6 +68,8 @@ int qemu_ios_main(int argc, char **argv)
 #endif
 
     qemu_init(argc, argv);
+    guest_gdb_init();
+    qemu_ios_frame_path_init();
 
     /*
      * Resume automatically when restoring a snapshot.
@@ -73,6 +102,7 @@ int qemu_ios_main(int argc, char **argv)
      * queued onto a context nobody services. */
     qemu_ios_ui_vm_stopped();
     qemu_cleanup(status);
+    qemu_ios_frame_path_finish();
 #ifdef CONFIG_TCG
     /* No vCPU/device activity remains. Retain final experimental cache totals
      * before the embedding host disposes its worker without running atexit.

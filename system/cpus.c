@@ -36,6 +36,7 @@
 #include "system/hw_accel.h"
 #include "exec/cpu-common.h"
 #include "qemu/thread.h"
+#include "qemu/ios-frame-path.h"
 #include "qemu/main-loop.h"
 #include "qemu/plugin.h"
 #include "system/cpus.h"
@@ -69,6 +70,9 @@
 
 /* The Big QEMU Lock (BQL) */
 static QemuMutex bql;
+
+#include "cpus-native-wait.c.inc"
+#include "cpus-bql-spin.c.inc"
 
 /*
  * The chosen accelerator is supposed to register this.
@@ -431,6 +435,7 @@ void qemu_init_cpu_loop(void)
     qemu_cond_init(&qemu_cpu_cond);
     qemu_cond_init(&qemu_pause_cond);
     qemu_mutex_init(&bql);
+    bql_spin_init();
 
     qemu_thread_get_self(&io_thread);
 }
@@ -571,7 +576,12 @@ void rust_bql_mock_lock(void)
  * The BQL is taken from so many places that it is worth profiling the
  * callers directly, instead of funneling them all through a single function.
  */
-extern bool it_acct_on;
+/* Full accounting and LT_BQL_PROF share lock tables. The latter leaves guest
+ * instruction, TB lookup and TLB-fill instrumentation disabled. */
+bool it_bql_acct_on;
+bool it_profile_on;
+/* The standalone QEMU executable has no embedded UI bridge. */
+void qemu_ios_profile_lock(uint64_t, uint64_t, bool, const char *, int) __attribute__((weak));
 uint64_t it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow;
 extern void *it_acct_mmio_mr;
 struct it_acct_mr { void *mr; uint64_t n, ns; char *name; } it_acct_mrs[256];
@@ -619,40 +629,49 @@ void bql_lock_impl(const char *file, int line)
     QemuMutexLockFunc bql_lock_fn = qatomic_read(&bql_mutex_lock_func);
 
     g_assert(!bql_locked());
-    if (unlikely(it_acct_on) && current_cpu) {
+    if (unlikely(qatomic_read(&it_bql_acct_on) ||
+                 qatomic_read(&it_profile_on)) && current_cpu) {
         /* How long a vCPU waits for the BQL, MMIO accesses included. */
         int64_t t0 = get_clock(), dt;
 
         bql_lock_fn(&bql, file, line);
         dt = get_clock() - t0;
+        if (qemu_ios_profile_lock) {
+            qemu_ios_profile_lock(t0, t0 + dt, true, file, line);
+        }
         it_acct_vcpu_bql_n++;
         it_acct_vcpu_bql_ns += dt;
         it_acct_vcpu_bql_slow += dt > 100000;
-        it_acct_wait_hist[it_acct_bucket(dt)][0]++;
-        it_acct_wait_hist[it_acct_bucket(dt)][1] += dt;
-        /* Non-MMIO takers are keyed by call site (file is a literal). */
-        void *key = it_acct_mmio_mr ? it_acct_mmio_mr
-                                    : (void *)((uintptr_t)file ^ ((uintptr_t)line << 48));
-        for (int i = 0; i < 256; i++) {
-            if (!it_acct_mrs[i].mr || it_acct_mrs[i].mr == key) {
-                if (!it_acct_mrs[i].mr) {
-                    /* Copy now: some regions are transient and freed later. */
-                    MemoryRegion *r = it_acct_mmio_mr;
-                    it_acct_mrs[i].name = r ? g_strdup_printf("%s@0x%" PRIx64 "+0x%" PRIx64,
-                        memory_region_name(r) ?: "?", (uint64_t)r->addr,
-                        (uint64_t)int128_get64(r->size)) : g_strdup_printf("%s:%d", file, line);
+        /* Live captures need the totals and slow intervals, not the full
+         * accounting tables or allocations while holding the BQL. */
+        if (qatomic_read(&it_bql_acct_on)) {
+            it_acct_wait_hist[it_acct_bucket(dt)][0]++;
+            it_acct_wait_hist[it_acct_bucket(dt)][1] += dt;
+            /* Non-MMIO takers are keyed by call site (file is a literal). */
+            void *key = it_acct_mmio_mr ? it_acct_mmio_mr
+                                        : (void *)((uintptr_t)file ^ ((uintptr_t)line << 48));
+            for (int i = 0; i < 256; i++) {
+                if (!it_acct_mrs[i].mr || it_acct_mrs[i].mr == key) {
+                    if (!it_acct_mrs[i].mr) {
+                        /* Copy now: some regions are transient and freed later. */
+                        MemoryRegion *r = it_acct_mmio_mr;
+                        it_acct_mrs[i].name = r ? g_strdup_printf("%s@0x%" PRIx64 "+0x%" PRIx64,
+                            memory_region_name(r) ?: "?", (uint64_t)r->addr,
+                            (uint64_t)int128_get64(r->size)) : g_strdup_printf("%s:%d", file, line);
+                    }
+                    it_acct_mrs[i].mr = key;
+                    it_acct_mrs[i].n++;
+                    it_acct_mrs[i].ns += dt;
+                    break;
                 }
-                it_acct_mrs[i].mr = key;
-                it_acct_mrs[i].n++;
-                it_acct_mrs[i].ns += dt;
-                break;
             }
         }
         it_acct_mmio_mr = NULL;
         return;
     }
     bql_lock_fn(&bql, file, line);
-    if (unlikely(it_acct_on)) {
+    if (unlikely(qatomic_read(&it_bql_acct_on) ||
+                 qatomic_read(&it_profile_on))) {
         it_acct_held_since = get_clock();
         it_acct_held_file = file;
         it_acct_held_line = line;
@@ -667,19 +686,25 @@ void bql_unlock(void)
         /* How long threads other than the vCPU hold the BQL, by taker. */
         int64_t dt = get_clock() - it_acct_held_since;
 
+        if (qemu_ios_profile_lock) {
+            qemu_ios_profile_lock(it_acct_held_since, it_acct_held_since + dt,
+                                  false, it_acct_held_file, it_acct_held_line);
+        }
         it_acct_held_since = 0;
-        it_acct_hold_hist[it_acct_bucket(dt)][0]++;
-        it_acct_hold_hist[it_acct_bucket(dt)][1] += dt;
-        for (int i = 0; i < 64; i++) {
-            struct it_acct_holder *h = &it_acct_holders[i];
-            if (!h->file || (h->file == it_acct_held_file && h->line == it_acct_held_line)) {
-                h->file = it_acct_held_file;
-                h->line = it_acct_held_line;
-                h->n++;
-                h->ns += dt;
-                h->long_n += dt >= 100000;
-                h->long_ns += dt >= 100000 ? dt : 0;
-                break;
+        if (qatomic_read(&it_bql_acct_on)) {
+            it_acct_hold_hist[it_acct_bucket(dt)][0]++;
+            it_acct_hold_hist[it_acct_bucket(dt)][1] += dt;
+            for (int i = 0; i < 64; i++) {
+                struct it_acct_holder *h = &it_acct_holders[i];
+                if (!h->file || (h->file == it_acct_held_file && h->line == it_acct_held_line)) {
+                    h->file = it_acct_held_file;
+                    h->line = it_acct_held_line;
+                    h->n++;
+                    h->ns += dt;
+                    h->long_n += dt >= 100000;
+                    h->long_ns += dt >= 100000 ? dt : 0;
+                    break;
+                }
             }
         }
     }

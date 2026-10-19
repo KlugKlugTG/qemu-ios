@@ -1720,6 +1720,15 @@ static void store_pc_exc_ret(DisasContext *s, TCGv_i32 pc)
     tcg_gen_mov_i32(cpu_R[15], pc);
 }
 
+static void gen_cpsr_write_eret_selected(TCGv_i32 cpsr)
+{
+    if (arm_alignment_path_mode() & 2) {
+        gen_helper_cpsr_write_eret_path(tcg_env, cpsr);
+    } else {
+        gen_helper_cpsr_write_eret(tcg_env, cpsr);
+    }
+}
+
 /* Generate a v6 exception return.  Marks both values as dead.  */
 static void gen_rfe(DisasContext *s, TCGv_i32 pc, TCGv_i32 cpsr)
 {
@@ -1729,7 +1738,7 @@ static void gen_rfe(DisasContext *s, TCGv_i32 pc, TCGv_i32 cpsr)
      * be called after storing the new PC.
      */
     translator_io_start(&s->base);
-    gen_helper_cpsr_write_eret(tcg_env, cpsr);
+    gen_cpsr_write_eret_selected(cpsr);
     /* Must exit loop to check un-masked IRQs */
     s->base.is_jmp = DISAS_EXIT;
 }
@@ -5297,7 +5306,7 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
         /* Restore CPSR from SPSR.  */
         tmp = load_cpu_field(spsr);
         translator_io_start(&s->base);
-        gen_helper_cpsr_write_eret(tcg_env, tmp);
+        gen_cpsr_write_eret_selected(tmp);
         /* Must exit loop to check un-masked IRQs */
         s->base.is_jmp = DISAS_EXIT;
     }
@@ -6598,6 +6607,9 @@ static void arm_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     dc->insn = insn;
     dc->base.pc_next = pc + 4;
 
+    if (unlikely(arm_guest_pc_selected(pc))) {
+        gen_helper_guest_pc_trace(tcg_env, tcg_constant_i32(pc));
+    }
     if (unlikely(dc->idle_loop_pc && pc == dc->idle_loop_pc)) {
         gen_update_pc(dc, 0);       /* a halt resumes on this branch */
         gen_helper_idle_loop(tcg_env);
@@ -6687,6 +6699,9 @@ static void thumb_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     dc->base.pc_next = pc;
     dc->insn = insn;
 
+    if (unlikely(arm_guest_pc_selected(dc->pc_curr | 1))) {
+        gen_helper_guest_pc_trace(tcg_env, tcg_constant_i32(dc->pc_curr | 1));
+    }
     if (dc->pstate_il) {
         /*
          * Illegal execution state. This has priority over BTI

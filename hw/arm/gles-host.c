@@ -26,6 +26,10 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/ios-frame-path.h"
+uint64_t qemu_ios_profile_begin(void) __attribute__((weak));
+void qemu_ios_profile_gl(uint64_t, uint32_t, uint32_t) __attribute__((weak));
+extern bool it_profile_on;
 #include "powervr/pvrtc.h"
 #include "migration/blocker.h"
 #include "migration/vmstate.h"
@@ -302,6 +306,14 @@ typedef struct {
 
     /* Which client-state enum turns this array on, e.g. GL_VERTEX_ARRAY. */
     GLenum client_state;
+
+    /* Actual host state, separate from the guest's pointer/enable state.
+     * Scratch contents are refreshed every draw even when its address stays
+     * the same. These fields belong to this array's host context. */
+    bool host_enabled, host_pointer_valid;
+    uint32_t host_size, host_stride;
+    GLenum host_type;
+    const void *host_pointer;
 } GLESArray;
 
 typedef struct {
@@ -393,6 +405,7 @@ typedef struct {
      */
     GLESArray texcoord[GLES_MAX_TEXUNITS];
     unsigned client_active_unit;    /* glClientActiveTexture, as an index */
+    unsigned host_client_active_unit;
     GLESArray color;
     GLESArray normal;
     /* GL_POINT_SIZE_ARRAY_OES: per-point sizes for point sprites. Desktop GL
@@ -508,9 +521,12 @@ typedef struct {
      */
     uint64_t calls;
     uint64_t t_call, t_fetch, t_err, t_present;
+    uint64_t t_arrays, array_binds, array_pointers, array_enables, array_units;
     uint64_t last_report_calls;
     uint64_t last_report_t_call, last_report_t_fetch;
     uint64_t last_report_t_err, last_report_t_present;
+    uint64_t last_array_ns, last_array_binds, last_array_pointers;
+    uint64_t last_array_enables, last_array_units;
 
     /*
      * Frame-to-frame interval over the reporting burst. A mean of 60 fps is
@@ -641,6 +657,16 @@ static uint64_t gles_prof_call_ns, gles_prof_present_ns;
  */
 static int gles_prof = -1;
 static int gles_strict = -1;
+/* LT_GLES_ARRAY_CACHE=off restores per-draw enable/pointer/check/disable for
+ * same-binary A/B runs. Strict checks still guard every changed pointer. */
+static bool gles_array_cache;
+/* Focused wall timings, independent of per-draw and live capture timers. */
+static bool gles_context_prof;
+static bool gles_present_prof;
+static struct {
+    uint64_t count, switches, init, current, dispatch, max_current, max_dispatch;
+} gles_context_times[3];
+static uint64_t gles_context_begin, gles_context_next;
 /*
  * IT_GLES_SWIZZLE=1 restores the old readback -- RGBA plus a per-pixel byte
  * swap -- and =2 alternates between old and new every 300 frames. Alternating
@@ -673,6 +699,15 @@ static void gles_read_switches(void)
     gles_prof = v ? atoi(v) : 0;
     v = getenv("IT_GLES_STRICT");
     gles_strict = v ? atoi(v) : 1;
+    v = getenv("LT_GLES_ARRAY_CACHE");
+    gles_array_cache = !v || (strcmp(v, "off") && strcmp(v, "0"));
+    v = getenv("LT_GLES_CONTEXT_PROF");
+    gles_context_prof = v && strcmp(v, "off") && strcmp(v, "0");
+    v = getenv("LT_GLES_PRESENT_PROF");
+    gles_present_prof = v && strcmp(v, "off") && strcmp(v, "0");
+    fprintf(stderr, "[gles] client-array-cache=%s strict=%d present-prof=%s\n",
+            gles_array_cache ? "on" : "off", gles_strict,
+            gles_present_prof ? "on" : "off");
     v = getenv("IT_GLES_SWIZZLE");
     gles_swizzle_mode = v ? atoi(v) : 0;
     gles_swizzle = (gles_swizzle_mode == 1);
@@ -1235,7 +1270,7 @@ static bool gles_needs_widen(GLenum client_state, uint32_t type)
  * to copy the whole span including the gaps, because the host GL will walk it
  * with the same stride.
  *
- * Returns true if the array was bound and the caller must disable it again.
+ * Returns true if the array was prepared for this draw.
  */
 static const char *gles_array_name(GLenum client_state)
 {
@@ -1281,6 +1316,28 @@ static bool gles_pointer_ok(GLenum client_state, uint32_t size, GLenum type)
         return float_like || wide_int || type == GL_BYTE;
     default:
         return false;
+    }
+}
+
+static void gles_client_active(unsigned unit)
+{
+    if (!gles_array_cache || gh.host_client_active_unit != unit) {
+        glClientActiveTexture(GL_TEXTURE0 + unit);
+        gh.host_client_active_unit = unit;
+        if (gles_prof) gh.array_units++;
+    }
+}
+
+static void gles_array_enable(GLESArray *a, bool enabled)
+{
+    if (!gles_array_cache || a->host_enabled != enabled) {
+        if (enabled) {
+            glEnableClientState(a->client_state);
+        } else {
+            glDisableClientState(a->client_state);
+        }
+        a->host_enabled = enabled;
+        if (gles_prof) gh.array_enables++;
     }
 }
 
@@ -1394,7 +1451,14 @@ static bool gles_bind_array(CPUState *cpu, GLESArray *a, uint32_t first,
         return false;
     }
 
-    glEnableClientState(a->client_state);
+    gles_array_enable(a, true);
+    if (gles_array_cache && a->host_pointer_valid &&
+        a->host_size == a->size && a->host_type == type &&
+        a->host_stride == stride && a->host_pointer == data) {
+        return true;
+    }
+    a->host_pointer_valid = false;
+    if (gles_prof) gh.array_pointers++;
     if (gles_strict) {
         uint64_t t0 = gles_t();
         while (glGetError() != GL_NO_ERROR) {
@@ -1417,7 +1481,7 @@ static bool gles_bind_array(CPUState *cpu, GLESArray *a, uint32_t first,
         glNormalPointer(type, stride, data);
         break;
     default:
-        glDisableClientState(a->client_state);
+        gles_array_enable(a, false);
         return false;
     }
 
@@ -1442,21 +1506,19 @@ static bool gles_bind_array(CPUState *cpu, GLESArray *a, uint32_t first,
                         gles_array_name(a->client_state),
                         a->size, type, stride, e);
             }
-            glDisableClientState(a->client_state);
+            gles_array_enable(a, false);
             gles_debug_mark();
             return false;
         }
     }
+    a->host_pointer_valid = true;
+    a->host_size = a->size;
+    a->host_type = type;
+    a->host_stride = stride;
+    a->host_pointer = data;
     return true;
 }
 
-/*
- * Bind every enabled client array for a draw covering elements [first, first+count).
- *
- * Returns a mask of which arrays were bound so the caller can unbind exactly
- * those. Leaving an array enabled across draws would make the next draw walk a
- * scratch buffer that has since been reallocated for a different array.
- */
 /* Which texture units have a coordinate array enabled, as a bitmask. A draw
  * with texturing on but 0x00 here samples one texel for every fragment, which
  * looks like flat untextured color rather than like a missing array. */
@@ -1632,16 +1694,23 @@ static void gles_draw_tex(float x, float y, float z, float w, float h)
 #endif
 }
 
+/* Prepare every array before a host draw, including disabling any array that
+ * is no longer enabled or could not be fetched. No host draw may use stale
+ * scratch after a realloc, failed guest read, or buffer deletion. DrawTex's
+ * native helper saves and restores the host arrays and client-active unit. */
 static uint32_t gles_bind_all_arrays(CPUState *cpu, uint32_t first,
                                      uint32_t count)
 {
     GLESArray *arrays[] = { &gh.vertex, &gh.color, &gh.normal };
     uint32_t bound = 0;
     unsigned i;
+    uint64_t t0 = gles_t();
 
     for (i = 0; i < ARRAY_SIZE(arrays); i++) {
         if (gles_bind_array(cpu, arrays[i], first, count)) {
             bound |= 1u << i;
+        } else if (gles_array_cache) {
+            gles_array_enable(arrays[i], false);
         }
     }
 
@@ -1653,17 +1722,24 @@ static uint32_t gles_bind_all_arrays(CPUState *cpu, uint32_t first,
      * to change.
      */
     for (i = 0; i < GLES_MAX_TEXUNITS; i++) {
-        if (!gh.texcoord[i].enabled) {
+        if (!gh.texcoord[i].enabled &&
+            (!gles_array_cache || !gh.texcoord[i].host_enabled)) {
             continue;
         }
-        glClientActiveTexture(GL_TEXTURE0 + i);
+        gles_client_active(i);
         if (gles_bind_array(cpu, &gh.texcoord[i], first, count)) {
             bound |= 1u << (GLES_TEXCOORD_BIT + i);
+        } else if (gles_array_cache) {
+            gles_array_enable(&gh.texcoord[i], false);
         }
     }
-    glClientActiveTexture(GL_TEXTURE0 + gh.client_active_unit);
+    gles_client_active(gh.client_active_unit);
     if (gles_guest_fault_pending()) {
         bound &= ~1u;       /* an array page is being faulted in: no draw yet */
+    }
+    if (gles_prof) {
+        gh.t_arrays += gles_t() - t0;
+        gh.array_binds++;
     }
     return bound;
 }
@@ -2776,19 +2852,25 @@ static void gles_unbind_arrays(uint32_t bound)
 {
     GLESArray *arrays[] = { &gh.vertex, &gh.color, &gh.normal };
     unsigned i;
+    uint64_t t0;
 
+    if (gles_array_cache) {
+        return; /* Next draw prepares every array before the driver uses it. */
+    }
+    t0 = gles_t();
     for (i = 0; i < ARRAY_SIZE(arrays); i++) {
         if (bound & (1u << i)) {
-            glDisableClientState(arrays[i]->client_state);
+            gles_array_enable(arrays[i], false);
         }
     }
     for (i = 0; i < GLES_MAX_TEXUNITS; i++) {
         if (bound & (1u << (GLES_TEXCOORD_BIT + i))) {
-            glClientActiveTexture(GL_TEXTURE0 + i);
-            glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+            gles_client_active(i);
+            gles_array_enable(&gh.texcoord[i], false);
         }
     }
-    glClientActiveTexture(GL_TEXTURE0 + gh.client_active_unit);
+    gles_client_active(gh.client_active_unit);
+    gh.t_arrays += gles_t() - t0;
 }
 
 /*
@@ -3559,6 +3641,20 @@ static void gles_report_progress(void)
         gh.last_report_t_fetch = gh.t_fetch;
         gh.last_report_t_err = gh.t_err;
         gh.last_report_t_present = gh.t_present;
+        uint64_t binds = gh.array_binds - gh.last_array_binds;
+        if (binds) {
+            fprintf(stderr, "[gles]   arrays: %" PRIu64 " draws, %.3f us/draw; "
+                    "host pointers %.3f enables %.3f units %.3f per draw\n",
+                    binds, (gh.t_arrays - gh.last_array_ns) / (double)binds / 1000,
+                    (gh.array_pointers - gh.last_array_pointers) / (double)binds,
+                    (gh.array_enables - gh.last_array_enables) / (double)binds,
+                    (gh.array_units - gh.last_array_units) / (double)binds);
+        }
+        gh.last_array_ns = gh.t_arrays;
+        gh.last_array_binds = gh.array_binds;
+        gh.last_array_pointers = gh.array_pointers;
+        gh.last_array_enables = gh.array_enables;
+        gh.last_array_units = gh.array_units;
     }
     /*
      * The state dump and the per-draw trace are the two tools that answer
@@ -3613,9 +3709,163 @@ static void gles_report_progress(void)
  * nowhere, and silently returning 0 would make a black screen look like a
  * successful present.
  */
-static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride,
+enum {
+    PRESENT_PREP, PRESENT_ACQUIRE, PRESENT_READBACK, PRESENT_CONVERT,
+    PRESENT_COPY, PRESENT_TAIL, PRESENT_PHASES
+};
+
+typedef struct GLESPresentSample {
+    uint64_t begin, cursor, ns[PRESENT_PHASES];
+    unsigned path; /* 0 invalid, 1 mapped surface, 2 readback, 3 test pattern */
+} GLESPresentSample;
+
+/* No clocks when disabled; never sample inside the row loop. Acquire includes
+ * GPU completion and mapping. Copy includes per-row platform byte swapping.
+ * These are wall times, including descheduling, not exclusive CPU costs. */
+static void gles_present_mark(GLESPresentSample *s, unsigned phase)
+{
+    if (s) {
+        uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        s->ns[phase] += now - s->cursor;
+        s->cursor = now;
+    }
+}
+
+static void gles_present_record(GLESPresentSample *s, int result)
+{
+    static struct {
+        uint64_t calls, errors, retries, total, max_total, max_end;
+        uint64_t ns[PRESENT_PHASES], max_ns[PRESENT_PHASES];
+        uint64_t worst_ns[PRESENT_PHASES];
+    } paths[4];
+    static uint64_t begin;
+    static const char *const names[] = {
+        "invalid", "mapped", "readback", "test"
+    };
+
+    gles_present_mark(s, PRESENT_TAIL);
+    if (!begin) {
+        begin = s->begin;
+    }
+    unsigned path = s->path;
+    uint64_t total = s->cursor - s->begin;
+    paths[path].calls++;
+    paths[path].errors += result != 0;
+    paths[path].retries += result != 0 && gles_guest_fault_pending();
+    paths[path].total += total;
+    if (total > paths[path].max_total) {
+        paths[path].max_total = total;
+        paths[path].max_end = s->cursor;
+        memcpy(paths[path].worst_ns, s->ns, sizeof(s->ns));
+    }
+    for (unsigned i = 0; i < PRESENT_PHASES; i++) {
+        paths[path].ns[i] += s->ns[i];
+        paths[path].max_ns[i] = MAX(paths[path].max_ns[i], s->ns[i]);
+    }
+    if (s->cursor - begin < 5000000000ULL) {
+        return;
+    }
+    for (unsigned p = 0; p < ARRAY_SIZE(paths); p++) {
+        if (!paths[p].calls) {
+            continue;
+        }
+        fprintf(stderr, "[gles-present] path=%s begin-ns %" PRIu64
+                " end-ns %" PRIu64 " calls %" PRIu64 " errors %" PRIu64
+                " retries %" PRIu64 " total-ns %" PRIu64
+                " max-total-ns %" PRIu64 " max-end-ns %" PRIu64,
+                names[p], begin, s->cursor, paths[p].calls, paths[p].errors,
+                paths[p].retries, paths[p].total, paths[p].max_total,
+                paths[p].max_end);
+        static const char *const phases[] = {
+            "prep", "acquire", "readback", "convert", "copy", "tail"
+        };
+        for (unsigned i = 0; i < PRESENT_PHASES; i++) {
+            fprintf(stderr, " %s-ns %" PRIu64 " max-%s-ns %" PRIu64
+                    " worst-%s-ns %" PRIu64,
+                    phases[i], paths[p].ns[i], phases[i], paths[p].max_ns[i],
+                    phases[i], paths[p].worst_ns[i]);
+        }
+        fputc('\n', stderr);
+    }
+    fprintf(stderr, "[gles-present] end begin-ns %" PRIu64
+            " end-ns %" PRIu64 "\n", begin, s->cursor);
+    memset(paths, 0, sizeof(paths));
+    begin = s->cursor;
+}
+
+/*
+ * Optional physical backing identity, independent of user profiling. Resolve
+ * every page of the destination span while this vCPU is still in the caller's
+ * address space. A debug walk does not fault pages in. The actual present keeps
+ * its original permission/fault handling; only successful presents may be
+ * joined with this observation. A failed/noncontiguous mapping stays unknown.
+ * No guest execution occurs between this observation and the host copy unless
+ * the present faults and returns an error, which invalidates that attempt.
+ */
+static void gles_trace_surface_mapping(CPUState *cpu, uint32_t ctx,
+                                        uint32_t base, uint32_t stride,
+                                        uint32_t width, uint32_t height,
+                                        uint32_t format)
+{
+    static gsize initialized;
+    static bool enabled;
+    uint64_t span = 0, physical = UINT64_MAX;
+    uint32_t bpp = format == GLES_SURFACE_RGB565 ? 2 : 4;
+
+    if (g_once_init_enter(&initialized)) {
+        const char *mode = getenv("LT_GLES_SURFACE_PATH");
+        const char *path = getenv("LT_FRAME_PATH");
+        bool requested = mode && !strcmp(mode, "on");
+
+        enabled = requested && path && *path && strcmp(path, "off") &&
+                  strcmp(path, "0");
+        fprintf(stderr, "[gles-surface-path] requested=%s configured=%s\n",
+                requested ? "on" : "off", enabled ? "on" : "off");
+        g_once_init_leave(&initialized, 1);
+    }
+    if (!enabled) {
+        return;
+    }
+    if (base && width && height && (uint64_t)width * bpp <= 16 * 1024 * 1024 &&
+        stride >= (uint64_t)width * bpp &&
+        height - 1 <= (16 * 1024 * 1024 - (uint64_t)width * bpp) / stride &&
+        (format == GLES_SURFACE_BGRA32 || format == GLES_SURFACE_RGBA32 ||
+         format == GLES_SURFACE_RGB565)) {
+        span = (uint64_t)(height - 1) * stride + (uint64_t)width * bpp;
+    }
+    ios_frame_path(IOS_FP_SURFACE_MAP_BEGIN, ctx, base, span);
+    if (span && span <= 16 * 1024 * 1024 &&
+        (uint64_t)base + span <= (UINT64_C(1) << 32)) {
+        uint64_t first = base & TARGET_PAGE_MASK;
+        uint64_t last = ((uint64_t)base + span - 1) & TARGET_PAGE_MASK;
+        hwaddr first_pa = (hwaddr)-1;
+        bool contiguous = true;
+
+        for (uint64_t va = first; va <= last; va += TARGET_PAGE_SIZE) {
+            MemTxAttrs attrs = {};
+            hwaddr pa = cpu_get_phys_page_attrs_debug(cpu, va, &attrs);
+
+            if (pa == (hwaddr)-1) {
+                contiguous = false;
+                break;
+            }
+            if (va == first) {
+                first_pa = pa;
+            } else if (pa != first_pa + (va - first)) {
+                contiguous = false;
+                break;
+            }
+        }
+        if (contiguous) {
+            physical = first_pa + (base - first);
+        }
+    }
+    ios_frame_path(IOS_FP_SURFACE_MAP_END, ctx, base, physical);
+}
+
+static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t stride,
                                    uint32_t width, uint32_t height,
-                                   uint32_t format)
+                                   uint32_t format, GLESPresentSample *sample)
 {
     uint32_t y;
     /* Bytes per pixel of the DESTINATION surface. CA picks this from the
@@ -3702,6 +3952,8 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
         const uint8_t *frame = NULL;
         size_t fstride = 0;
 
+        gles_present_mark(sample, PRESENT_PREP);
+
         /*
          * The frame, from the render target itself where the host allows it.
          *
@@ -3716,7 +3968,11 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
         if (bpp == 4 && bgra && !gles_swizzle) {
             frame = gles_frame_lock(&fstride);
         }
+        gles_present_mark(sample, PRESENT_ACQUIRE);
         if (frame) {
+            if (sample) {
+                sample->path = 1;
+            }
             for (y = 0; y < rh; y++) {
                 /* GL's origin is bottom-left, the surface's is top-left. */
                 const uint8_t *src = frame + (size_t)(rh - 1 - y) * fstride;
@@ -3729,10 +3985,12 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                         fprintf(stderr, "[gles] present-surface: write failed at "
                                 "row %u (guest 0x%08x)\n", y, base + y * stride);
                     }
+                    gles_present_mark(sample, PRESENT_COPY);
                     gles_platform_frame_unlock();
                     return -1;
                 }
             }
+            gles_present_mark(sample, PRESENT_COPY);
             gles_report_frame_pixels(frame, fstride, rw, rh, bpp, bgra, base,
                                      "surface-IOSurface");
             gles_dump_frame(frame, fstride, rw, rh, bgra);
@@ -3761,6 +4019,9 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                 t = e ? atoi(e) : 0;
             }
             if (t) {
+                if (sample) {
+                    sample->path = 3;
+                }
                 size_t i, n = (size_t)rw * rh;
                 uint16_t *p16 = (uint16_t *)gh.readback;
 
@@ -3782,6 +4043,10 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
          * offscreen target the guest left bound. */
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, gh.fbo);
         glFinish();
+        if (sample) {
+            sample->path = 2;
+        }
+        gles_present_mark(sample, PRESENT_ACQUIRE);
 
         /*
          * Ask GL for the byte order the destination wants instead of reading
@@ -3806,6 +4071,7 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
             glReadPixels(0, 0, rw, rh, GL_RGBA, GL_UNSIGNED_BYTE, gh.readback);
         }
         glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
+        gles_present_mark(sample, PRESENT_READBACK);
         /*
          * The old path, kept switchable so the two can be compared inside one
          * run. This machine never goes quiet -- eight emulators at once while
@@ -3823,6 +4089,7 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                 p[2] = r;
             }
         }
+        gles_present_mark(sample, PRESENT_CONVERT);
 
         for (y = 0; y < rh; y++) {
             /* GL's origin is bottom-left, the surface's is top-left. Only the
@@ -3837,9 +4104,11 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                     fprintf(stderr, "[gles] present-surface: write failed at row %u "
                             "(guest 0x%08x)\n", y, base + y * stride);
                 }
+                gles_present_mark(sample, PRESENT_COPY);
                 return -1;
             }
         }
+        gles_present_mark(sample, PRESENT_COPY);
         gles_report_frame_pixels(gh.readback, (size_t)rw * bpp, rw, rh,
                                  bpp, bgra, base, "surface-readback");
         /* The dump writes 32-bit pixels; a 565 frame is not its format. */
@@ -3856,6 +4125,22 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
     gles_note_frame_gap();
     gles_report_progress();
     return 0;
+}
+
+static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride,
+                                   uint32_t width, uint32_t height,
+                                   uint32_t format)
+{
+    if (!gles_present_prof) {
+        return gles_present_to_surface_impl(cpu, base, stride, width, height,
+                                            format, NULL);
+    }
+    GLESPresentSample sample = { 0 };
+    sample.begin = sample.cursor = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    int result = gles_present_to_surface_impl(cpu, base, stride, width, height,
+                                              format, &sample);
+    gles_present_record(&sample, result);
+    return result;
 }
 
 /* ----------------------------------------------------------------- dispatch */
@@ -5774,7 +6059,10 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
                         gh.presents);
             }
         }
+        gles_trace_surface_mapping(cpu, ctx, a[0], a[1], a[2], a[3], a[4]);
+        ios_frame_path(IOS_FP_PRESENT_BEGIN, ctx, a[0], ((uint64_t)a[2] << 32) | a[3]);
         int64_t r = gles_present_to_surface(cpu, a[0], a[1], a[2], a[3], a[4]);
+        ios_frame_path(IOS_FP_PRESENT_END, ctx, a[0], r);
         {
             uint64_t dt = gles_t() - t0;
             gh.t_present += dt;
@@ -5891,11 +6179,8 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         if (!gles_refresh_surfaces(cpu)) return -1;
         bound = gles_bind_all_arrays(cpu, first, count);
         if (!(bound & 1u)) {                    /* no positions -> no draw */
-            /* Unbind the arrays that DID bind: leaving e.g. GL_COLOR_ARRAY
-             * enabled on the host, pointing into scratch that a later draw
-             * reallocs, is the stale-pointer host crash this file warns about
-             * (gles_bind_array's "loaded gun" note) -- reintroduced on the
-             * error path if we return without unbinding. */
+            /* The uncached path cleans up here; the cached path prepares
+             * every array again before it allows another host draw. */
             gles_unbind_arrays(bound);
             return -1;
         }
@@ -6843,7 +7128,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
             u = GLES_MAX_TEXUNITS - 1;
         }
         gh.client_active_unit = u;
-        glClientActiveTexture(GL_TEXTURE0 + u);
+        gles_client_active(u);
         return 0;
     }
 
@@ -7796,11 +8081,14 @@ void gles_host_reset(void)
 #endif
 }
 
-int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
+static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
                        uint32_t argc, const uint32_t *a)
 {
     uint64_t t0;
     int64_t r;
+    GLESHost *previous = gh_current;
+    int stage_slot = -1;
+    uint64_t stage_begin = 0, stage_init = 0, stage_current = 0;
 
     if (!gles_allowed) {
         return -1;
@@ -7824,14 +8112,32 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
     gh_current = state ? state : &gh_legacy;
 #endif
     gles_read_switches();
+    if (gles_context_prof) {
+        stage_slot = slot == GLES_SLOT_VIEWPORT ? 0 :
+                     slot == GLES_SLOT_BIND_FRAMEBUFFER ? 1 :
+                     slot == GLES_OP_PRESENT_SURFACE ? 2 : -1;
+        if (stage_slot >= 0) {
+            stage_begin = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+            if (!gles_context_next) {
+                gles_context_begin = stage_begin;
+                gles_context_next = stage_begin + 5000000000ULL;
+            }
+        }
+    }
     if (!gles_host_init()) {
         gles_refuse("host:no-context");
         return -1;
     }
 
+    if (stage_slot >= 0) {
+        stage_init = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
     if (!gles_platform_make_current()) {
         gles_refuse("host:make-current");
         return -1;
+    }
+    if (stage_slot >= 0) {
+        stage_current = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     }
 
     gh.calls++;
@@ -7864,6 +8170,38 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
         }
     } else {
         r = gles_host_call_1(cpu, slot, ctx, argc, a);
+    }
+    if (stage_slot >= 0) {
+        uint64_t end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        uint64_t current_ns = stage_current - stage_init;
+        uint64_t dispatch_ns = end - stage_current;
+        gles_context_times[stage_slot].count++;
+        gles_context_times[stage_slot].switches += previous != gh_current;
+        gles_context_times[stage_slot].init += stage_init - stage_begin;
+        gles_context_times[stage_slot].current += current_ns;
+        gles_context_times[stage_slot].dispatch += dispatch_ns;
+        gles_context_times[stage_slot].max_current = MAX(
+            gles_context_times[stage_slot].max_current, current_ns);
+        gles_context_times[stage_slot].max_dispatch = MAX(
+            gles_context_times[stage_slot].max_dispatch, dispatch_ns);
+        if (end >= gles_context_next) {
+            static const char *names[] = { "viewport", "bind-fbo", "present-surface" };
+            for (int i = 0; i < G_N_ELEMENTS(gles_context_times); i++) {
+                fprintf(stderr, "[gles-context] %s n=%" PRIu64 " switches=%" PRIu64
+                        " init-ns=%" PRIu64 " current-ns=%" PRIu64
+                        " dispatch-ns=%" PRIu64 " max-current-ns=%" PRIu64
+                        " max-dispatch-ns=%" PRIu64 "\n", names[i],
+                        gles_context_times[i].count, gles_context_times[i].switches,
+                        gles_context_times[i].init, gles_context_times[i].current,
+                        gles_context_times[i].dispatch, gles_context_times[i].max_current,
+                        gles_context_times[i].max_dispatch);
+            }
+            fprintf(stderr, "[gles-context] end begin-ns=%" PRIu64
+                    " end-ns=%" PRIu64 "\n", gles_context_begin, end);
+            memset(gles_context_times, 0, sizeof(gles_context_times));
+            gles_context_begin = end;
+            gles_context_next = end + 5000000000ULL;
+        }
     }
     {
         /* IT_GLES_CALL_TRACE=N: the first N calls, with arguments and result. */
@@ -7931,6 +8269,18 @@ int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
         qatomic_set(&gles_prof_call_ns, gles_prof_call_ns + dt);
     }
     return r;
+}
+
+int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
+                       uint32_t argc, const uint32_t *a)
+{
+    uint64_t start = qatomic_read(&it_profile_on) && qemu_ios_profile_begin ?
+                     qemu_ios_profile_begin() : 0;
+    int64_t result = gles_host_call_impl(cpu, slot, ctx, argc, a);
+    if (start) {
+        qemu_ios_profile_gl(start, slot, ctx);
+    }
+    return result;
 }
 
 void gles_host_stats(uint64_t *draws, uint64_t *presents)

@@ -1139,14 +1139,17 @@ static void physical_memory_clear_dirty_range(ram_addr_t addr, ram_addr_t length
     physical_memory_test_and_clear_dirty(addr, length, DIRTY_MEMORY_CODE, NULL);
 }
 
-DirtyBitmapSnapshot *physical_memory_snapshot_and_clear_dirty
-    (MemoryRegion *mr, hwaddr offset, hwaddr length, unsigned client)
+static DirtyBitmapSnapshot *physical_memory_snapshot_and_clear_dirty_impl
+    (MemoryRegion *mr, hwaddr offset, hwaddr length, unsigned client,
+     DirtySnapshotTimings *timings)
 {
     DirtyMemoryBlocks *blocks;
     ram_addr_t start, first, last;
     unsigned long align = 1UL << (TARGET_PAGE_BITS + BITS_PER_LEVEL);
     DirtyBitmapSnapshot *snap;
     unsigned long page, end, dest;
+    uint64_t begin = timings ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
+    uint64_t bitmap_end, reset_end, clear_end;
 
     start = memory_region_get_ram_addr(mr);
     /* We know we're only called for RAM MemoryRegions */
@@ -1164,6 +1167,12 @@ DirtyBitmapSnapshot *physical_memory_snapshot_and_clear_dirty
     page = first >> TARGET_PAGE_BITS;
     end  = last  >> TARGET_PAGE_BITS;
     dest = 0;
+
+    if (timings) {
+        uint64_t now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+        timings->setup_ns = now - begin;
+        begin = now;
+    }
 
     WITH_RCU_READ_LOCK_GUARD() {
         blocks = qatomic_rcu_read(&ram_list.dirty_memory[client]);
@@ -1186,11 +1195,43 @@ DirtyBitmapSnapshot *physical_memory_snapshot_and_clear_dirty
         }
     }
 
+    bitmap_end = timings ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
     physical_memory_dirty_bits_cleared(start, length);
+    reset_end = timings ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
 
     memory_region_clear_dirty_bitmap(mr, offset, length);
+    clear_end = timings ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
+
+    if (timings) {
+        unsigned long first_page = (start - first) >> TARGET_PAGE_BITS;
+        unsigned long last_page =
+            TARGET_PAGE_ALIGN(start + length - first) >> TARGET_PAGE_BITS;
+
+        timings->bitmap_ns = bitmap_end - begin;
+        timings->reset_ns = reset_end - bitmap_end;
+        timings->clear_ns = clear_end - reset_end;
+        /* Counting is outside the measured stages. Never skip a reset or the
+         * subsequent TCG barrier, including when this count is zero. */
+        timings->dirty_pages = bitmap_count_one_with_offset(
+            snap->dirty, first_page, last_page - first_page);
+    }
 
     return snap;
+}
+
+DirtyBitmapSnapshot *physical_memory_snapshot_and_clear_dirty(
+    MemoryRegion *mr, hwaddr offset, hwaddr length, unsigned client)
+{
+    return physical_memory_snapshot_and_clear_dirty_impl(mr, offset, length,
+                                                         client, NULL);
+}
+
+DirtyBitmapSnapshot *physical_memory_snapshot_and_clear_dirty_profiled(
+    MemoryRegion *mr, hwaddr offset, hwaddr length, unsigned client,
+    DirtySnapshotTimings *timings)
+{
+    return physical_memory_snapshot_and_clear_dirty_impl(mr, offset, length,
+                                                         client, timings);
 }
 
 bool physical_memory_snapshot_get_dirty(DirtyBitmapSnapshot *snap,

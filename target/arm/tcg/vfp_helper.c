@@ -24,6 +24,11 @@
 #include "cpu-features.h"
 #include "fpu/softfloat.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
+#include "qemu/ios-frame-path.h"
+#include "exec/translation-block.h"
+#include "exec/target_page.h"
+#include "tcg/tcg.h"
 
 /*
  * Set the float_status behaviour to match the Arm defaults:
@@ -293,6 +298,73 @@ VFP_BINOP(max)
 VFP_BINOP(minnum)
 VFP_BINOP(maxnum)
 #undef VFP_BINOP
+
+/* Diagnostic helpers are selected only by LT_AUDIO_PATH_PROF at translation.
+ * Sample each operation every 1021 calls (prime to avoid short-vector aliasing).
+ * Only CPU 0 owns these counters. Clocks cover the original operation alone;
+ * operand classification and read-only PC unwind occur afterward. No FP status
+ * or guest exception behavior is changed. Wall timings include descheduling.
+ */
+static inline QEMU_ALWAYS_INLINE
+float32 vfp_audio_path(CPUARMState *env, float32 a, float32 b,
+                       float_status *fpst, unsigned op, uintptr_t retaddr)
+{
+    static uint64_t calls[3];
+    CPUState *cs = env_cpu(env);
+    bool sample = cs->cpu_index == 0 && ++calls[op] % 1021 == 0;
+    uint64_t begin = 0, elapsed, data[INSN_START_WORDS];
+    uint32_t meta = 0, pc = UINT32_MAX;
+    float32 result;
+
+    if (sample) {
+        meta = op | (get_float_exception_flags(fpst) << 2) |
+               (get_float_rounding_mode(fpst) << 18) |
+               (get_flush_inputs_to_zero(fpst) << 22) |
+               (get_flush_to_zero(fpst) << 23);
+        begin = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    }
+    switch (op) {
+    case 0: result = float32_add(a, b, fpst); break;
+    case 1: result = float32_sub(a, b, fpst); break;
+    case 2: result = float32_mul(a, b, fpst); break;
+    default: g_assert_not_reached();
+    }
+    if (sample) {
+        elapsed = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - begin;
+        TranslationBlock *tb = tcg_tb_lookup(retaddr);
+
+        if (tb && cpu_unwind_state_data(cs, retaddr, data)) {
+            pc = data[0];
+            if (tb_cflags(tb) & CF_PCREL) {
+                pc |= env->regs[15] & TARGET_PAGE_MASK;
+            }
+        }
+        ios_frame_path(IOS_FP_VFP_SAMPLE, ((uint64_t)meta << 32) | pc,
+                       ((uint64_t)float32_val(a) << 32) | float32_val(b), elapsed);
+        ios_frame_path(IOS_FP_VFP_RESULT, pc,
+                       ((uint64_t)get_float_exception_flags(fpst) << 32) |
+                       float32_val(result), begin);
+    }
+    return result;
+}
+
+float32 HELPER(vfp_adds_path)(CPUARMState *env, float32 a, float32 b,
+                             float_status *fpst)
+{
+    return vfp_audio_path(env, a, b, fpst, 0, GETPC());
+}
+
+float32 HELPER(vfp_subs_path)(CPUARMState *env, float32 a, float32 b,
+                             float_status *fpst)
+{
+    return vfp_audio_path(env, a, b, fpst, 1, GETPC());
+}
+
+float32 HELPER(vfp_muls_path)(CPUARMState *env, float32 a, float32 b,
+                             float_status *fpst)
+{
+    return vfp_audio_path(env, a, b, fpst, 2, GETPC());
+}
 
 dh_ctype_f16 VFP_HELPER(sqrt, h)(dh_ctype_f16 a, float_status *fpst)
 {

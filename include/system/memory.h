@@ -2119,6 +2119,18 @@ DirtyBitmapSnapshot *memory_region_snapshot_and_clear_dirty(MemoryRegion *mr,
                                                             hwaddr size,
                                                             unsigned client);
 
+/* Focused wall-time diagnostic, used only with LT_LCD_SNAPSHOT_STAGES. All
+ * operations and ordering match the ordinary snapshot. Timings include host
+ * descheduling and timer overhead. Dirty counts cover the requested pages. */
+typedef struct DirtySnapshotTimings {
+    uint64_t presync_ns, setup_ns, bitmap_ns, reset_ns, clear_ns, barrier_ns;
+    uint64_t dirty_pages;
+} DirtySnapshotTimings;
+
+DirtyBitmapSnapshot *memory_region_snapshot_and_clear_dirty_profiled(
+    MemoryRegion *mr, hwaddr addr, hwaddr size, unsigned client,
+    DirtySnapshotTimings *timings);
+
 /**
  * memory_region_snapshot_get_dirty: Check whether a range of bytes is dirty
  *                                   in the specified dirty bitmap snapshot.

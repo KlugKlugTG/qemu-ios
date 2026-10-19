@@ -48,6 +48,11 @@ DirtyBitmapSnapshot *
 physical_memory_snapshot_and_clear_dirty(MemoryRegion *mr, hwaddr offset,
                                          hwaddr length, unsigned client);
 
+struct DirtySnapshotTimings;
+DirtyBitmapSnapshot *physical_memory_snapshot_and_clear_dirty_profiled(
+    MemoryRegion *mr, hwaddr offset, hwaddr length, unsigned client,
+    struct DirtySnapshotTimings *timings);
+
 bool physical_memory_snapshot_get_dirty(DirtyBitmapSnapshot *snap,
                                         ram_addr_t start,
                                         ram_addr_t length);

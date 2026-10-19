@@ -87,6 +87,7 @@ static void tcg_accel_instance_init(Object *obj)
 bool one_insn_per_tb;
 bool tcg_cross_page_chain;
 bool tcg_indirect_cache;
+bool tcg_inline_tb_lookup;
 
 #ifndef CONFIG_USER_ONLY
 static void tcg_vm_change_state(void *opaque, bool running, RunState state)
@@ -109,6 +110,23 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
 {
     TCGState *s = TCG_STATE(as);
     unsigned max_threads = 1;
+
+    const char *inline_lookup = getenv("LT_TB_LOOKUP_INLINE");
+    tcg_inline_tb_lookup = inline_lookup && strcmp(inline_lookup, "off") &&
+                           strcmp(inline_lookup, "0");
+    if (tcg_inline_tb_lookup) {
+        fprintf(stderr, "[tcg] inline-tb-lookup=on (accounting uses legacy path)\n");
+    }
+
+    const char *indirect_l2 = getenv("LT_IBTC_L2");
+    const char *indirect_prof = getenv("LT_IBTC_L2_PROF");
+    bool l2_on = indirect_l2 && strcmp(indirect_l2, "off") &&
+                 strcmp(indirect_l2, "0");
+    bool l2_prof = indirect_prof && strcmp(indirect_prof, "off") &&
+                   strcmp(indirect_prof, "0");
+    /* The generated site cache and this side table share single-vCPU rules. */
+    bool single_vcpu = ms->smp.cpus == 1 && ms->smp.max_cpus == 1;
+    tcg_indirect_l2_init(l2_on && single_vcpu, l2_prof && single_vcpu);
 
 #ifndef CONFIG_USER_ONLY
     CPUClass *cc = CPU_CLASS(object_class_by_name(target_cpu_type()));
