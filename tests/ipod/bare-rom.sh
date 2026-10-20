@@ -1,8 +1,9 @@
-# Shared by the bare-metal TCG checks (tcg-asid-test.sh, tcg-psr-test.sh), sourced after setting ROOT, SRC (the
-# program) and CHECKS (one line per check: its letters, then what it checks). `boards` assembles SRC for the iPod
-# touch 2G (ARM1176, RAM at 0x08000000) and the iPad (Cortex-A8, RAM at 0x40000000), runs it as each one's bootrom,
-# prints PASS/FAIL per check and exits 1 on any FAIL. The program prints each check's letter on the semihosting
-# console, lowercase if it passed, then 'E'. Needs clang with the ARM target (Xcode's has it) and python3.
+# Shared by the bare-metal TCG checks (tcg-asid-test.sh, tcg-psr-test.sh, tcg-pmu-test.sh), sourced after setting
+# ROOT, SRC (the program) and CHECKS (one line per check: its letters, then what it checks). `boards` assembles SRC
+# for the iPod touch 2G (ARM1176, RAM at 0x08000000) and the iPad (Cortex-A8, RAM at 0x40000000), runs it as each
+# one's bootrom, prints PASS/FAIL per check and exits 1 on any FAIL (`board` runs one). The program prints each
+# check's letter on the semihosting console, lowercase if it passed, then 'E'. Needs clang with the ARM target
+# (Xcode's has it) and python3.
 QEMU="${QEMU:-$ROOT/build/qemu-system-arm}"
 [ -x "$QEMU" ] || { echo "FAIL no emulator at $QEMU: build it or set QEMU="; exit 1; }
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/barerom.XXXXXX")"

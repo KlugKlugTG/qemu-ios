@@ -1171,6 +1171,8 @@ struct ArchCPU {
 
     QLIST_HEAD(, ARMELChangeHook) pre_el_change_hooks;
     QLIST_HEAD(, ARMELChangeHook) el_change_hooks;
+    /* A hook in either list needs the BQL (see arm_register_el_change_hook) */
+    bool el_change_hooks_need_bql;
 
     int32_t node_id; /* NUMA node this CPU belongs to */
 
@@ -2649,9 +2651,13 @@ static inline AddressSpace *arm_addressspace(CPUState *cs, MemTxAttrs attrs)
  *
  * Note that if a pre-change hook is called, any registered post-change hooks
  * are guaranteed to subsequently be called.
+ *
+ * @needs_bql: the hook touches state beyond this CPU's and is called with the
+ * BQL held. A hook that does not is called without it, from the vCPU thread,
+ * and must take the BQL itself for anything global.
  */
 void arm_register_pre_el_change_hook(ARMCPU *cpu, ARMELChangeHookFn *hook,
-                                 void *opaque);
+                                     void *opaque, bool needs_bql);
 /**
  * arm_register_el_change_hook:
  * Register a hook function which will be called immediately after this
@@ -2660,10 +2666,11 @@ void arm_register_pre_el_change_hook(ARMCPU *cpu, ARMELChangeHookFn *hook,
  * to this function when the hook was registered.
  *
  * Note that any registered hooks registered here are guaranteed to be called
- * if pre-change hooks have been.
+ * if pre-change hooks have been. @needs_bql as for
+ * arm_register_pre_el_change_hook.
  */
-void arm_register_el_change_hook(ARMCPU *cpu, ARMELChangeHookFn *hook, void
-        *opaque);
+void arm_register_el_change_hook(ARMCPU *cpu, ARMELChangeHookFn *hook,
+                                 void *opaque, bool needs_bql);
 
 /**
  * arm_rebuild_hflags:

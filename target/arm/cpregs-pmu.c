@@ -4,6 +4,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/main-loop.h"
 #include "qemu/timer.h"
 #include "exec/icount.h"
 #include "hw/core/irq.h"
@@ -429,6 +430,8 @@ static bool pmu_counter_enabled(CPUARMState *env, uint8_t counter)
 static void pmu_update_irq(CPUARMState *env)
 {
     ARMCPU *cpu = env_archcpu(env);
+    /* The EL-change hooks get here without the BQL (cpu.c) */
+    BQL_LOCK_GUARD();
     qemu_set_irq(cpu->pmu_interrupt, (env->cp15.c9_pmcr & PMCRE) &&
             (env->cp15.c9_pminten & env->cp15.c9_pmovsr));
 }
@@ -617,18 +620,25 @@ void pmu_post_el_change(ARMCPU *cpu, void *ignored)
     pmu_op_finish(&cpu->env);
 }
 
-void arm_pmu_timer_cb(void *opaque)
+static void pmu_timer_work(CPUState *cs, run_on_cpu_data data)
 {
-    ARMCPU *cpu = opaque;
-
     /*
      * Update all the counter values based on the current underlying counts,
      * triggering interrupts to be raised, if necessary. pmu_op_finish() also
      * has the effect of setting the cpu->pmu_timer to the next earliest time a
      * counter may expire.
      */
-    pmu_op_start(&cpu->env);
-    pmu_op_finish(&cpu->env);
+    pmu_op_start(cpu_env(cs));
+    pmu_op_finish(cpu_env(cs));
+}
+
+void arm_pmu_timer_cb(void *opaque)
+{
+    /*
+     * On the vCPU's own thread: the EL-change hooks update the same counters
+     * there without the BQL.
+     */
+    async_run_on_cpu(CPU(opaque), pmu_timer_work, RUN_ON_CPU_NULL);
 }
 
 static void pmcr_write(CPUARMState *env, const ARMCPRegInfo *ri,

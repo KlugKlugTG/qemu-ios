@@ -9550,8 +9550,7 @@ bool arm_cpu_do_interrupt_needs_bql(CPUState *cs)
 {
     ARMCPU *cpu = ARM_CPU(cs);
 
-    return !QLIST_EMPTY(&cpu->pre_el_change_hooks) ||
-           !QLIST_EMPTY(&cpu->el_change_hooks) ||
+    return cpu->el_change_hooks_need_bql ||
            cs->exception_index == EXCP_SEMIHOST ||
            arm_is_psci_call(cpu, cs->exception_index);
 }

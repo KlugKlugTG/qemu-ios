@@ -3183,7 +3183,7 @@ void gicv3_init_cpuif(GICv3State *s)
              * state only changes on EL changes involving EL2 or EL3, so for
              * the non-TCG case this is OK, as EL2 and EL3 can't exist.
              */
-            arm_register_el_change_hook(cpu, gicv3_cpuif_el_change_hook, cs);
+            arm_register_el_change_hook(cpu, gicv3_cpuif_el_change_hook, cs, true);
         } else {
             assert(!arm_feature(&cpu->env, ARM_FEATURE_EL2));
             assert(!arm_feature(&cpu->env, ARM_FEATURE_EL3));
