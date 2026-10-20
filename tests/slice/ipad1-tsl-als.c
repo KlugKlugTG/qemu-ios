@@ -5,9 +5,9 @@
  * integrations outside the window, held until a COMMAND with CLEAR. The TSL2581's clear is special function
  * 1 (0xe1), and its CONTROL reports ADC_VALID and ADC_INTR.
  *
- * SLICE hw/arm/s5l8930_i2c.c define TSL_
- * SLICE hw/arm/s5l8930_i2c.c range struct S5L8930TSL2581State { | static unsigned tsl_integration_us
- * SLICE hw/arm/s5l8930_i2c.c fn tsl_integration_us tsl_running tsl_ch0 tsl_update_irq tsl_update_timer tsl_integrated tsl2581_event tsl2581_recv tsl_command tsl2581_send tsl2581_reset
+ * SLICE hw/arm/tsl2561.c define TSL_
+ * SLICE hw/arm/tsl2561.c range struct S5L8930TSL2581State { | static unsigned tsl_integration_us
+ * SLICE hw/arm/tsl2561.c fn tsl_integration_us tsl_running tsl_ch0 tsl_update_irq tsl_update_timer tsl_integrated tsl2581_event tsl2581_recv tsl_command tsl2581_send tsl2581_reset
  */
 #include <assert.h>
 #include <stdbool.h>

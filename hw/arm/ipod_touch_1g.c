@@ -62,6 +62,7 @@
 #include "hw/misc/ios_baseband.h"
 #include "hw/misc/ios_vibrator.h"
 #include "hw/i2c/ipod_touch_i2c.h"
+#include "hw/arm/s5l8930.h"
 #include "system/system.h"
 #include "system/reset.h"
 #include "system/runstate.h"
@@ -82,6 +83,7 @@ static const S5L8900Board n45_board = {
     .name = "n45",
     .accel_dt = "03000000",
     .pmu_i2c = 1,
+    .als = "isl29003dl", .als_addr = 0x44, .als_irq = 0x4c,   /* "als,isl29003", interrupts <0x4c 1> */
     /* i2s1: dma-parent dmac1, TX config 0x884 (peripheral 2), interrupts <0xaa> */
     .codec_i2s = { N45_IIS1_BASE, 1, N45_I2S1_DMA_REQ_ID, 0xaa, .host_output = false },
     .i2s_ram_bases = { N45_IIS0_BASE, N45_IIS2_BASE },
@@ -103,6 +105,7 @@ static const S5L8900Board n45_board = {
 static const S5L8900Board m68_board = {
     .name = "m68",
     .pmu_i2c = 0,
+    .als = TYPE_S5L8930_TSL2561, .als_addr = 0x49, .als_irq = 0x49,   /* "als,tsl2561", interrupts <0x49 1> */
     .codec_i2s = { N45_IIS2_BASE, 0, 0, 0x86, .host_output = true },
     /*
      * i2s1 (audio-data,baseband): dmac1, TX config 0x884 (peripheral 2), interrupts <0xaa>, the N45 codec's
@@ -1110,6 +1113,17 @@ static void n45_machine_init(MachineState *machine)
     I2CSlave *codec = i2c_slave_new("wm8758", 0x1A);
     qdev_prop_set_uint32(DEVICE(codec), "mclk-hz", 9003600);
     i2c_slave_realize_and_unref(codec, i2c[s->board->pmu_i2c], &error_fatal);
+
+    /*
+     * The ambient light sensor on I2C0, its INT a GPIO-IC line (the DT's als node), at the 2G's and the A4
+     * boards' 300 lux unless the host sets /machine/lightsensor's lux. Without it AppleTSL2561 and AppleISL29003
+     * found no part, and IOKit's display kept mixing Auto-Brightness with the sensor's 0.5 default: 1.0's iPhone,
+     * which runs Auto-Brightness from boot, lit Home at LEDOUT 0x2d where its 100% is 0x2e.
+     */
+    I2CSlave *als = i2c_slave_new(s->board->als, s->board->als_addr);
+    object_property_add_child(OBJECT(machine), "lightsensor", OBJECT(als));
+    i2c_slave_realize_and_unref(als, i2c[0], &error_fatal);
+    qdev_connect_gpio_out(DEVICE(als), 0, qdev_get_gpio_in(DEVICE(s->sysic), s->board->als_irq));
 
     /*
      * The WM8758's data port (the N45's I2S1, the M68's I2S0): the 2G's model (the same

@@ -93,6 +93,9 @@ typedef struct S5L8900I2SPort {
 typedef struct S5L8900Board {
     const char *name;                /* "n45", "m68" */
     unsigned pmu_i2c;                /* the bus of the PCF50635 (0x73) and the WM8758 (0x1A) */
+    const char *als;                 /* the I2C0 light sensor's model (the DT's i2c0/als), its address and INT */
+    uint8_t als_addr;
+    unsigned als_irq;
     S5L8900I2SPort codec_i2s;        /* the WM8758's data port */
     S5L8900I2SPort bb_i2s;           /* the baseband's voice port (base 0: none) */
     hwaddr i2s_ram_bases[2];         /* the other I2S windows: RAM, unmodeled (0: none) */
