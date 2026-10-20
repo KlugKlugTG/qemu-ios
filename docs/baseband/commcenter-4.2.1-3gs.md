@@ -159,21 +159,31 @@ These hold for the 3GS unless its v1 trace says otherwise.
     kCFPreferencesAnyHost)`, 0x1e7d4), so the file is
     /var/wireless/Library/Preferences/com.apple.commcenter.plist.
   * CommCenter caches the value: a file write takes effect only after CommCenter restarts. Settings
-    changes it through CommCenter (an entitled MIG call, 0x1f4c4).
+    changes it through CommCenter (an entitled MIG call, 0x1f4c4), which CoreTelephony exports as
+    `CTRegistrationSetInternationalDataAccessStatus` (read back with `...GetInternationalDataAccessStatus`);
+    CommCenter then stores the key itself.
   * When CommCenter sees a new SIM (an ICCID other than the `ICCID` it stored in the same file), it sets
     the key false (0x19794).
-  * Workaround: the guest package's it_prefs sets it true once per stored ICCID ("none" before one is
-    stored) and restarts CommCenter, so the user's later choice for that SIM stands (contrib/it-prefs).
-    If CommCenter had stored no ICCID within it_prefs' wait, the restarted CommCenter stores one, sees a
-    new SIM and turns the key off again, so it_prefs makes a second pass for the stored ICCID.
+  * Workaround: the guest package's it_prefs turns it on once per stored ICCID through that call, after
+    CommCenter has stored the ICCID and reset the key, so the user's later choice for that SIM stands
+    (contrib/it-prefs). A firmware without the call would get a CommCenter restart around a file write
+    instead, which costs a baseband reset (below).
   * The test PLMN stays the default. 1.0's CommCenter has no such key.
   * After Wi-Fi has been in use, Safari keeps the AirPort service's PAC answer and sends cellular requests
     to the web proxy at 10.0.2.100:3128 (`IOS_BB_TRACE=2` shows each uplink packet's addresses). That
     address exists only as the Wi-Fi netdev's guestfwd, so the cellular netdev needs the same guestfwd
     (`-netdev user,id=cell0,guestfwd=tcp:10.0.2.100:3128-...`), as the app gives wifi0.
-  * Each such restart resets the baseband: `+cpwroff`, then raw `at` pings until the modem stops answering,
-    then BB_RST/RADIO_ON. The modem goes silent after `+cpwroff` (SRDY stays low); while it kept clocking
-    frames, CommCenter waited out a ~30 s power-off timeout first, at "Searching...". The modem
+  * A CommCenter restart (launchctl unload/load: SIGTERM, a clean shutdown) resets the baseband. The
+    stopping CommCenter sends `+cpwroff` and pings until the modem stops answering; the modem goes silent
+    (SRDY stays low), and while it kept clocking frames CommCenter waited out a ~30 s power-off timeout,
+    at "Searching...". The new CommCenter assumes the modem the kernel powered at boot: it drives no
+    GPIO and no PMU register before its first bypass `at` (checked with every AP GPIO and D1815 write
+    traced on N90 8C148), so that frame meets an off modem, the kernel's SRDY timeout is fatal
+    (`SRDY Timeout/0x8 ... MRDY High, SRDY Low`, kASMFatalErrorSPI (11); BasebandSPI's
+    handleSRDYTimeoutAction reports it unconditionally), CommCenter logs "CSI state dump requested:
+    modem reset: ASM Fatal Error: 11" and CrashReporter writes a SystemLog, and the recovery resets the
+    baseband: D1815 register 0x16 writes, BB_RST low 100 ms, RADIO_ON low 350 ms, then init in bypass. Every
+    SRDY timeout seen on 4.x N88/N90 boots came 3 to 5 s after it_prefs' old reload. The modem
     keeps the AP's v2 credits across that reset (the kext keeps its count), else the re-init's URCs
     starve it and the phone sits at "Searching..." (fixed in 05fb82752f). With that fix, data works on a
     fresh device's first boot.
