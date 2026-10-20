@@ -1077,7 +1077,7 @@ static void n45_machine_init(MachineState *machine)
     s->accel = LIS302DL(dev);
     lis302dl_apply_orientation(s->accel, 1);   /* init ran before the mount was set */
     /* The host's controls, the same names as the 2G and the iPad: UIDeviceOrientation 1-6
-     * (lis302dl_apply_orientation also turns the LCD's presented picture, as the 2G's), raw
+     * (the LCD scans out as is, as the 2G's; the host turns the picture), raw
      * counts, a shake; accel-pitch/-roll/-pose are machine properties. Without them the app's
      * rotation never reached the 1G: the guest stayed portrait under a turned shell. */
     object_property_add_alias(OBJECT(machine), "accel-orientation", OBJECT(s->accel), "orientation");

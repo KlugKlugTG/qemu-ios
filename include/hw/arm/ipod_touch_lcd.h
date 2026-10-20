@@ -94,14 +94,7 @@ typedef struct IPodTouchLCDState
     uint32_t irq_enable;
     uint32_t irq_status;
 
-    /*
-     * Display rotation currently applied to the host window, in degrees
-     * clockwise (0 / 90 / 180 / 270). The guest always renders into a portrait
-     * 320x480 framebuffer, so a non-zero value means lcd_refresh transposes it
-     * into a rotated surface -- and the pointer events coming back in console
-     * coordinates have to be un-rotated before they reach the multitouch model.
-     */
-    int rotation;
+    /* A frame put together off the panel's scanout (lcd_refresh_composed). */
     uint8_t *rotbuf;
 
     /*
@@ -165,14 +158,6 @@ bool lcd_backlight_is_off(void);
 void ios_backlight_register(int (*read)(void *opaque), void *opaque);
 int ios_backlight_level(void);
 void lcd_changebrightness(int brightness);
-
-/*
- * Follow the accelerometer: turn the host window the same way the user "turned"
- * the device, so a landscape orientation gives a landscape (480x320) window.
- * Takes a UIDeviceOrientation value (1 portrait, 2 upside down, 3 landscape
- * left, 4 landscape right); anything else leaves the window in portrait.
- */
-void it_display_set_orientation(uint32_t orientation);
 
 /* The S5L8920's CLCD scans out through its DART (dart0): window 1 holds an IOVA. */
 void ipod_lcd_set_iommu(DeviceState *lcd, hwaddr (*xlate)(void *opaque, uint32_t va, unsigned sid),

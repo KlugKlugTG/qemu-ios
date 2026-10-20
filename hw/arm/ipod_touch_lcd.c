@@ -133,18 +133,6 @@ static void lcd_ft(const char *ev, uint32_t arg)
             qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), arg);
 }
 
-/*
- * Rotation the host window should be presenting, in degrees clockwise. Written
- * by it_display_set_orientation() (accelerometer / Command+Left / Command+Right
- * / the accel-orientation QMP property) and picked up by the next refresh,
- * which owns the console resize.
- *
- * iOS keeps its framebuffer in portrait and rotates the UI *inside* it, so to
- * show an upright landscape image the model has to turn the picture back the
- * same way the user "turned" the device.
- */
-static int it_display_rotation_req;
-
 /* 7E18 AppleM2CLCD enables sources at +8 and acknowledges +0xc with W1C.
  * Its idle path clears enable bit 0; a constant status of 1 and an interrupt
  * driven by the last acknowledgment caused unexpected interrupts at 60 Hz. */
@@ -584,25 +572,6 @@ static int lcd_bright_effective(void)
     return ovr >= 0 ? ovr : lcd_brightness;
 }
 
-void it_display_set_orientation(uint32_t orientation)
-{
-    int rot;
-
-    switch (orientation) {
-    case 2:  rot = 180; break;   /* portrait upside down */
-    case 3:  rot = 270; break;   /* landscape left  - device turned ccw */
-    case 4:  rot = 90;  break;   /* landscape right - device turned cw  */
-    default: rot = 0;   break;   /* portrait, face up/down, unset */
-    }
-    if (rot != it_display_rotation_req) {
-        it_display_rotation_req = rot;
-        if (lcd_trace()) {
-            TRACE_PRINTF(trace_ipod_touch_lcd_log, "[LCD] orientation %u -> window rotation %d\n",
-                    orientation, rot);
-        }
-    }
-}
-
 /*
  * Brightness as a lookup table.
  *
@@ -819,7 +788,7 @@ static bool lcd_compose_planes(const IPodTouchLCDState *s, const uint32_t *r, ui
 
 /* The linear full-panel RGB0 case keeps framebuffer dirty tracking. Every
  * other enabled plane configuration must honor its programmed stride,
- * dimensions, destination origin, and transform before host-window rotation. */
+ * dimensions, destination origin, and transform. */
 static bool lcd_needs_plane_composition(const uint32_t *r, unsigned pw, unsigned ph)
 {
     if (r[1] & 0x28) return true;
@@ -830,19 +799,18 @@ static bool lcd_needs_plane_composition(const uint32_t *r, unsigned pw, unsigned
 }
 
 /*
- * Blit the guest's portrait framebuffer into a rotated host surface.
+ * Blit a frame put together in rotbuf (a committed page, composed planes or
+ * gathered pages) into the host surface, with no dirty tracking: the whole
+ * frame is redrawn every time.
  *
- * framebuffer_update_display() can only walk source and destination with fixed
- * strides, which cannot express a transpose, so the rotated case gets its own
- * blit -- and with it, no dirty tracking: the whole frame is redrawn every
- * time. Rotation is a rare, deliberate state, so that is left alone.
+ * The panel is presented as it scans out, whatever way the device is held, as
+ * on hardware: iOS turns its own UI inside its portrait framebuffer, and the
+ * host turns the picture with the device it shows. (The window once turned with
+ * the accelerometer, and the touches with it, for a bare QEMU window.)
  */
-static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
-                                int rot, bool composed)
+static void lcd_refresh_composed(IPodTouchLCDState *lcd, DisplaySurface *surface)
 {
     const int sw = lcd->pw, sh = lcd->ph;
-    int dw = (rot == 90 || rot == 270) ? sh : sw;
-    int dh = (rot == 90 || rot == 270) ? sw : sh;
     uint8_t *dst = surface_data(surface);
     int dstride = surface_stride(surface);
     int bri = lcd_bright_effective();
@@ -852,66 +820,33 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
     int sx, sy;
 
     /*
-     * Same identity-conversion shortcut the unrotated path uses (see
+     * Same identity-conversion shortcut the direct path uses (see
      * draw_line32_32 / lcd_line_is_copy): at full backlight into an x8r8g8b8
      * surface the guest's BGRX pixel is already the destination pixel, so the
-     * per-pixel copy skips three LUT loads and the rgb_to_pixel32 call. This is
-     * the steady-state path for landscape games, which stay rotated the whole
-     * session, so it is not the "rare state" the comment above once assumed.
+     * per-pixel copy skips three LUT loads and the rgb_to_pixel32 call.
      */
     bool fast_copy = (bri == 255 && lcd->gamma_identity &&
                       surface_format(surface) == PIXMAN_x8r8g8b8);
 
-    if (surface_width(surface) != dw || surface_height(surface) != dh) {
+    if (surface_width(surface) != sw || surface_height(surface) != sh) {
         return; /* resize has not landed yet; skip this frame */
     }
-    if (!lcd->rotbuf) {
-        lcd->rotbuf = g_malloc(sw * sh * 4);
-    }
-    if (!composed) cpu_physical_memory_read(lcd->scanout_base, lcd->rotbuf, sw * sh * 4);
 
-    /*
-     * A source row maps to a straight line in the destination for every one of
-     * the three rotations, so the transpose is a start address and a signed
-     * step per row -- the per-pixel switch it replaces was re-deciding the same
-     * thing 153,600 times a frame.
-     */
     for (sy = 0; sy < sh; sy++) {
         const uint8_t *s = lcd->rotbuf + (size_t)sy * sw * 4;
-        uint8_t *d;
-        int step;
+        uint8_t *d = dst + (size_t)sy * dstride;
 
-        switch (rot) {
-        case 0:
-            d = dst + (size_t)sy * dstride;
-            step = 4;
-            break;
-        case 90:
-            d = dst + (size_t)(sh - 1 - sy) * 4;
-            step = dstride;
-            break;
-        case 270:
-            d = dst + (size_t)(sw - 1) * dstride + (size_t)sy * 4;
-            step = -dstride;
-            break;
-        default:
-            d = dst + (size_t)(sh - 1 - sy) * dstride + (size_t)(sw - 1) * 4;
-            step = -4;
-            break;
-        }
         if (fast_copy) {
-            for (sx = 0; sx < sw; sx++, s += 4, d += step) {
-                *(uint32_t *)d = *(const uint32_t *)s;
-            }
+            memcpy(d, s, (size_t)sw * 4);
         } else {
-            for (sx = 0; sx < sw; sx++, s += 4, d += step) {
+            for (sx = 0; sx < sw; sx++, s += 4, d += 4) {
                 *(uint32_t *)d = rgb_to_pixel32(lcd_bright_lut[0][s[2]],
                                                 lcd_bright_lut[1][s[1]],
                                                 lcd_bright_lut[2][s[0]]);
             }
         }
     }
-    dpy_gfx_update(lcd->con, 0, 0, dw, dh);
+    dpy_gfx_update(lcd->con, 0, 0, sw, sh);
 }
 
 static void lcd_refresh(void *opaque)
@@ -946,33 +881,12 @@ static void lcd_refresh(void *opaque)
      * either.
      */
     if (!lcd_in_vsync_present && !lcd->invalidate &&
-        lcd->rotation == it_display_rotation_req &&
         lcd_bright_effective() == lcd->last_bright &&
         lcd->last_present_ns &&
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - lcd->last_present_ns <
             2 * LCD_VSYNC_PERIOD_NS(lcd)) {
         lcd_ft("scanskip", lcd->scanout_base);
         return;
-    }
-
-    /*
-     * Pick up a pending orientation change. The console resize has to happen
-     * from the graphics update, not from the I2C/QMP thread that moved the
-     * accelerometer.
-     */
-    if (lcd->rotation != it_display_rotation_req) {
-        int rot = it_display_rotation_req;
-        bool land = (rot == 90 || rot == 270);
-
-        lcd->rotation = rot;
-        qemu_console_resize(lcd->con,
-                            land ? lcd->ph : lcd->pw,
-                            land ? lcd->pw : lcd->ph);
-        surface = qemu_console_surface(lcd->con);
-        lcd->invalidate = 1;
-        if (!surface_bits_per_pixel(surface)) {
-            return;
-        }
     }
 
     bool composed = false;
@@ -1013,9 +927,9 @@ static void lcd_refresh(void *opaque)
         lcd_gather(lcd, lcd->rotbuf);
         composed = true;
     }
-    if (lcd->rotation != 0 || composed) {
+    if (composed) {
         int64_t t = lcd_frametrace() ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
-        lcd_refresh_rotated(lcd, surface, lcd->rotation, composed);
+        lcd_refresh_composed(lcd, surface);
         if (t) {
             lcd_ft("blitrot",
                    (uint32_t)((qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - t)/1000));
@@ -1117,26 +1031,17 @@ static const GraphicHwOps gfx_ops = {
 };
 
 /*
- * Undo the rotation lcd_refresh_rotated() applied, so the multitouch model
- * always sees coordinates in the guest's portrait framebuffer space (x left to
- * right, y measured from the bottom). Without this, touch lands in the wrong
- * place -- or a transposed place -- as soon as the window is turned.
- *
- * x/y come in as 0..2^15 fractions of the *window*, y measured downwards, which
- * is what both the legacy mouse handler and the multi-touch handler below get.
+ * A point on the panel as the multitouch model takes it: the guest's portrait
+ * framebuffer space, x left to right, y measured from the bottom. x/y come in
+ * as 0..2^15 fractions of the panel as it scans out, y measured downwards,
+ * which is what both the legacy mouse handler and the multi-touch handler
+ * below get.
  */
 static void ipod_touch_lcd_map_touch(IPodTouchLCDState *lcd, int x, int y,
                                      float *fx, float *fy)
 {
-    float cx = x / (float)pow(2, 15);
-    float cy = y / (float)pow(2, 15);
-
-    switch (lcd->rotation) {
-    case 90:  *fx = cy;        *fy = cx;        break;
-    case 270: *fx = 1.0f - cy; *fy = 1.0f - cx; break;
-    case 180: *fx = 1.0f - cx; *fy = cy;        break;
-    default:  *fx = cx;        *fy = 1.0f - cy; break;
-    }
+    *fx = x / (float)pow(2, 15);
+    *fy = 1.0f - y / (float)pow(2, 15);
 }
 
 static void ipod_touch_lcd_mouse_event(void *opaque, int x, int y, int z, int buttons_state)
@@ -1400,16 +1305,6 @@ static void ipod_touch_lcd_reset(DeviceState *dev)
     s->last_surface = NULL;
     s->last_bright = -1;
     s->last_present_ns = 0;
-    /*
-     * The device comes up portrait. it_display_rotation_req is file-scope and
-     * survived reset, so a reboot taken in landscape inherited the previous
-     * boot's rotation. s->rotation is deliberately NOT cleared here: the
-     * refresh path resizes the console only when rotation != request, so
-     * leaving the applied value is what makes it rotate back. rotbuf is a
-     * fixed-size scratch buffer refilled from guest memory every frame, not
-     * state.
-     */
-    it_display_rotation_req = 0;
     s->next_vsync = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCD_VSYNC_PERIOD_NS(s);
     if (lcd_trace()) {
         TRACE_PRINTF(trace_ipod_touch_lcd_log, "[LCD] ==== reset ====\n");
@@ -1545,7 +1440,7 @@ static const VMStateDescription vmstate_ipod_touch_lcd = {
         VMSTATE_UINT32(w1_hspan, IPodTouchLCDState),
         VMSTATE_UINT32(w1_display_depth_info, IPodTouchLCDState),
         VMSTATE_UINT32(render, IPodTouchLCDState),
-        VMSTATE_INT32(rotation, IPodTouchLCDState),
+        VMSTATE_UNUSED(4),  /* the host window's rotation, which the panel no longer takes */
         VMSTATE_UINT32_V(irq_enable, IPodTouchLCDState, 3),
         VMSTATE_UINT32_V(irq_status, IPodTouchLCDState, 3),
         VMSTATE_BOOL_V(saved_planes_enabled, IPodTouchLCDState, 4),

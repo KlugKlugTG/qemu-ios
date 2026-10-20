@@ -204,6 +204,31 @@ static void committed_frame(void)
     qtest_quit(q);
 }
 
+/*
+ * The panel scans out as is whatever way the device is held, as on hardware: iOS turns its UI inside its portrait
+ * framebuffer and the host turns the picture with the device it shows. Turning the accelerometer to landscape
+ * (UIDeviceOrientation 4) leaves the console 320x480 and its top rows on top; it used to turn the console to 480x320
+ * and the picture with it.
+ */
+static void scanout_fixed(void)
+{
+    const uint64_t fb = 0x0f496000, size = 320 * 480 * 4;
+    QTestState *q = start_board("", false);
+
+    qtest_writel(q, LCD + 0x20, 0x00200700);
+    qtest_writel(q, LCD + 0x28, 320);
+    qtest_writel(q, LCD + 0x30, 0x014001e0);
+    qtest_writel(q, LCD + 0x24, fb);
+    qtest_memset(q, fb, 0x00, size);
+    qtest_memset(q, fb, 0xff, 320 * 40 * 4);    /* the top 40 rows white */
+    qtest_qmp_assert_success(q, "{'execute':'qom-set','arguments':"
+                                "{'path':'/machine','property':'accel-orientation','value':4}}");
+    qtest_clock_step(q, 20 * 1000 * 1000);
+    g_assert_cmphex(screen_pixel(q, 300, 20), ==, 0xffffff);
+    g_assert_cmphex(screen_pixel(q, 160, 400), ==, 0x000000);
+    qtest_quit(q);
+}
+
 int main(int argc, char **argv)
 {
     g_autofree char *zero = g_malloc0(1048576);
@@ -228,6 +253,7 @@ int main(int argc, char **argv)
     qtest_add_func("/ipod/lcd/control-reset", reset_control);
     qtest_add_func("/ipod/lcd/control-restored", restored_control);
     qtest_add_func("/ipod/lcd/committed-frame", committed_frame);
+    qtest_add_func("/ipod/lcd/scanout-fixed", scanout_fixed);
     if (qtest_has_machine("iPod-Touch-1G")) {
         qtest_add_func("/ipod/lcd/n45-mapped-control", n45_control);
     }

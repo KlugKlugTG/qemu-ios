@@ -1,6 +1,6 @@
 /* Exercise the actual LCD plane compositor with bounded DMA under sanitizers.
  *
- * SLICE hw/arm/ipod_touch_lcd.c range static bool lcd_plane_range( | /*\n * Blit the guest's portrait framebuffer
+ * SLICE hw/arm/ipod_touch_lcd.c range static bool lcd_plane_range( | /*\n * Blit a frame put together in rotbuf
  * PKG glib-2.0
  */
 #include <glib.h>

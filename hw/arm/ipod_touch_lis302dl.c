@@ -1,6 +1,5 @@
 #include "hw/arm/ipod_touch_lis302dl.h"
 #include "migration/vmstate.h"
-#include "hw/arm/ipod_touch_lcd.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
 #include "hw/arm/ipod-attitude.h"
@@ -171,7 +170,6 @@ void lis302dl_apply_orientation(LIS302DLState *s, uint32_t o)
     else if (o == 4) roll = -90;
     lis302dl_apply_attitude(s, 0, roll, flat);
     s->orientation = o;
-    it_display_set_orientation(o);
     if (lis302dl_debug()) {
         TRACE_PRINTF(trace_lis302dl_log, "lis302dl: orientation=%u -> x=%d y=%d z=%d\n",
                o, s->base_x, s->base_y, s->base_z);
