@@ -187,6 +187,7 @@ static const S5L8920Board s5l8920_n18 = {
     .fmc_off = 0x40000,                  /* the s5l8922x IOP firmware: the A4's layout */
     .nuarts = 2,
     .gauge_uart = -1,
+    .bt_uart = 1,                        /* uart1/bluetooth,n18: the BCM4329's Bluetooth side */
     .mt_atn = 0xb4,
     .mt_profile = &mt_profile_n81,       /* the N81's N1F55 sensor */
     .buttons = { .hold = 0xb7, .menu = 0xb6, .volup = 0xb0, .voldown = 0xb1 },

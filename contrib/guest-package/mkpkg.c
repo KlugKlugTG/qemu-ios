@@ -81,7 +81,7 @@ typedef struct {
 #define N72_HOOKS ((const Hook[]){{"contrib/gles-public/OpenGLES", OPENGLES, 1}, \
     {"contrib/it-agent/it_typein.dylib", TYPEIN, 1}, {0}})
 #define ARMV7_BOARDS L("k48ap", "n81ap", "n90ap", "n18ap", "n88ap")
-#define K48_IOS3_BUILDS L("7B367", "7B405", "7B500", "7C144", "7C145", "7D11", "7E18")
+#define K48_IOS3_BUILDS L("7B367", "7B405", "7B500", "7C144", "7C145", "7C146", "7D11", "7E18")
 
 /* hooks: (source, stock target, respring). The GL shims are one binary per arch: they read the
  * firmware's dispatch layout at load (contrib/it-gles/gles_dispatch.c), so no hook is per build.
@@ -854,6 +854,10 @@ static void selfcheck(const char *root)
     const char *n88[][2] = {{"7A341", "k48-ios30"}, {"7A400", "k48-ios30"}, {"7C144", "k48-ios3"}, {"7E18", "k48-ios3"}};
     for (int i = 0; i < 4; i++)
         CHECK(!strcmp(one_family("n88ap", n88[i][0]), n88[i][1]));
+    /* every iPod touch 3G 3.x build (both 3.1.1s: 7C145 and the iPod-only 7C146) */
+    const char *n18[] = {"7C145", "7C146", "7D11", "7E18"};
+    for (int i = 0; i < 4; i++)
+        CHECK(!strcmp(one_family("n18ap", n18[i]), "k48-ios3"));
     const Family *k30 = fam("k48-ios30"), *k3 = fam("k48-ios3");
     int nb = 0;
     for (const Bin *b = k30->bin; b->name; b++, nb++)
