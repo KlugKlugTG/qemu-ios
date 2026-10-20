@@ -31,7 +31,8 @@
  * (2.x's thread pointer), fat armv6 + armv7, ARM code. The EAGL classes are static ObjC 2 class data bound to
  * CoreFoundation's NSObject, as on every firmware from 2.0 on. Build with build.sh.
  *
- * Nothing runs at load: QuartzCore links this framework into every UIKit process. The first context says hello.
+ * Nothing runs at load but two bindings (fe_bind_xfer, fe_bind_runloop): QuartzCore links this framework into every
+ * UIKit process. The first context says hello.
  */
 #ifndef RTLD_DEFAULT
 #define RTLD_DEFAULT ((void *)-2)
@@ -1570,6 +1571,7 @@ __attribute__((objc_root_class))
 - (id)objectForKey:(id)key;
 - (id)drawableProperties;
 - (void *)nativeWindow;
+- (double)timeIntervalSinceNow;
 @end
 
 NSString *const kEAGLDrawablePropertyRetainedBacking = @"EAGLDrawablePropertyRetainedBacking";
@@ -1583,6 +1585,45 @@ NSString *const kEAGLContextPropertyClientRetainRelease = @"EAGLContextPropertyC
 NSString *const kEAGLColorFormatSRGBA8 = @"EAGLColorFormatSRGBA8";
 NSString *const kEAGLContextPropertySharedWithCompute = @"EAGLContextPropertySharedWithCompute";
 NSString *const kEAGLContextPropertyVisibleInDebugTools = @"EAGLContextPropertyVisibleInDebugTools";
+
+/* ------------------------------------------------------------ empty run loops --- */
+
+/*
+ * -[NSRunLoop runMode:beforeDate:] returns NO at once when the mode has no sources or timers, so a thread that loops on
+ * it, waiting for work nothing ever schedules, spins. OpenFeint 2.x's _mainDefault: thread does, and on the one guest
+ * CPU it takes about half the time from the game (Battle Bears: Zombies!). QuartzCore links this framework into every
+ * UIKit process, so it is fixed here: off the main thread, a NO with the limit date still ahead sleeps toward that
+ * date, 10 ms at most, as if the call had waited for a source that never came, then returns NO as before.
+ */
+typedef BOOL (*fe_runmode_fn)(id, SEL, id, id);
+static fe_runmode_fn fe_runmode_orig;
+static pthread_t fe_main_thread;
+extern int usleep(unsigned);
+
+static BOOL fe_runmode(id self, SEL sel, id mode, id limit)
+{
+    BOOL ran = fe_runmode_orig(self, sel, mode, limit);
+    if (!ran && limit && !pthread_equal(pthread_self(), fe_main_thread)) {
+        double left = [limit timeIntervalSinceNow];
+        if (left > 0) usleep(left < 0.01 ? (unsigned)(left * 1e6) : 10000);
+    }
+    return ran;
+}
+
+__attribute__((constructor)) static void fe_bind_runloop(void)
+{
+    Class (*getClass)(const char *) = dlsym(RTLD_DEFAULT, "objc_getClass");
+    SEL (*selName)(const char *) = dlsym(RTLD_DEFAULT, "sel_registerName");
+    void *(*getMethod)(Class, SEL) = dlsym(RTLD_DEFAULT, "class_getInstanceMethod");
+    void *(*getImp)(void *) = dlsym(RTLD_DEFAULT, "method_getImplementation");
+    void *(*setImp)(void *, void *) = dlsym(RTLD_DEFAULT, "method_setImplementation");
+    Class cls;
+    void *m;
+    fe_main_thread = pthread_self();   /* constructors run on the main thread */
+    if (!getClass || !selName || !getMethod || !getImp || !setImp || !(cls = getClass("NSRunLoop"))) return;
+    if (!(m = getMethod(cls, selName("runMode:beforeDate:"))) || !(fe_runmode_orig = (fe_runmode_fn)getImp(m))) return;
+    setImp(m, (void *)fe_runmode);
+}
 
 __attribute__((visibility("default")))
 @interface EAGLSharegroup : NSObject { @public void *_private; NSUInteger _api; }
