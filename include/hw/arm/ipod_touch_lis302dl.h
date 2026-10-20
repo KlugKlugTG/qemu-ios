@@ -52,11 +52,10 @@ typedef struct LIS302DLState {
 	uint16_t ctrl_reg3;
     uint32_t rate_hz;       /* zero: follow CTRL_REG1 DR (100/400 Hz) */
     uint8_t whoami;         /* 0x3B LIS302DL (default), 0x32 LIS331DLH */
-    bool mount_flipped;     /* board-mounted turned 180 deg about X: Y, Z negated */
-    /* "mount" property: the sensor's x, y, z as signed device axes ("-2,-1,3": x reads -y,
-     * y reads -x), the inverse of the board DT's accelerometer orientation; empty = the device's own */
-    char *mount;
-    int8_t axis[3];
+    /* "dt-orientation": the board DT accelerometer node's "orientation" bytes in hex, as the guest's driver
+     * reads them; the part reads as that driver expects (ios_dt_mount). Empty: the device's own axes. */
+    char *dt_orientation;
+    int8_t axis[3];         /* derived: each sensor axis as a signed device axis (1-based), 0 until derived */
     /* set by a machine whose gyro sees the turn: an attitude change turns the device over time (lis302dl_motion_rate); transient, not migrated */
     bool motion;
     int64_t motion_start_ns, motion_ns;

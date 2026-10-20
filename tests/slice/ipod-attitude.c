@@ -52,11 +52,33 @@ int main(void) {
  assert(!lis302dl_post_load(&sensor,1));
  assert(sensor.pitch_mdeg==0 && sensor.roll_mdeg==90000 && !sensor.flat_pose);
  assert(sensor.out_x==-64 && sensor.shake_start_ns == -1 && sensor.last_sample_ns == -1);
- /* A board mount (N81's DT orientation, inverted): sensor x reads -y, y reads -x. Portrait gravity (0,-64,0). */
- LIS302DLState n81={0};n81.mount=(char *)"-2,-1,3";
- assert(lis302dl_apply_attitude(&n81,0,0,false));
+ /* Each board's mount from its DT orientation: the mounts found on hardware-checked rotation (and the iPhone 4's
+  * z by its compass), the iPod touch 4G's z as the iPhone 4's, and a swap. Then the N81 reading through it. */
+ static const struct { const char *dt; bool accel; int8_t axis[3]; } boards[] = {
+  { "04000000", true, { 1, 2, 3 } },                     /* N72, N18 */
+  { "07000000", true, { -1, -2, 3 } },                   /* N88 */
+  { "03000000", true, { 1, 2, 3 } },                     /* N45 (1.x) */
+  { "00000000", true, { -1, -2, 3 } },                   /* M68 (1.x) */
+  { "0100000000ff000000000100", true, { 1, -2, -3 } },   /* K48 */
+  { "00ff0000ff00000000000100", true, { -2, -1, -3 } },  /* N81 */
+  { "00010000ff0000000000ff00", true, { -2, 1, 3 } },    /* N90 */
+  { "08000000", true, { 2, 1, -3 } },                    /* bit 3: the driver swaps x and y first */
+  { "00ff0000ff0000000000ff00", false, { -2, -1, -3 } }, /* N81's gyro */
+  { "010000000001000000000100", false, { 1, 2, 3 } },    /* N90's gyro */
+ };
+ for (size_t i=0;i<sizeof(boards)/sizeof(boards[0]);i++) {
+  int8_t axis[3];
+  assert(ios_dt_mount(boards[i].dt,boards[i].accel,axis));
+  assert(!memcmp(axis,boards[i].axis,3));
+ }
+ int8_t bad[3];
+ assert(!ios_dt_mount("0400",true,bad) && !ios_dt_mount("02000000000000000000000000",true,bad));
+ assert(!ios_dt_mount("000000000000000000000000",true,bad));       /* not a mount: a zero row */
+ LIS302DLState n81={0};n81.dt_orientation=(char *)"00ff0000ff00000000000100";
+ assert(lis302dl_apply_attitude(&n81,0,0,false));       /* portrait: x reads -y */
  assert(n81.base_x==64 && n81.base_y==0 && n81.base_z==0);
  assert(lis302dl_apply_attitude(&n81,0,90,false) && n81.base_x==0 && n81.base_y==64);
+ assert(lis302dl_apply_attitude(&n81,0,0,true) && n81.base_z==64);   /* face up: z reads -z */
 
  /* A board whose gyro sees the turn (motion): Home right to Home left is half a turn about the screen's axis over
   * 700 ms, gravity staying in the screen's plane, at -pi/0.7 rad/s about z; then a quarter turn back to portrait. */
@@ -92,5 +114,5 @@ int main(void) {
  LIS302DLState jump={0};jump.last_sample_ns=jump.shake_start_ns=-1;
  assert(lis302dl_apply_attitude(&jump,0,90,false) && lis302dl_apply_attitude(&jump,0,-90,false));
  lis302dl_sample(&jump,clock_ns);assert(abs(jump.out_x-64)<=1);
- puts("PASS: mounted portrait/landscape/flat gravity, board mount axes, compound tilt, unit magnitude, invalid input rejection, and a turn the gyro sees");
+ puts("PASS: mounted portrait/landscape/flat gravity, each board's mount from its DT orientation, compound tilt, unit magnitude, invalid input rejection, and a turn the gyro sees");
 }

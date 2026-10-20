@@ -171,7 +171,7 @@ typedef struct S5L8920Board {
     bool vibrator;
     uint8_t vibrator_pwm;
     S5L8920I2CDevice i2c[8];             /* in creation order (the snapshot's) */
-    const char *accel_mount;             /* the LIS302DL model's "mount" axes; NULL: as the N18's/N72's */
+    const char *accel_dt;                /* the DT accelerometer's "orientation" (ios_dt_mount) */
     uint8_t compass_orientation;         /* the AK8973 model's orientation (the DT compass node's encoding) */
     S5L8920PowerKnob pwroff_knob;
     BCMSDIOChip wifi;                    /* the Wi-Fi card, as AppleBCMWLAN matches it; prodid 0 = none */
@@ -197,6 +197,7 @@ static const S5L8920Board s5l8920_n18 = {
         { 0, 0x3a, TYPE_CD3272MIKEY },
         { 2, 0x1d, TYPE_LIS302DL },       /* its DT interrupt (0xa2) is not driven */
     },
+    .accel_dt = "04000000",
     .pwroff_knob = { 57, 67, 240 },      /* off a 4.2.1 screendump of the sheet */
     /* A BCM4329 B1: AppleBCMWLAN's "N18 - 4329 B1" (s=B1, P=N18 -> 4329b1/n18.bin, whose version this is). */
     .wifi = {
@@ -254,10 +255,7 @@ static const S5L8920Board s5l8920_n88 = {
         { 0, 0x1e, TYPE_S5L8930_AK8973 },
         { 2, 0x49, TYPE_S5L8930_TSL2561, 0x9e },     /* DT als interrupt */
     },
-    /* DT accelerometer orientation 7 where the N18's (and the N72's) is 4: bits 0 and 1 more, which negate x
-     * and y in AppleLIS302DL, as the M68's 0 to the N45's 3. The model reads as the N18's part; without this
-     * the 3GS took Home-left (4) for Home-right (3) and drew landscape upside down (issues 23, 43). */
-    .accel_mount = "-1,-2,3",
+    .accel_dt = "07000000",              /* where the N18's is 4: read as 4, landscape was upside down (issues 23, 43) */
     .compass_orientation = 9,            /* DT compass (0x1e): x and y swapped, then x negated */
     .pwroff_knob = { 57, 67, 240 },
 };
@@ -525,8 +523,8 @@ static void s5l8920_i2c_create(S5L8920MachineState *s, int n)
         if (object_dynamic_cast(OBJECT(slave), TYPE_S5L8930_TSL2581)) {
             object_property_add_child(OBJECT(s), "lightsensor", OBJECT(slave));   /* qom-set its lux */
         }
-        if (!strcmp(d->type, TYPE_LIS302DL) && s->board->accel_mount) {
-            qdev_prop_set_string(DEVICE(slave), "mount", s->board->accel_mount);
+        if (!strcmp(d->type, TYPE_LIS302DL)) {
+            qdev_prop_set_string(DEVICE(slave), "dt-orientation", s->board->accel_dt);
         }
         if (!strcmp(d->type, TYPE_S5L8930_AK8973)) {
             qdev_prop_set_uint8(DEVICE(slave), "orientation", s->board->compass_orientation);
@@ -583,9 +581,7 @@ static void s5l8920_i2c_create(S5L8920MachineState *s, int n)
             ipod_agent_set_clock_offset(s->agent, s->pmu->rtc_offset);
         } else if (!strcmp(d->type, TYPE_LIS302DL)) {
             s->accel = LIS302DL(slave);
-            if (s->board->accel_mount) {
-                lis302dl_apply_orientation(s->accel, 1);   /* init ran before the mount was set */
-            }
+            lis302dl_apply_orientation(s->accel, 1);   /* init ran before the mount was set */
             /* the iPod/iPad machines' names, which the app's tilt and shake set */
             object_property_add_alias(OBJECT(s), "accel-orientation", OBJECT(slave), "orientation");
             object_property_add_alias(OBJECT(s), "accel-x", OBJECT(slave), "x");

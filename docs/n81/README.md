@@ -224,7 +224,7 @@ documented quirk/patch, S stub.
 | PMU D1815, LIS331DLH, TSL2581 | shared | as-is (TSL2581 at 0x49) | H |
 | Codec CS42L59 | the CS42L58 register file | shared | H |
 | BCM4329 | the iPod's dongle model, `P=N81`, n81.bin version | variant (board data) | H |
-| Gyro (ap3gdl @0x68, INT1 0x21 / INT2 0x05) | ST L3G4200D (WHO_AM_I 0xd3): registers, 32-slot FIFO and its modes, INT2 levels, ODR timer; zero rate at rest, the turn's rate while the host changes the attitude (`gyro_mount`, the DT orientation inverted). The kboot DT's `gyro-sensitivity-calibration` (iBoot fills it from syscfg) gets a nominal identity at reset | new | R (calibration P) |
+| Gyro (ap3gdl @0x68, INT1 0x21 / INT2 0x05) | ST L3G4200D (WHO_AM_I 0xd3): registers, 32-slot FIFO and its modes, INT2 levels, ODR timer; zero rate at rest, the turn's rate while the host changes the attitude (`gyro_dt`, the DT orientation, read inverted). The kboot DT's `gyro-sensitivity-calibration` (iBoot fills it from syscfg) gets a nominal identity at reset | new | R (calibration P) |
 | Cameras / ISP | `camera=on`: `s5l8930.isp` (`hw/arm/s5l8930_isp.c`): the ISP CPU's mailbox in front of a model of its firmware's register file, the output DMA and frame interrupt the kext programs, a test-pattern sensor; checked on the iPhone 4's 4.2.1 and this board's 6.1.6, back camera. `camera=off` (default) unmatches the DT's `isp` node | shared | H (sensor P) |
 | JPEG codec (0x88200000, IRQ 0x73) | `s5l8920.jpeg` (`hw/arm/s5l8920_jpeg.c`, every A4 board): Samsung's JPEG block; encodes 'yuvs' to a JFIF stream over the tables the driver programs (the camera's stills, SpringBoard's snapshots); decode answers "corrupt", so callers fall back to software | shared | H |
 | VXD (H.264 decoder, 0x85000000, IRQ 0x30) | `s5l8920.vxd` (`hw/arm/s5l8920_vxd.c`, every A4 board): the MSVDX's DXVA firmware played at its comms area and message rings; each render's slice decoded on the host (`s5l8920_vxd_h264.c`, libavcodec) with its SPS and PPS rebuilt from the registers and the slice header's fit; a picture completes once, at its last slice, after its decode time; the M2 scaler turns NV12 frames upright and the display pipe shows its video layer, alone or under the UI. Movies play on 4.2.1 (n90ap-8C148), 5.1.1 (k48ap-9B206), 6.1.6 (n81ap-10B500) and 7.1.2 (n90ap-11D257, letterboxed as it asks); MPEG-4 renders complete without a picture | shared | H |
@@ -259,12 +259,14 @@ documented quirk/patch, S stub.
 5. ~~**Gyro**~~ (2026-10-05): AppleAP3GDL attaches and streams. `contrib/it-gyro` (spawned through the agent)
    reads CoreMotion at about 100 Hz, `gyroAvailable 1`, every rate 0 at rest. Since 2026-10-09 an attitude change
    (accel-orientation, the attitude properties) is a turn the gyro sees: the accelerometer swings to the new pose
-   about one axis at 90 degrees per 350 ms and the L3G4200D reads the turn's rate through the board's `gyro_mount`.
+   about one axis at 90 degrees per 350 ms and the L3G4200D reads the turn's rate through the board's `gyro_dt`.
    Before, the gyro read 0 through the jump and CoreMotion's fused gravity took 4-7 s to follow a landscape flip,
    coming round through the screen's axis (issue 23). Left: INT1's threshold events, the temperature byte, and the
    unit's real sensitivity matrix.
-6. ~~Accelerometer mounting~~ (2026-10-04): the board's `accel_mount` "-2,-1,3" is the DT's orientation
-   matrix inverted. Safari turns with `accel-orientation` 1/3 as on hardware (3 = Home right).
+6. ~~Accelerometer mounting~~ (2026-10-04; from the DT, 2026-10-20): the board carries its DT accelerometer
+   orientation (`accel_dt`), and the part reads as `ios_dt_mount` derives from it (x reads -y, y reads -x).
+   Safari turns with `accel-orientation` 1/3 as on hardware (3 = Home right). z now reads -z, as on the
+   iPhone 4, whose z its compass checked; the N81 has no compass, and its face up is unchecked.
 7. ~~**Multitouch calibration**~~ (2026-10-05): `mt_profile_n81`'s frame is now fitted the way the K48's was
    (x = -69 + 4748u, y = -215 + 7360v; the N1's y runs bottom-up). The iPod's frame had put taps 9 px off at the
    edges and 21-27 px high. `tests/ipad1/touchcal.py` taps a 4x5 grid on a Safari page that marks each touch:

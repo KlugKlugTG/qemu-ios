@@ -1528,8 +1528,8 @@ static const TypeInfo s5l8930_ak8975_info = {
  * INT1's threshold events are not modeled.
  * The rate is the accelerometer's turn while the host changes the device's
  * attitude (lis302dl_motion_rate), zero at rest, in counts at CTRL_REG4's full
- * scale, through the board's mount ("mount", as the accelerometer's: each sensor
- * axis reads a signed device axis, the DT gyro orientation inverted).
+ * scale, through the board's mount: "dt-orientation", the DT gyro node's, which
+ * the part reads inverted (ios_dt_mount).
  */
 
 OBJECT_DECLARE_SIMPLE_TYPE(S5L8930L3GState, S5L8930_L3G4200D)
@@ -1557,7 +1557,7 @@ struct S5L8930L3GState {
     QEMUTimer *timer;
     qemu_irq pin[2];
     uint8_t whoami;
-    char *mount;
+    char *dt_orientation;
     LIS302DLState *accel;                /* the turn's source; wired by the machine */
 };
 
@@ -1571,14 +1571,14 @@ static void l3g_measure(S5L8930L3GState *s, int64_t now)
 {
     static const double mdps[4] = { 8.75, 17.5, 70, 70 };   /* per digit, by CTRL_REG4 FS */
     double w[3];
-    int m[3] = { 1, 2, 3 };
+    int8_t m[3] = { 1, 2, 3 };
 
     if (!s->accel || !lis302dl_motion_rate(s->accel, now, w)) {
         memset(s->rate, 0, sizeof(s->rate));
         return;
     }
-    if (s->mount) {
-        sscanf(s->mount, "%d,%d,%d", &m[0], &m[1], &m[2]);
+    if (s->dt_orientation && !ios_dt_mount(s->dt_orientation, false, m)) {
+        m[0] = 1, m[1] = 2, m[2] = 3;
     }
     for (int i = 0; i < 3; i++) {
         int a = abs(m[i]) - 1;
@@ -1777,7 +1777,7 @@ static const VMStateDescription vmstate_s5l8930_l3g = {
 
 static const Property l3g_properties[] = {
     DEFINE_PROP_UINT8("whoami", S5L8930L3GState, whoami, 0xd3),
-    DEFINE_PROP_STRING("mount", S5L8930L3GState, mount),
+    DEFINE_PROP_STRING("dt-orientation", S5L8930L3GState, dt_orientation),
 };
 
 static void l3g_class_init(ObjectClass *klass, const void *data)

@@ -3190,7 +3190,11 @@ static void ipod_touch_machine_init(MachineState *machine)
     // init the accelerometer. Keep the handle so the machine's QMP properties
     // (accel-orientation / accel-x/y/z / accel-shake, added in instance_init)
     // can drive it, e.g.  qom-set path=/machine property=accel-orientation value=3
-    I2CSlave *accelerometer = i2c_slave_create_simple(i2c_state->bus, "lis302dl", 0x1D);
+    // ponytail: the DT accelerometer orientation of 3.0 on (4); 2.x's DT says 5, which ios_dt_mount reads as 1.x
+    // does: read the booted DT's if a 2.x row ever fails the rotation check.
+    I2CSlave *accelerometer = i2c_slave_new("lis302dl", 0x1D);
+    qdev_prop_set_string(DEVICE(accelerometer), "dt-orientation", "04000000");
+    i2c_slave_realize_and_unref(accelerometer, i2c_state->bus, &error_fatal);
     nms->lis302dl_state = LIS302DL(accelerometer);
     lis302dl_apply_attitude(nms->lis302dl_state, nms->accel_pitch, nms->accel_roll, nms->accel_flat);
     nms->lis302dl_state->rate_hz = nms->accel_rate_hz;

@@ -108,10 +108,9 @@ typedef struct A4Board {
     int pwroff_watch_ms;                 /* request to halt, before the warning; 0 = 25 s */
     /* I2C slaves in creation order (that order is the snapshot's). */
     A4I2CDevice i2c[10];
-    bool accel_flipped;                  /* LIS331 mounted turned 180 degrees about X */
-    const char *accel_mount;             /* else the LIS model's "mount" axes (its DT orientation, inverted) */
+    const char *accel_dt;                /* the DT accelerometer's "orientation" (ios_dt_mount) */
     uint8_t compass_orientation;         /* the AK8973 model's orientation (the DT compass node's encoding) */
-    const char *gyro_mount;              /* the L3G4200D model's "mount" (its DT orientation, inverted) */
+    const char *gyro_dt;                 /* the DT gyro's "orientation" (ios_dt_mount) */
     uint32_t mt_tx_fifo;                 /* multitouch SPI TX FIFO bytes (its firmware is one burst); 0 = default */
     int8_t bt_uart;                      /* BCM4329 HCI, nothing attached */
     int8_t gauge_uart;                   /* bq27545 HDQ gas gauge; -1 = none */
@@ -205,13 +204,9 @@ static const A4Board a4_k48 = {
         { 2, 0x19, TYPE_LIS302DL },
         { 2, 0x39, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
     },
-    /* On the iPad the LIS331 sits turned 180 degrees about X relative to
-     * the iPod's mounting: the iPod vectors read with Y (and Z) negated.
-     * Without this, "portrait" (1) read as upside down (SpringBoard's
-     * interface orientation 2) and portrait-only iPhone apps drew
-     * upside down; checked against springboardservices: upright reads 1
-     * and a clockwise turn 4, then 2, then 3, as on hardware. */
-    .accel_flipped = true,
+    /* Read without it, "portrait" (1) was upside down (SpringBoard's interface orientation 2); checked against
+     * springboardservices: upright reads 1 and a clockwise turn 4, then 2, then 3, as on hardware. */
+    .accel_dt = "0100000000ff000000000100",
     .bt_uart = 3,                        /* uart3/bluetooth,n88 */
     .gauge_uart = 5,
     .swi_iset = 1,
@@ -257,10 +252,8 @@ static const A4Board a4_n81 = {
         { 2, 0x49, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
         { 2, 0x68, TYPE_S5L8930_L3G4200D, 0x21, 0x05 },   /* gyro,ap3gdl: INT1, INT2 */
     },
-    /* DT accelerometer orientation rows (0,-1,0) (-1,0,0) (0,0,1): x reads -y, y reads -x. */
-    .accel_mount = "-2,-1,3",
-    /* DT gyro orientation rows (0,-1,0) (-1,0,0) (0,0,-1): x reads -y, y reads -x, z reads -z. */
-    .gyro_mount = "-2,-1,-3",
+    .accel_dt = "00ff0000ff00000000000100",
+    .gyro_dt = "00ff0000ff0000000000ff00",
     .bt_uart = 1,                            /* uart1/bluetooth,n88 */
     .gauge_uart = -1,
     .swi_iset = 3,
@@ -312,12 +305,8 @@ static const A4Board a4_n90 = {
         { 2, 0x19, TYPE_LIS302DL },
         { 2, 0x68, TYPE_S5L8930_L3G4200D, 0x21, 0x05 },   /* gyro,ap3gdl: INT1, INT2 */
     },
-    /* DT accelerometer orientation rows (0,1,0) (-1,0,0) (0,0,-1): x reads -y, y reads x (its transpose), and
-     * z reads z. The DT's z row would make the mount a mirror image, which no part on a board can be; the
-     * iPad's DT (x, -y, z) is the same mirror, and its LIS331 reads -z (accel_flipped). With -z here the
-     * guest took face up for face down: CoreLocation's heading came out mirrored face up only. */
-    .accel_mount = "-2,1,3",
-    .gyro_mount = "1,2,3",                   /* DT gyro orientation: identity */
+    .accel_dt = "00010000ff0000000000ff00",
+    .gyro_dt = "010000000001000000000100",
     .bt_uart = 3,
     .gauge_uart = 5,
     .swi_iset = 3,
@@ -1194,16 +1183,13 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
              * driven: nothing before userland waits on them.
              */
             qdev_prop_set_uint8(dev, "whoami", 0x32);
-            qdev_prop_set_bit(dev, "mount-flipped", s->board->accel_flipped);
-            if (s->board->accel_mount) {
-                qdev_prop_set_string(dev, "mount", s->board->accel_mount);
-            }
+            qdev_prop_set_string(dev, "dt-orientation", s->board->accel_dt);
         }
         if (!strcmp(d->type, TYPE_S5L8930_AK8973)) {
             qdev_prop_set_uint8(dev, "orientation", s->board->compass_orientation);
         }
         if (!strcmp(d->type, TYPE_S5L8930_L3G4200D)) {
-            qdev_prop_set_string(dev, "mount", s->board->gyro_mount);
+            qdev_prop_set_string(dev, "dt-orientation", s->board->gyro_dt);
             if (s->accel) {
                 /* the gyro sees each attitude change as a turn (created after the accelerometer) */
                 s->accel->motion = true;
@@ -1243,7 +1229,7 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
             object_property_add_alias(machine, "compass-heading", OBJECT(dev), "heading");
         } else if (!strcmp(d->type, TYPE_LIS302DL)) {
             s->accel = LIS302DL(dev);
-            lis302dl_apply_orientation(s->accel, 1);   /* init ran before mount-flipped */
+            lis302dl_apply_orientation(s->accel, 1);   /* init ran before the mount was set */
             if (s->compass) {
                 s5l8930_ak8973_set_accel(s->compass, s->accel);
             }

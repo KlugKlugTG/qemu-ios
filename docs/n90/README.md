@@ -260,10 +260,10 @@ What differs from 7.1.2:
    and the accelerometer's z no longer reads -z (debt 4). CoreLocation reads 90 and 200 within 2 degrees face up
    and upright on 4.2.1 (the compass scenario of LightTouchMac `sessions phone`). The stand-in had also put 4.2.1
    locationd on its AK8973-only offset-DAC path. 7.x is unchecked: its read-only root takes no probe.
-4. ~~Accelerometer mounting~~ (2026-10-04, z 2026-10-10): `accel_mount` "-2,1,3": the DT orientation's transpose
-   for x and y. The DT's z row (-1) makes the matrix a mirror image, which no mounted part can be; the iPad's DT is
-   the same mirror and its LIS331 reads -z. With -z the guest took face up for face down, which showed only as
-   CoreLocation's heading mirrored face up. Safari turns with `accel-orientation` 1/3/4 as on hardware.
+4. ~~Accelerometer mounting~~ (2026-10-04, z 2026-10-10; from the DT, 2026-10-20): the board carries its DT
+   accelerometer orientation (`accel_dt`), and the part reads as `ios_dt_mount` derives from it: x reads -y,
+   y reads x, z reads z. With -z the guest took face up for face down, which showed only as CoreLocation's
+   heading mirrored face up. Safari turns with `accel-orientation` 1/3/4 as on hardware.
 5. All of N81's debts apply: no iBoot or NAND boot, K48's 16 GB NAND geometry, K48's panel ID. Touch is
    calibrated (N81's debt 7, the shared `mt_profile_n81`).
 6. **7.x boots saturate the emulated A4 CPU for about 2 minutes** (measured 2026-10-06 on 7.1.2 with

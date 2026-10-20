@@ -80,6 +80,7 @@ static const uint32_t s5l8900_usb_hwcfg[] = { 0, 0x7a8f60d0, 0x082000e8, 0x01f08
 /* n45ap 3A101a's device tree. */
 static const S5L8900Board n45_board = {
     .name = "n45",
+    .accel_dt = "03000000",
     .pmu_i2c = 1,
     /* i2s1: dma-parent dmac1, TX config 0x884 (peripheral 2), interrupts <0xaa> */
     .codec_i2s = { N45_IIS1_BASE, 1, N45_I2S1_DMA_REQ_ID, 0xaa, .host_output = false },
@@ -117,10 +118,7 @@ static const S5L8900Board m68_board = {
     .voldown_gpio = M68_GPIO_BUTTON_VOLDOWN, .voldown_irq = M68_GPIO_BUTTON_VOLDOWN_IRQ,
     .ring_gpio = M68_GPIO_RING_SWITCH, .ring_irq = M68_GPIO_RING_SWITCH_IRQ,
     .nand_banks = 4,
-    /* DT accelerometer orientation 0 (none), where the N45's is 3: AppleLIS302DL negates x for bit 0 and y
-     * for bit 1, so the N45's part sits turned 180 degrees about Z to the M68's. The model reads as the
-     * N45's part; on the M68 each axis reads the negated device x and y. */
-    .accel_mount = "-1,-2,3",
+    .accel_dt = "00000000",              /* the DT has no orientation: the driver's 0 */
     /* 1.0 builds its "slide to power off" sheet slowly (up 13 s into a hold,
      * guest time, where 1.1's is up in 3-4 s); a release before it locks instead. */
     .pwroff_hold_ms = 20000, .pwroff_settle_ms = 3000,
@@ -1070,9 +1068,7 @@ static void n45_machine_init(MachineState *machine)
         i2c[i] = IPOD_TOUCH_I2C(dev)->bus;
     }
     dev = DEVICE(i2c_slave_new("lis302dl", 0x1D));
-    if (s->board->accel_mount) {
-        qdev_prop_set_string(dev, "mount", s->board->accel_mount);
-    }
+    qdev_prop_set_string(dev, "dt-orientation", s->board->accel_dt);
     i2c_slave_realize_and_unref(I2C_SLAVE(dev), i2c[0], &error_fatal);
     s->accel = LIS302DL(dev);
     lis302dl_apply_orientation(s->accel, 1);   /* init ran before the mount was set */
