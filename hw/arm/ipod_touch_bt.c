@@ -47,6 +47,44 @@
 
 #define BT_RESP_MAX 1024
 
+/*
+ * Each chip's Read Local Version return parameters, keyed by the chip a board's Bluetooth node is wired to. From
+ * 5.0, BlueTool picks the chip, and so its firmware and boot script, from the manufacturer and LMP subversion alone
+ * (9B206 and 10B500 BlueTool; it asks after HCI_Reset and the baud change, before Download Minidriver): Broadcom (0x000f) 0x8107 is "BCM4325", 0x4217
+ * "BCM4329B1", 0x4103 "BCM4330B1", 0x4113 "BCM4330B0", 0x610d "BCM4329C0", 0x2202 "BCM4330A1", 0x2118 "BCM20710";
+ * CSR (0x000a) build 0x12e9 is "BC6" and any other "CSR"; anything else is "BCM", which no platform has firmware
+ * for, so the boot script fails and BTServer runs it again, forever. A Broadcom subversion is the version its HCD
+ * files are named for (Linux btbcm.c decodes bits 15-13, 12-8 and 7-0 so, and lists 0x4217 as BCM4329B1):
+ * BCM4325D0_004.001.007 is 0x8107, BCM4329B1_002.002.023 0x4217. The N88's D1 answers 0x8107 as the D0 does: its
+ * file, BCM4325D1_004.002.004 (the version its patch RAM brings), is under the key "BCM4325". Both chips are
+ * Bluetooth 2.1 + EDR (HCI and LMP version 4); the HCI revision's low 12 bits are the firmware build, which
+ * btbcm.c prints as the build and is 0 in ROM.
+ *
+ * The M68's BlueCore4 (its scripts' "BC4 Init") is Bluetooth 2.0 + EDR (version 3); CSR reports its firmware build
+ * ID as both the HCI revision and the LMP subversion, and 1.x to 3.x BlueTool names no chip by it.
+ * ponytail: build 3164 (BlueZ csr.c's "Unified 21e", a BlueCore4-ROM firmware), not read off an M68.
+ */
+typedef struct ItBtChip {
+    const char *name;
+    uint8_t version[8];     /* HCI version, HCI revision, LMP version, manufacturer, LMP subversion (LE) */
+} ItBtChip;
+
+static const ItBtChip bt_chips[] = {
+    { "BCM4325",   { 0x04, 0x00, 0x00, 0x04, 0x0f, 0x00, 0x07, 0x81 } },  /* N72's D0, N88's D1 */
+    { "BCM4329B1", { 0x04, 0x00, 0x00, 0x04, 0x0f, 0x00, 0x17, 0x42 } },  /* N18 */
+    { "BC4",       { 0x03, 0x5c, 0x0c, 0x03, 0x0a, 0x00, 0x5c, 0x0c } },  /* M68 */
+};
+
+static const ItBtChip *bt_chip(const char *name)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(bt_chips); i++) {
+        if (!strcmp(bt_chips[i].name, name)) {
+            return &bt_chips[i];
+        }
+    }
+    g_assert_not_reached();
+}
+
 /* Unprovisioned controller default, in HCI least-significant-byte order. */
 static const uint8_t bt_default_addr[6] = { 0x66, 0x55, 0x44, 0x33, 0x22, 0x02 };
 
@@ -56,6 +94,7 @@ struct ItBtChardev {
     uint8_t cmd[260];       /* one H4 command: 3 header + up to 255 payload */
     unsigned cmd_len;
     uint8_t bd_addr[6];
+    const ItBtChip *chip;   /* the board's, from creation */
 
     uint8_t resp[BT_RESP_MAX];
     unsigned resp_head, resp_tail;
@@ -106,10 +145,6 @@ static int bt_trace(void)
 static const uint8_t *bt_ret_params(ItBtChardev *bt, uint16_t opcode,
                                     unsigned *len)
 {
-    /* Read Local Version: hci ver/rev, lmp ver, manufacturer, lmp subver. */
-    static const uint8_t local_version[] = {
-        0x05, 0x0f, 0x00, 0x05, 0x0f, 0x00, 0x11, 0x22,
-    };
     /* Read Local Supported Commands: 64 bytes. Claim the basic set only. */
     static const uint8_t supported_commands[64] = {
         0xff, 0xff, 0xff, 0x03, 0xce, 0xff, 0xef, 0xff,
@@ -146,7 +181,7 @@ static const uint8_t *bt_ret_params(ItBtChardev *bt, uint16_t opcode,
 
 #define R(sym) do { *len = sizeof(sym); return sym; } while (0)
     switch (opcode) {
-    case 0x1001: R(local_version);
+    case 0x1001: R(bt->chip->version);
     case 0x1002: R(supported_commands);
     case 0x1003: R(features);
     case 0x1004: R(ext_features);
@@ -502,7 +537,7 @@ static void bt_register_types(void)
 
 type_init(bt_register_types)
 
-Chardev *it_bt_chardev(Chardev *user, bool enabled, uint32_t latency_us)
+Chardev *it_bt_chardev(Chardev *user, bool enabled, uint32_t latency_us, const char *chip)
 {
     /*
      * A chardev the user asked for on -serial wins, so UART1 can still be
@@ -516,6 +551,7 @@ Chardev *it_bt_chardev(Chardev *user, bool enabled, uint32_t latency_us)
     Chardev *chr = qemu_chardev_new(NULL, TYPE_CHARDEV_IT_BT, NULL, NULL,
                                     &error_abort);
     IT_BT_CHARDEV(chr)->latency_ns = (int64_t)latency_us * 1000;
+    IT_BT_CHARDEV(chr)->chip = bt_chip(chip);
     return chr;
 }
 
@@ -527,5 +563,6 @@ Chardev *it_bt_csr_chardev(Chardev *user)
     }
     Chardev *chr = qemu_chardev_new(NULL, TYPE_CHARDEV_IT_BT, NULL, NULL, &error_abort);
     IT_BT_CHARDEV(chr)->csr = true;
+    IT_BT_CHARDEV(chr)->chip = bt_chip("BC4");
     return chr;
 }

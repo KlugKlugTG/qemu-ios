@@ -2974,7 +2974,7 @@ static void ipod_touch_machine_init(MachineState *machine)
      * once DMAC0 exists.
      */
     uart1_dev = exynos4210_uart_create(UART1_MEM_BASE, 256, 1,
-                                       it_bt_chardev(serial_hd(1), nms->bt_enabled, nms->bt_latency_us),
+                                       it_bt_chardev(serial_hd(1), nms->bt_enabled, nms->bt_latency_us, "BCM4325"),
                                        nms->irq[0][25], true);
     if (!uart1_dev) {
         hw_error("Failed to create UART1 device!");

@@ -318,6 +318,6 @@ typedef struct {
  * `user` unchanged if the user pointed -serial at that port, so the HCI can be
  * watched or replaced from outside. bt=off disables the model entirely.
  */
-Chardev *it_bt_chardev(Chardev *user, bool enabled, uint32_t latency_us);
+Chardev *it_bt_chardev(Chardev *user, bool enabled, uint32_t latency_us, const char *chip);
 
 #endif

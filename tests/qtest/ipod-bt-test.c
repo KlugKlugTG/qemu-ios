@@ -90,6 +90,16 @@ static void programming(void)
     qtest_quit(q);
 }
 
+/* The N72's BCM4325 D0: HCI 2.1, ROM build, LMP 2.1, Broadcom, subversion 0x8107 (BCM4325D0_004.001.007). */
+static void local_version(void)
+{
+    static const uint8_t version[] = { 0x04, 0x00, 0x00, 0x04, 0x0f, 0x00, 0x07, 0x81 };
+    QTestState *q = start_board(false);
+    send_command(q, 0x1001, NULL, 0);
+    expect_reply(q, 0x1001, 0, version, sizeof(version));
+    qtest_quit(q);
+}
+
 static void board_reset(void)
 {
     QTestState *q = start_board(false);
@@ -222,6 +232,7 @@ int main(int argc, char **argv)
     nand = g_dir_make_tmp("n72-bt-nand-XXXXXX", NULL);
     g_test_init(&argc, &argv, NULL);
     qtest_add_func("/ipod/bluetooth/address-programming", programming);
+    qtest_add_func("/ipod/bluetooth/local-version", local_version);
     qtest_add_func("/ipod/bluetooth/board-reset", board_reset);
     qtest_add_func("/ipod/bluetooth/restored-address", restored_address);
     qtest_add_func("/ipod/bluetooth/m68-bluecore", m68_bluecore);

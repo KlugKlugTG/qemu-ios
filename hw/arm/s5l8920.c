@@ -147,7 +147,8 @@ typedef struct S5L8920Board {
     uint8_t board_id;                    /* PMGR POWER_ID[23:16] */
     int nuarts;
     int8_t gauge_uart;                   /* bq27540 HDQ gas gauge; -1 = none */
-    int8_t bt_uart;                      /* the BCM4325's H4 HCI (ipod_touch_bt.c); 0 = none */
+    int8_t bt_uart;                      /* the Bluetooth chip's H4 HCI (ipod_touch_bt.c); 0 = none */
+    const char *bt_chip;                 /* which chip answers it (ipod_touch_bt.c's bt_chips) */
     uint16_t gauge_mah;
     bool nor;                            /* a SPI NOR on spi0 (the N88's; the N18 boots from NAND) */
     bool baseband;                       /* spi2, the baseband link */
@@ -188,6 +189,7 @@ static const S5L8920Board s5l8920_n18 = {
     .nuarts = 2,
     .gauge_uart = -1,
     .bt_uart = 1,                        /* uart1/bluetooth,n18: the BCM4329's Bluetooth side */
+    .bt_chip = "BCM4329B1",
     .mt_atn = 0xb4,
     .mt_profile = &mt_profile_n81,       /* the N81's N1F55 sensor */
     .buttons = { .hold = 0xb7, .menu = 0xb6, .volup = 0xb0, .voldown = 0xb1 },
@@ -223,6 +225,7 @@ static const S5L8920Board s5l8920_n88 = {
     .nuarts = 5,                         /* iap, debug, umts, bluetooth, gas gauge */
     .gauge_uart = 4,
     .bt_uart = 3,                        /* uart3/bluetooth,n88 */
+    .bt_chip = "BCM4325",                /* the D1 */
     .gauge_mah = 1219,                   /* ponytail: the 3GS's rated cell, not measured */
     .nor = true,
     .baseband = true,
@@ -803,7 +806,7 @@ static void s5l8920_init(MachineState *machine)
             fifo = 16;
         }
         if (i == s->board->bt_uart) {
-            chr = it_bt_chardev(chr, true, 2000);
+            chr = it_bt_chardev(chr, true, 2000, s->board->bt_chip);
         }
         dev = exynos4210_uart_create(S5L8920_UART_BASE(i), fifo, i, chr,
                                      s5l8920_irq(s, S5L8920_IRQ_UART(i)), true);

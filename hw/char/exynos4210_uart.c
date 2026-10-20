@@ -359,7 +359,16 @@ static void exynos4210_uart_update_irq(Exynos4210UartState *s)
             count >= exynos4210_uart_Rx_FIFO_trigger_level(s)) {
             exynos4210_uart_update_dmabusy(s);
             s->reg[I_(UINTSP)] |= UINTSP_RXD;
-            timer_del(s->fifo_timeout_timer);
+            /*
+             * In DMA receive mode the trigger level is the DMA's request and the receive timeout still
+             * comes when the line goes quiet: the S5L8920's 5.x and 6.x serial driver hears of a packet
+             * the CDMA has taken only from that timeout. Cancelling it here lost every reply of at least
+             * the trigger level (Read Local Version's 15 bytes; HCI_Reset's 7 got through), and BlueTool
+             * waited out its 10 s and was run again.
+             */
+            if ((s->reg[I_(UCON)] & 3) < 2) {
+                timer_del(s->fifo_timeout_timer);
+            }
         }
     } else if (s->reg[I_(UTRSTAT)] & UTRSTAT_Rx_BUFFER_DATA_READY) {
         exynos4210_uart_update_dmabusy(s);
