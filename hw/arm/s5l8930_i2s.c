@@ -10,11 +10,14 @@
  * PCM arrives in the TX FIFO from CDMA channel 0x1a (i2s0) as 16-bit writes,
  * paced by the CDMA model at this block's frame rate (s5l8930_cdma.c), so the
  * FIFO just appends to a ring the audio backend drains. Stereo S16LE at the
- * port's frame rate (s5l8930_i2s_rate()): the codec's LRCLK where the codec
- * masters the frame clock ("lrclk", the iPod touch 4), on the S5L8920 the
- * audio complex's MCLK over this block's dividers ("nco-ref-hz"), else the
- * port's PMGR NCO bit clock; read each time the TX side is started and
- * whenever the codec's LRCLK changes.
+ * port's frame rate (s5l8930_i2s_rate()), as the hardware makes it: the
+ * port's own configuration says whether it drives the frame clock
+ * (i2s_frame_master()). As the master it divides its MCLK (the A4's PMGR NCO;
+ * the S5L8920's audio complex NCO, "nco-base"/"nco-ref-hz") into frames; as
+ * the slave it follows the LRCLK of whatever drives the clock, the codec
+ * connected to its "lrclk" input (hw/arm/ipod_touch_cs42l58.c). The voice
+ * takes the rate when TX starts, when a CDMA chain starts and whenever the
+ * codec's LRCLK changes while TX runs.
  *
  * Capture is the mirror image: CDMA channel 0x1b reads the RX FIFO (+0x38) at
  * the same paced rate and the FIFO hands out bytes a QEMU input voice (the
@@ -48,13 +51,32 @@ OBJECT_DECLARE_SIMPLE_TYPE(S5L8930I2SState, S5L8930_I2S)
 #define I2S_RXCOM       0x34
 #define I2S_RXFIFO      0x38
 #define I2S_CMD_RUN     6
+#define I2S_TXCON       0x04
+/*
+ * The Samsung I2S (the A4's 'i2s-1,samsung', AppleSamsungI2SController; the S5L8900's and S5L8720's
+ * AppleS5L8900XI2SController, hw/arm/ipod_touch_i2s.c) takes BCLK and LRCLK from outside while TX config bit 20 is
+ * set. Every DT audio-data TX config word (word 2) has it set where a codec or a baseband masters the clock and
+ * clear where the port drives it: k48ap 3.2-5.1.1 i2s0 and i2s1 0x03000081 (the port, at its PMGR NCO) and i2s2 (the
+ * baseband) 0x03100019/0x03100081; n90ap 4.x-6.x i2s0 and i2s1 0x03000081; n81ap 4.1-6.1.6 i2s0 (the CS42L59's,
+ * its rate in the codec's register 0a) 0x03100019/0x03100081; n72ap 3.1.3 (the CS42L58's, 6 MHz MCLK)
+ * 0x03100019; m68ap 1.1.4 (the WM8758's, its PLL a 256 fs SYSCLK) 0x01100300. The +0x410 config word the drivers
+ * write beside it agrees on every one (bits 30-31 set on the masters, 0xc8000300/0xe8000300, clear on the slaves).
+ * Rockbox's drivers for the same block on the S5L8700 and S5L8702 iPods (firmware/target/arm/s5l870x/pcm-*.c) set
+ * I2STXCON bit 20 on all three, each with its codec programmed as the clock master (the CS42L55's CLKCTL1 MASTER,
+ * the WM8975's AINTFCE MS, the Nano 3G's WM1870).
+ */
+#define I2S_TXCON_EXT_CLK (1u << 20)
 #define I2S_MCLK_DIV    0x408   /* S5L8920: bits 8-15, MCLK per BCLK */
 #define I2S_FRAME_BITS  0x410   /* S5L8920: bits 0-7, BCLK per frame */
 /*
- * +0x410 bits 30-31: the port drives BCLK and LRCLK. Set where the I2S masters the frame clock (the 3GS's
- * 0xc3200020, the iPad's 0xc8000300), clear where the codec does (the iPod touch 3G's CS42L58, 0x20000040; the
- * iPod touch 4's CS42L59, 0x28000300), as each board's driver writes it from its DT. ponytail: inferred from
- * those four values, not from a datasheet.
+ * The S5L8920's own I2S ('i2s,s5l8920x', AppleS5L8920XI2SController) drives BCLK and LRCLK while +0x410 bits 30-31
+ * are set. Its driver keeps whether the port is the clock master from bit 21 of DT audio-data word 0, and programs
+ * the audio complex's MCLK in setSampleRate only for a master (3.1.3 0xc0677988 and 6.1.6 0x8078a744 store
+ * !(word 0 bit 21); 6.1.6 setSampleRate 0x8078aac6 skips the MCLK request when that is set). Word 5, which it
+ * writes to +0x410, has bits 30-31 set exactly where word 0 has bit 21: the 3GS's i2s0 and i2s1 (0x00600103,
+ * 0xc3200020; 3.1.3 and 6.1.6), and clear on the 3GS's baseband port (0x103, 0x22000040) and the iPod touch 3G's
+ * CS42L58 port (0x103, 0x20000040; 3.1.1 and 5.1.1). ponytail: which of the written fields the hardware reads for
+ * the direction rests on that agreement; no datasheet for this block.
  */
 #define I2S_FRAME_MASTER 0xc0000000u
 #define TONE_AMPLITUDE  8000
@@ -75,7 +97,7 @@ struct S5L8930I2SState {
      * format (0x78057805); the A4's starts with TXCOM = 6. */
     bool ctrl_run;
     uint8_t port;                   /* property: i2s<port>, selects its NCO */
-    Clock *lrclk;                   /* in: the codec's frame clock, where the codec is master */
+    Clock *lrclk;                   /* in: the codec's frame clock, followed while the port is the slave */
     uint64_t nco_base;              /* property, S5L8920: the audio complex's NCO for MCLK */
     uint32_t nco_ref_hz;            /* property, S5L8920: that NCO's reference; 0 = the A4's PMGR NCO */
     unsigned rate;                  /* the voice's current frame rate */
@@ -130,17 +152,26 @@ static unsigned i2s_nco_mclk_rate(S5L8930I2SState *s)
     return rate >= 8000 && rate <= 192000 ? rate : 44100;
 }
 
+/* Whether the port drives its frame clock, from its own configuration (I2S_TXCON_EXT_CLK, I2S_FRAME_MASTER). */
+static bool i2s_frame_master(S5L8930I2SState *s)
+{
+    return s->ctrl_run ? s->regs[I2S_FRAME_BITS >> 2] & I2S_FRAME_MASTER
+                       : !(s->regs[I2S_TXCON >> 2] & I2S_TXCON_EXT_CLK);
+}
+
 unsigned s5l8930_i2s_rate(unsigned port)
 {
     S5L8930I2SState *s = port < ARRAY_SIZE(i2s_ports) ? i2s_ports[port] : NULL;
-    unsigned lrclk = s ? clock_get_hz(s->lrclk) : 0;
     uint32_t bclk;
 
-    /* A codec's frame clock only while the port is its slave: on a master port its dividers make the rate. */
-    if (lrclk && !(s->regs[I2S_FRAME_BITS >> 2] & I2S_FRAME_MASTER)) {
-        return lrclk;
+    if (!s) {
+        return 44100;
     }
-    if (s && s->nco_ref_hz) {
+    if (!i2s_frame_master(s)) {
+        /* ponytail: no clock connected or none driven yet plays at 44.1 kHz, where the hardware would stall. */
+        return clock_get_hz(s->lrclk) ? clock_get_hz(s->lrclk) : 44100;
+    }
+    if (s->nco_ref_hz) {
         return i2s_nco_mclk_rate(s);
     }
     bclk = address_space_ldl_le(&address_space_memory, S5L8930_NCO_BCLK(port),
@@ -291,7 +322,7 @@ static uint64_t i2s_read(void *opaque, hwaddr offset, unsigned size)
     return offset == I2S_TXFIFO ? 0 : s->regs[offset >> 2];
 }
 
-/* The codec switched rates (the iPod touch 4 goes to 22.05 kHz for VoiceOver's speech). */
+/* The codec switched rates (the iPod touch 3G and 4 go to 22.05 kHz for VoiceOver's speech). */
 static void i2s_lrclk_update(void *opaque, ClockEvent event)
 {
     S5L8930I2SState *s = opaque;

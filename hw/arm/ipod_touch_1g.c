@@ -708,9 +708,13 @@ static void m68_modem_battery(void *opaque)
 
 /* One S5L8900 I2S controller (the 2G's model, the same AppleS5L8900XI2SController driver) at its DT wiring. */
 static void n45_i2s_port(IPodTouch1GMachineState *s, MemoryRegion *sysmem, PL080State **dmac,
-                         const S5L8900I2SPort *port)
+                         const S5L8900I2SPort *port, Clock *lrclk)
 {
     DeviceState *dev = qdev_new(TYPE_IPOD_TOUCH_I2S);
+
+    if (lrclk) {
+        qdev_connect_clock_in(dev, "lrclk", lrclk);
+    }
 
     IPOD_TOUCH_I2S(dev)->sysic = s->sysic;
     IPOD_TOUCH_I2S(dev)->dmac = dmac[port->dmac];
@@ -1103,8 +1107,13 @@ static void n45_machine_init(MachineState *machine)
         i2c_slave_realize_and_unref(pmu, i2c[s->board->pmu_i2c], &error_fatal);
         qdev_connect_gpio_out(DEVICE(pmu), 0, qdev_get_gpio_in(DEVICE(s->sysic), 0x55));
     }
-    /* WM8758 codec at 0x1A beside it (the DT's audio0@1A). */
-    i2c_slave_create_simple(i2c[s->board->pmu_i2c], "wm8758", 0x1A);
+    /*
+     * WM8758 codec at 0x1A beside it (the DT's audio0@1A), master of its port's frame clock from a 9.0036 MHz
+     * MCLK (AppleWM8758Audio's PLL table; hw/arm/ipod_touch_wm8758.c).
+     */
+    I2CSlave *codec = i2c_slave_new("wm8758", 0x1A);
+    qdev_prop_set_uint32(DEVICE(codec), "mclk-hz", 9003600);
+    i2c_slave_realize_and_unref(codec, i2c[s->board->pmu_i2c], &error_fatal);
 
     /*
      * The WM8758's data port (the N45's I2S1, the M68's I2S0): the 2G's model (the same
@@ -1125,14 +1134,15 @@ static void n45_machine_init(MachineState *machine)
      * an N45 with nothing in the jack plays. The M68 has no piezo: its clicks
      * and ringer are this PCM, so the host plays it.
      */
-    n45_i2s_port(s, sysmem, dmac, &bd->codec_i2s);
+    n45_i2s_port(s, sysmem, dmac, &bd->codec_i2s, qdev_get_clock_out(DEVICE(codec), "lrclk"));
     /*
      * The M68's baseband voice port, which carries what the speaker plays. With the window plain RAM,
      * AppleBasebandOutput's DMA start failed (device not ready), mediaserverd's StartIO with it, and the
-     * device played nothing at all.
+     * device played nothing at all. The baseband masters its frame clock (TX config bit 20, as the codec's
+     * port); the modem drives none here, so the port stays at 44.1 kHz.
      */
     if (bd->bb_i2s.base) {
-        n45_i2s_port(s, sysmem, dmac, &bd->bb_i2s);
+        n45_i2s_port(s, sysmem, dmac, &bd->bb_i2s, NULL);
     }
 
     /*

@@ -288,10 +288,11 @@ void s5l8930_cdma_sink_done(DeviceState *dev, uint32_t fifo_base, uint32_t size)
 #define TYPE_S5L8930_I2S "s5l8930.i2s"
 
 /*
- * Frame rate of I2S port n. Where a codec masters the frame clock (the
- * port's "lrclk" input is connected, as the iPod touch 4's CS42L59 is), its
- * LRCLK. Otherwise the port's bit clock is PMGR NCO n (0xbf100100 +
- * 0x10 n): AppleS5L8930XPerformanceControllerFunctionNCOFrequency writes
+ * Frame rate of I2S port n. As the slave of its frame clock (its own
+ * configuration says which), its "lrclk" input's: the codec's. As the
+ * master, its MCLK over its dividers: on the A4 the port's bit clock is
+ * PMGR NCO n (0xbf100100 + 0x10 n), where
+ * AppleS5L8930XPerformanceControllerFunctionNCOFrequency writes
  * +4 = 64 * fs (0x002b1100 for 44.1 kHz, c0645046) when AppleARMIISAudio
  * sets the device rate. 44.1 kHz until the kernel has programmed either.
  */

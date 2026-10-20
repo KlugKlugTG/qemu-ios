@@ -9,9 +9,10 @@
  * The iPod touch 3G's port is the slave of its CS42L58, which makes the frame clock from a fixed 6 MHz MCLK (NCO
  * 0xb71b00/0xf70f2e80) at the rate in its register 05; its config, 0x20000040 with the dividers 0x20f, has bits
  * 30-31 clear and divides that MCLK into 46875 Hz, which everything played at (VoiceOver's 22.05 kHz speech 2.13
- * times fast). The port follows the codec's LRCLK while it is the slave, and only then.
+ * times fast). The port follows the codec's LRCLK while it is the slave, and only then; the TX config's bit 20,
+ * which makes the A4's Samsung I2S the slave, is not this block's.
  *
- * SLICE hw/arm/s5l8930_i2s.c define I2S_(MCLK_DIV|FRAME_BITS|FRAME_MASTER)[[:space:]]
+ * SLICE hw/arm/s5l8930_i2s.c define I2S_(TXCON|TXCON_EXT_CLK|MCLK_DIV|FRAME_BITS|FRAME_MASTER)[[:space:]]
  * SLICE hw/arm/s5l8930_i2s.c range static S5L8930I2SState *i2s_ports | static void i2s_in_cb
  * CFLAGS -Wall -Werror
  */
@@ -24,6 +25,7 @@ typedef unsigned Clock;
 static unsigned clock_get_hz(Clock *clock) { return clock ? *clock : 0; }
 typedef struct S5L8930I2SState {
     uint32_t regs[0x400];
+    bool ctrl_run;
     Clock *lrclk;
     uint64_t nco_base;
     uint32_t nco_ref_hz;
@@ -51,7 +53,7 @@ static void program(S5L8930I2SState *s, uint32_t a, uint32_t b, uint32_t div, ui
 
 int main(void)
 {
-    S5L8930I2SState i2s0 = { .nco_base = AUDIO_COMPLEX, .nco_ref_hz = 162000000 };
+    S5L8930I2SState i2s0 = { .ctrl_run = true, .nco_base = AUDIO_COMPLEX, .nco_ref_hz = 162000000 };
 
     i2s_ports[0] = &i2s0;
     /* Before the kernel has set MCLK: 44.1 kHz. */
@@ -75,7 +77,7 @@ int main(void)
     Clock lrclk = 0;
     i2s0.lrclk = &lrclk;
     program(&i2s0, 0xb71b00, 0xf70f2e80, 0x20f, 0x20000040);
-    assert(s5l8930_i2s_rate(0) == 46875);   /* before the codec has a rate */
+    assert(s5l8930_i2s_rate(0) == 44100);   /* before the codec has a rate: not the dividers' 46875 */
     lrclk = 44100;
     assert(s5l8930_i2s_rate(0) == 44100);
     lrclk = 22050;
@@ -86,6 +88,9 @@ int main(void)
     program(&i2s0, 0x2b1100, 0xf6832480, 0x20f, 0xc3200020);
     assert(s5l8930_i2s_rate(0) == 22050);
     lrclk = 44100;
+    assert(s5l8930_i2s_rate(0) == 22050);
+    /* Its TX config's bit 20 says nothing here. */
+    i2s0.regs[I2S_TXCON >> 2] = I2S_TXCON_EXT_CLK;
     assert(s5l8930_i2s_rate(0) == 22050);
     puts("PASS: S5L8920 i2s0 runs at its MCLK over its dividers as master, at the codec's LRCLK as slave");
     return 0;

@@ -357,7 +357,7 @@ struct IPad1MachineState {
     DeviceState *pmu;
     DeviceState *cdma;
     DeviceState *ltc;                    /* charger: USB cable level */
-    DeviceState *frame_clock_codec;      /* the CS42L59, which masters i2s0's frame clock */
+    DeviceState *codec;                  /* audio0 on i2s0: its LRCLK is i2s0's while i2s0 is the slave */
     synopsys_usb_state *usb_otg;
     IPodTouchMultitouchState *mt;
     char *kboot_path;
@@ -1230,8 +1230,8 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
                 qdev_connect_gpio_out_named(dev, "ap-power", 0,
                                             qemu_allocate_irq(ipad1_ap_power, s, 0));
             }
-        } else if (!strcmp(d->type, TYPE_CS42L59)) {
-            s->frame_clock_codec = dev;
+        } else if (object_dynamic_cast(OBJECT(dev), TYPE_CS42L58)) {   /* or the CS42L59 */
+            s->codec = dev;
         } else if (!strcmp(d->type, TYPE_S5L8930_LTC4099)) {
             s->ltc = dev;
             s5l8930_ltc4099_set_usb(dev, s->usb_cable);
@@ -1802,17 +1802,16 @@ static void ipad1_init(MachineState *machine)
      * I2S0-2. i2s0 carries the CS42L61 codec's PCM from CDMA channel 0x1a to
      * the host audio backend; i2s1 (voice) and i2s2 (baseband) are register
      * files whose FIFO data is dropped. The CDMA model paces all three.
-     * On the iPod touch 4 the CS42L59 masters i2s0's frame clock (its DT
-     * audio-data sets bit 20 of the TX config, the controller's external
-     * clock mode) and the kernel picks the rate in the codec's register 0a,
-     * not the NCO, so i2s0 runs at the codec's LRCLK.
+     * The codec's LRCLK goes to i2s0, which follows it while its own TX
+     * config makes it the slave (the iPod touch 4's CS42L59 masters the
+     * clock, the iPad's and the iPhone 4's port does: hw/arm/s5l8930_i2s.c).
      */
     for (i = 0; i < 3; i++) {
         dev = qdev_new(TYPE_S5L8930_I2S);
         qdev_prop_set_bit(dev, "audio-out", i == 0);
         qdev_prop_set_uint8(dev, "port", i);
-        if (i == 0 && s->frame_clock_codec) {
-            qdev_connect_clock_in(dev, "lrclk", qdev_get_clock_out(s->frame_clock_codec, "lrclk"));
+        if (i == 0 && s->codec) {
+            qdev_connect_clock_in(dev, "lrclk", qdev_get_clock_out(s->codec, "lrclk"));
         }
         sbd = SYS_BUS_DEVICE(dev);
         sysbus_realize_and_unref(sbd, &error_fatal);

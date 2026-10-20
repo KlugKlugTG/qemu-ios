@@ -37,7 +37,10 @@ static unsigned cs42l58_sample_rate(uint8_t control)
      * low five bits select LRCLK. The codec is the I2S clock master.
      * 10B500 AppleCS42L59Audio (n81) writes the same codes to register 0a
      * from a fixed 6 MHz MCLK (0x80c3908c): 0x0b for 44.1 kHz, and 0x13
-     * for the 22.05 kHz VoiceOver's speech switches the hardware to.
+     * for the 22.05 kHz VoiceOver's speech switches the hardware to. The
+     * codes are the CS42L55's CLKCTL2 (Rockbox's cs42l55.h: speed mode,
+     * 32 kHz group and MCLK/LRCK ratio from a 6 MHz-class MCLK), the same
+     * family's part on the S5L8702 iPods.
      * ponytail: model the nine rates the driver supports; other clock modes
      * need the part's clock specification before they can be enabled. */
     switch (control & 0x1f) {

@@ -2,15 +2,16 @@
  *
  * The CS42L59 masters i2s0's frame clock and AppleCS42L59Audio picks the rate in the codec's register 0a (0x0b
  * 44.1 kHz; 0x13 22.05 kHz, which iOS 6 switches to for VoiceOver's speech). The port's frame rate, which the
- * output voice and the CDMA's pacing both use, must follow it while TX runs, and go back to the NCO's when no
- * codec drives the clock. The CS42L58's rate stays in register 05.
+ * output voice and the CDMA's pacing both use, must follow it while TX runs, because the port's own TX config
+ * (10B500's 0x03100081) has bit 20 set, the Samsung I2S's external clock. The CS42L58's rate stays in register 05.
  *
- * Where the port masters the clock (the iPad, the iPhone 4) its rate is PMGR NCO 0's, which 5.x and 6.x set for
+ * Where the port masters the clock (the iPad, the iPhone 4: TX config 0x03000081) its rate is PMGR NCO 0's, whatever
+ * the codec connected to it is set to, which 5.x and 6.x set for
  * VoiceOver's 22.05 kHz, and back, while TX runs: each CDMA chain starts at the NCO's rate as it is then
  * (s5l8930_i2s_sync_rate) and the voice must play at that rate too, not at the one TX started with.
  *
  * SLICE hw/arm/ipod_touch_cs42l58.c fn cs42l58_sample_rate cs42l58_send
- * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|TXCOM|CMD_RUN|MCLK_DIV|FRAME_BITS|FRAME_MASTER)[[:space:]]
+ * SLICE hw/arm/s5l8930_i2s.c define I2S_(CTRL|TXCON|TXCON_EXT_CLK|TXCOM|CMD_RUN|MCLK_DIV|FRAME_BITS|FRAME_MASTER)[[:space:]]
  * SLICE hw/arm/s5l8930_i2s.c range static S5L8930I2SState *i2s_ports | static void i2s_in_cb
  * SLICE hw/arm/s5l8930_i2s.c fn i2s_tx_running i2s_set_rate i2s_lrclk_update s5l8930_i2s_sync_rate
  * CFLAGS -Wall -Werror
@@ -103,12 +104,13 @@ int main(void)
     i2s_ports[0] = &i2s0;
     i2s0 = (S5L8930I2SState) { .lrclk = &lrclk, .rate = 44100, .voice = &i2s0 };
     i2s0.regs[I2S_TXCOM >> 2] = I2S_CMD_RUN;
-    i2s0.regs[I2S_FRAME_BITS >> 2] = 0x28000300;   /* 10B500's config: the codec's slave */
+    i2s0.regs[I2S_TXCON >> 2] = 0x03100081;        /* 10B500's TX config: the codec's slave */
+    i2s0.regs[I2S_FRAME_BITS >> 2] = 0x28000300;
 
-    /* Before the kernel has set either clock: 44.1 kHz. */
+    /* Before the codec has a rate: 44.1 kHz, not the NCO the slave does not use. */
     assert(s5l8930_i2s_rate(0) == 44100);
     nco_bclk = 64 * 48000;
-    assert(s5l8930_i2s_rate(0) == 48000);
+    assert(s5l8930_i2s_rate(0) == 44100);
     nco_bclk = 0;
 
     /* Boot sets the codec to 44.1 kHz; VoiceOver's speech takes it to 22.05 kHz and back. */
@@ -135,8 +137,10 @@ int main(void)
     /* A port no codec drives runs at its NCO. */
     assert(s5l8930_i2s_rate(1) == 44100);
 
-    /* The iPad: master of its frame clock, at its NCO. TX starts at 44.1 kHz; the NCO goes to 22.05 kHz and back
-     * while it runs, and each chain's start takes the voice along. */
+    /* The iPad: master of its frame clock, at its NCO, whatever its codec's register file says (the codec's LRCLK
+     * is still 48 kHz here). TX starts at 44.1 kHz; the NCO goes to 22.05 kHz and back while it runs, and each
+     * chain's start takes the voice along. */
+    i2s0.regs[I2S_TXCON >> 2] = 0x03000081;
     i2s0.regs[I2S_FRAME_BITS >> 2] = 0xc8000300;
     i2s0.regs[I2S_TXCOM >> 2] = I2S_CMD_RUN;
     nco_bclk = 64 * 44100;
@@ -149,6 +153,12 @@ int main(void)
     i2s0.regs[I2S_TXCOM >> 2] = 0;
     nco_bclk = 64 * 16000;
     assert(s5l8930_i2s_sync_rate(0) == 16000 && voice_rate == 44100);
-    puts("PASS: i2s0 runs at the CS42L59's LRCLK (register 0a), else at its NCO, and its voice follows either");
+    /* The +0x410 word is the S5L8920 block's; on the A4 bit 20 alone decides. */
+    i2s0.regs[I2S_FRAME_BITS >> 2] = 0x28000300;
+    assert(s5l8930_i2s_rate(0) == 16000);
+    i2s0.regs[I2S_TXCON >> 2] = 0x03100081;
+    assert(s5l8930_i2s_rate(0) == 48000);
+    puts("PASS: i2s0 runs at the codec's LRCLK as the slave (TX config bit 20), at its NCO as the master, and its "
+         "voice follows either");
     return 0;
 }
