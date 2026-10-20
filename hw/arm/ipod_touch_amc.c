@@ -129,6 +129,13 @@
 #include "migration/qemu-file.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
+/* The engine's own memory, the aperture: AMC 2.1's DMA reads only this. */
+static bool amc_local(IPodTouchAMCState *s, uint32_t addr, size_t size)
+{
+    uint32_t limit = s->rev21 ? AMC_APERTURE_21 : AMC_BUF_SIZE;
+    return addr < limit && size <= limit - addr;
+}
+
 #ifdef IT_HAVE_AVCODEC
 #include <libavcodec/avcodec.h>
 #include <libavutil/mem.h>
@@ -326,13 +333,6 @@ static bool amc_dram(IPodTouchAMCState *s, uint32_t addr, size_t size)
 {
     return addr >= s->dram_base && addr - s->dram_base < s->dram_size &&
            size <= s->dram_size - (addr - s->dram_base);
-}
-
-/* The engine's own memory, the aperture: AMC 2.1's DMA reads only this. */
-static bool amc_local(IPodTouchAMCState *s, uint32_t addr, size_t size)
-{
-    uint32_t limit = s->rev21 ? AMC_APERTURE_21 : AMC_BUF_SIZE;
-    return addr < limit && size <= limit - addr;
 }
 
 /*
