@@ -624,12 +624,23 @@ static void test_boot(void)
     pump();
     expect_frame(2, "\r\n+CREG: 2\r\n");
     expect_frame(2, "\r\n+CGREG: 2\r\n");
+    /* The first search after power-on is a full one (the SIM has no stored location): 8 s on
+     * the guest's clock from when the radio, the SIM and the network let it start. */
+    int64_t found = bb.camp_due_ms;
+    CHECK(found > tnow + 6000);                   /* searching since the modem came up */
+    c_mux_str(2, "at+creg?\r");
+    pump();
+    expect_frame(2, "\r\n+CREG: 2,2,1ABF,53F1\r\n");
+    expect_frame(2, "\r\nOK\r\n");
+    tick_to(found - 10);
+    pump();
+    expect_none();                                /* still searching */
     /* NITZ on registration: the host's offset in quarter hours (EDT: -16) and the time, UTC. */
     setenv("TZ", "America/New_York", 1);
     tzset();
     int64_t wall = bb.wall_offset_ms;
-    bb.wall_offset_ms = 1791309600900LL - (tnow + 500);     /* 2026-10-06 18:00:00.9 UTC at the tick */
-    tick_to(tnow + 500);                          /* registered on the home PLMN */
+    bb.wall_offset_ms = 1791309600900LL - found;  /* 2026-10-06 18:00:00.9 UTC as it registers */
+    tick_to(found + 10);                          /* registered on the home PLMN */
     pump();
     expect_frame(2, "\r\n+CREG: 1,1ABF,53F1\r\n");
     expect_frame(2, "\r\n+CTZV: -16,\"26/10/06,18:00:00\"\r\n");
@@ -1142,10 +1153,9 @@ static void test_dial_no_service(void)
 
     bb.registered = true;
     ios_bb_changed(&bb);
-    tick_to(tnow + 500);
+    tick_to(tnow + 2500);
     pump();
-    expect_frame(2, "\r\n+CREG: 2\r\n");
-    expect_frame(2, "\r\n+CGREG: 2\r\n");
+    expect_none();                                /* still searching: the PLMN last registered, in 3 s */
     tick_to(tnow + 500);
     pump();
     expect_frame(2, "\r\n+CREG: 1,1ABF,53F1\r\n");
@@ -1295,6 +1305,7 @@ static void test_ifx(void)
     /* 4.x signal: the engineering page CommCenter polls once registered. */
     c.signal_dbm = -60;
     ifx_frame(&x, &c, "at+cfun=1\r", miso, 0x7fc, got);
+    ios_bb_tick(&c, c.now_ms + 8000);            /* past the first search: registered */
     ifx_frame(&x, &c, "at+xcgedpage=0,1\r", miso, 0x7fc, got);
     ifx_frame(&x, &c, "", miso, 0x7fc, got);
     check_str(got, "\r\n+XCGEDPAGE: RAT:\"GSM\",Rssi: 50\r\n\r\nOK\r\n",
@@ -1654,6 +1665,7 @@ static void sim_power_on(const char *file)
     memset(&sim, 0, sizeof(sim));
     sim.sim_present = true;
     sim.registered = true;
+    snprintf(sim.plmn, sizeof(sim.plmn), "00101");
     snprintf(sim.sim_file, sizeof(sim.sim_file), "%s", file);
     ios_bb_init(&sim, core_out, NULL);
 }
@@ -1689,7 +1701,24 @@ static void test_sim_pin(void)
     check_str(sim_at("at+cpin=\"1112\"\r"), "\r\n+CME ERROR: 16\r\n", "wrong PIN at the prompt");
     check_str(sim_at("at+cpin=\"1111\"\r"), "\r\nOK\r\n", "unlocked");
     check_str(sim_at("at+cpin?\r"), "\r\n+CPIN: READY\r\n\r\nOK\r\n", "ready");
+    check_str(sim_at("at+creg?\r"), "\r\n+CREG: 0,2,0,0\r\n\r\nOK\r\n", "searching with the IMSI readable");
+    tnow += 8000;                                /* the first search: no EF_LOCI on this SIM */
+    ios_bb_tick(&sim, tnow);
     check_str(sim_at("at+creg?\r"), "\r\n+CREG: 0,1,0,0\r\n\r\nOK\r\n", "registered");
+    g_free(saved);
+    saved = NULL;
+    CHECK(g_file_get_contents(file, &saved, NULL, NULL));
+    check_str(saved ? saved : "", "sim-pin 1 1111 12345678 3 10\nloci 00101\n", "EF_LOCI written");
+
+    /* The next power-on finds the PLMN its SIM last registered on: 3 s, not the full search. */
+    sim_power_on(file);
+    check_str(sim_at("at+cpin=\"1111\"\r"), "\r\nOK\r\n", "unlocked again");
+    tnow += 2900;
+    ios_bb_tick(&sim, tnow);
+    check_str(sim_at("at+creg?\r"), "\r\n+CREG: 0,2,0,0\r\n\r\nOK\r\n", "searching, stored information");
+    tnow += 100;
+    ios_bb_tick(&sim, tnow);
+    check_str(sim_at("at+creg?\r"), "\r\n+CREG: 0,1,0,0\r\n\r\nOK\r\n", "registered from EF_LOCI");
 
     /* Change it: the old PIN must be right, and the new one holds after a modem reset. */
     check_str(sim_at("at+cpwd=\"SC\",\"9999\",\"4321\"\r"), "\r\n+CME ERROR: 16\r\n", "change, wrong PIN");

@@ -103,6 +103,7 @@ typedef struct IosBbCore {
     int signal_dbm;
     int battery;               /* percent, from the board's charger/PMU model */
     bool registered;           /* attached to the home network when the radio is on */
+    uint32_t search_ms;        /* a search without stored information (0: IOS_BB_SEARCH_MS) */
     bool nitz;                 /* the network sends its time zone (+CTZV) once the host asks (+CTZR) */
     bool ctzr_on;              /* +CTZR=1: time zone reports wanted, on ctzr_ch */
     int ctzr_ch;
@@ -165,6 +166,9 @@ typedef struct IosBbCore {
     int last_creg;             /* last +CREG stat emitted */
     int reg_step;              /* 0 idle, 1 search scheduled, 2 registered scheduled */
     int64_t reg_due_ms;
+    int64_t camp_due_ms;       /* when the search for a cell ends (registered from then), 0 = not searching */
+    bool camp_noted;           /* this search's end was handled (EF_LOCI written, traced) */
+    char loci_plmn[7];         /* the SIM's EF_LOCI: the last registered PLMN, "" = none (sim_file keeps it) */
     int64_t xsim_due_ms;       /* +XSIM: n to push (SIM re-detection), 0 = none */
     int temp_period_ms;        /* +xdrv=5,16,<s>: periodic +XDRVI: 5,17 temperature reports */
     int temp_ch;
