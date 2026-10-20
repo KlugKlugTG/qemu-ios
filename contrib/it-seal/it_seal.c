@@ -9,7 +9,10 @@
  * it lets the boot settle, deletes itself, and halts through reboot(2), which
  * syncs, unmounts and closes the FTL. docs/research/userland-boot.md.
  * 7.x keeps its root read-only, so the job cannot delete itself there; a marker
- * on the data volume makes the seal happen once all the same.
+ * on the data volume makes the seal happen once all the same, and every later boot's
+ * run ends at once. It ends through _exit: the entry is main itself, with no crt1 to
+ * return to (contrib/armv6-toolchain/README.md), and a main that returned jumped into
+ * whatever dyld last called, which 7.x's dyld reported as a stack buffer overrun.
  */
 
 extern unsigned int sleep(unsigned int);
@@ -18,6 +21,7 @@ extern int open(const char *, int, ...);
 extern void sync(void);
 extern int reboot(int);
 extern long write(int, const void *, unsigned long);
+extern void _exit(int);
 
 #define RB_HALT 0x08
 #define O_WRONLY 0x0001
@@ -31,10 +35,10 @@ int main(void)
     sleep(40);                      /* launchd's jobs up, SpringBoard settled */
     if (unlink("/System/Library/LaunchDaemons/com.qemu.it-seal.plist") != 0 &&
         open("/private/var/.it_sealed", O_WRONLY | O_CREAT | O_EXCL, 0644) < 0)
-        return 0;                   /* read-only root, already sealed */
+        _exit(0);                   /* read-only root, already sealed */
     unlink("/usr/local/bin/it_seal");
     sync();
     write(2, msg, sizeof(msg) - 1);
     reboot(RB_HALT);
-    return 1;
+    _exit(1);
 }

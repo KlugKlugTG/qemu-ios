@@ -13,6 +13,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "qemu/timer.h"
+#include "qemu/main-loop.h"
 #include "hw/core/irq.h"
 #include "hw/arm/s5l8930.h"
 #include "migration/vmstate.h"
@@ -259,8 +260,22 @@ static void wdog_check(S5L8930PMGRState *s)
 static uint64_t s5l8930_pmgr_read(void *opaque, hwaddr off, unsigned size)
 {
     S5L8930PMGRState *s = opaque;
-    uint32_t val = s->regs[off / 4];
+    uint32_t val;
 
+    /*
+     * The timebase is read without the BQL (see s5l8930_pmgr_init): it is the
+     * virtual clock, safe to read from any thread, less a base the reset sets.
+     * The kernel reads HI, LO, HI and retries on a mismatch, so both halves
+     * can be sampled live.
+     */
+    if (off == PMGR_TICKS_LO) {
+        return (uint32_t)pmgr_ticks(s);
+    }
+    if (off == PMGR_TICKS_HI) {
+        return pmgr_ticks(s) >> 32;
+    }
+    BQL_LOCK_GUARD();
+    val = s->regs[off / 4];
     if (!pmgr_modeled(off)) {
         qemu_log_mask(LOG_UNIMP, "%s: unmodeled read 0x%04x\n",
                       __func__, (unsigned)off);
@@ -270,12 +285,6 @@ static uint64_t s5l8930_pmgr_read(void *opaque, hwaddr off, unsigned size)
     switch (off) {
     case PMGR_WDOG_TMR:
         return wdog_count(s);
-    /* The kernel reads HI, LO, HI and retries on a mismatch, so both halves
-     * can be sampled live. */
-    case PMGR_TICKS_LO:
-        return (uint32_t)pmgr_ticks(s);
-    case PMGR_TICKS_HI:
-        return pmgr_ticks(s) >> 32;
     case PMGR_EVT_COUNT(0):
     case PMGR_EVT_COUNT(1): {
         S5L8930EventTimer *t = &s->evt[(off - PMGR_EVT_COUNT(0)) / 4];
@@ -307,6 +316,7 @@ static void s5l8930_pmgr_write(void *opaque, hwaddr off, uint64_t val64,
     S5L8930PMGRState *s = opaque;
     uint32_t val = val64;
 
+    BQL_LOCK_GUARD();
     if (!pmgr_modeled(off)) {
         qemu_log_mask(LOG_UNIMP, "%s: unmodeled write 0x%04x <- 0x%08x\n",
                       __func__, (unsigned)off, val);
@@ -436,6 +446,9 @@ static void s5l8930_pmgr_init(Object *obj)
     s->wdog_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, wdog_expire, s);
     memory_region_init_io(&s->iomem, obj, &s5l8930_pmgr_ops, s,
                           TYPE_S5L8930_PMGR, S5L8930_PMGR_SIZE);
+    /* The kernel's timebase reads (mach_absolute_time) skip the BQL; every
+     * other register takes it in the callbacks. */
+    memory_region_enable_lockless_io(&s->iomem);
     sysbus_init_mmio(sbd, &s->iomem);
     for (i = 0; i < ARRAY_SIZE(s->evt); i++) {
         sysbus_init_irq(sbd, &s->evt[i].irq);

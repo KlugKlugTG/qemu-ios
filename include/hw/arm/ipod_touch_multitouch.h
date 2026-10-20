@@ -310,6 +310,7 @@ typedef struct IPodTouchMultitouchState {
      * mt_frame_period_ns() in ipod_touch_multitouch.c.
      */
     int64_t last_motion_ns;
+    uint32_t report_hz;    /* "report-hz": frames a second while touched; 0, IT_MT_HZ or 60 */
 } IPodTouchMultitouchState;
 
 /*
@@ -329,6 +330,8 @@ void ipod_touch_multitouch_on_motion(IPodTouchMultitouchState *s);
  */
 void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
                                       float x, float y, bool down);
+/* The guest took next_frame through a reader outside the model (each calls this after clearing it). */
+void ipod_touch_multitouch_frame_taken(IPodTouchMultitouchState *s);
 /* Internal admission check; reserves room for cancellation releases. */
 bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
                                    unsigned begins, unsigned ends, unsigned moves);

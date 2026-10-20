@@ -35,6 +35,12 @@ static unsigned cs42l58_sample_rate(uint8_t control)
 {
     /* 7E18 AppleCS42L58Audio::setSampleRate, c05dd698: register 05's
      * low five bits select LRCLK. The codec is the I2S clock master.
+     * 10B500 AppleCS42L59Audio (n81) writes the same codes to register 0a
+     * from a fixed 6 MHz MCLK (0x80c3908c): 0x0b for 44.1 kHz, and 0x13
+     * for the 22.05 kHz VoiceOver's speech switches the hardware to. The
+     * codes are the CS42L55's CLKCTL2 (Rockbox's cs42l55.h: speed mode,
+     * 32 kHz group and MCLK/LRCK ratio from a 6 MHz-class MCLK), the same
+     * family's part on the S5L8702 iPods.
      * ponytail: model the nine rates the driver supports; other clock modes
      * need the part's clock specification before they can be enabled. */
     switch (control & 0x1f) {
@@ -97,7 +103,7 @@ static int cs42l58_send(I2CSlave *i2c, uint8_t data)
     }
     if ((s->cmd & 0x7f) != CS42L58_REG_CHIPID) {
         s->regs[s->cmd & 0x7f] = data;
-        if ((s->cmd & 0x7f) == 0x05) {
+        if ((s->cmd & 0x7f) == s->rate_reg) {
             unsigned rate = cs42l58_sample_rate(data);
             if (rate) {
                 clock_update_hz(s->lrclk, rate);
@@ -126,6 +132,7 @@ static void cs42l58_reset(DeviceState *dev)
 static void cs42l58_init(Object *obj)
 {
     CS42L58(obj)->lrclk = qdev_init_clock_out(DEVICE(obj), "lrclk");
+    CS42L58(obj)->rate_reg = 0x05;
 }
 
 static const VMStateDescription vmstate_cs42l58 = {
@@ -166,6 +173,7 @@ static const TypeInfo cs42l58_info = {
 static void cs42l59_init(Object *obj)
 {
     CS42L58(obj)->pdn_status = true;
+    CS42L58(obj)->rate_reg = 0x0a;
 }
 
 static const TypeInfo cs42l59_info = {

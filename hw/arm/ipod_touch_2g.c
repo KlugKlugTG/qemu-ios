@@ -28,9 +28,6 @@
 #include "ui/clipboard.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
-#ifndef __APPLE__
-#include "ipod-gpio-wake-trace.c.inc"
-#endif
 
 // The D1759 PMU raises this GPIO IRQ when a wake button (hold/menu) is pressed.
 // It lands in the same GPIO interrupt group the button code already drives.
@@ -310,87 +307,6 @@ static void ipod_touch_set_ecid(Object *obj, Visitor *v, const char *name,
     }
     s->ecid = value;
     s->ecid_explicit = true;
-}
-
-static void ipod_touch_get_boot_args_delay_ms(Object *obj, Visitor *v,
-                                             const char *name, void *opaque,
-                                             Error **errp)
-{
-    uint32_t value = IPOD_TOUCH_MACHINE(obj)->boot_args_delay_ms;
-    visit_type_uint32(v, name, &value, errp);
-}
-
-static void ipod_touch_set_boot_args_delay_ms(Object *obj, Visitor *v,
-                                             const char *name, void *opaque,
-                                             Error **errp)
-{
-    IPodTouchMachineState *nms = IPOD_TOUCH_MACHINE(obj);
-    if (nms->cpu) {
-        error_setg(errp, "boot-args-delay-ms must be set before the machine starts");
-        return;
-    }
-    uint32_t value;
-    if (!visit_type_uint32(v, name, &value, errp)) return;
-    if (value > 3600000) {
-        error_setg(errp, "boot-args-delay-ms must be between 0 and 3600000");
-        return;
-    }
-    nms->boot_args_delay_ms = value;
-    nms->boot_args_delay_ms_explicit = true;
-}
-
-static void ipod_touch_get_boot_args_repeat(Object *obj, Visitor *v,
-                                             const char *name, void *opaque,
-                                             Error **errp)
-{
-    uint32_t value = IPOD_TOUCH_MACHINE(obj)->boot_args_repeat;
-    visit_type_uint32(v, name, &value, errp);
-}
-
-static void ipod_touch_set_boot_args_repeat(Object *obj, Visitor *v,
-                                             const char *name, void *opaque,
-                                             Error **errp)
-{
-    IPodTouchMachineState *nms = IPOD_TOUCH_MACHINE(obj);
-    if (nms->cpu) {
-        error_setg(errp, "boot-args-repeat must be set before the machine starts");
-        return;
-    }
-    uint32_t value;
-    if (!visit_type_uint32(v, name, &value, errp)) return;
-    if (value > 1000000) {
-        error_setg(errp, "boot-args-repeat must be between 0 and 1000000");
-        return;
-    }
-    nms->boot_args_repeat = value;
-    nms->boot_args_repeat_explicit = true;
-}
-
-static void ipod_touch_get_boot_args_interval_ms(Object *obj, Visitor *v,
-                                             const char *name, void *opaque,
-                                             Error **errp)
-{
-    uint32_t value = IPOD_TOUCH_MACHINE(obj)->boot_args_interval_ms;
-    visit_type_uint32(v, name, &value, errp);
-}
-
-static void ipod_touch_set_boot_args_interval_ms(Object *obj, Visitor *v,
-                                             const char *name, void *opaque,
-                                             Error **errp)
-{
-    IPodTouchMachineState *nms = IPOD_TOUCH_MACHINE(obj);
-    if (nms->cpu) {
-        error_setg(errp, "boot-args-interval-ms must be set before the machine starts");
-        return;
-    }
-    uint32_t value;
-    if (!visit_type_uint32(v, name, &value, errp)) return;
-    if (value < 1 || value > 3600000) {
-        error_setg(errp, "boot-args-interval-ms must be between 1 and 3600000");
-        return;
-    }
-    nms->boot_args_interval_ms = value;
-    nms->boot_args_interval_ms_explicit = true;
 }
 
 static void ipod_touch_get_bt(Object *obj, Visitor *v, const char *name,
@@ -1108,288 +1024,8 @@ static void ipod_touch_stage_ramdisk(IPodTouchMachineState *nms)
             (unsigned long long)delay_ms);
 }
 
-#ifdef __APPLE__
 /*
- * boot-args: set the XNU kernel command line late in boot.
- *
- * 3.1.3 normally hands off an empty command line. A stock 7E18 trace
- * imports NOR boot-args into iBoot's environment successfully, then chooses
- * an empty source in its normal kernel-load path; see
- * docs/research/ipod-nvram-handoff.md. This is not evidence of a SPI/NVRAM
- * transfer failure. Without the injected argument the kernel's code-signing
- * enforcement is on and AMFI rejects the ad-hoc/invalidly-signed decrypted
- * (Clutch) App-Store binaries at exec, so injected apps are discovered on the
- * home screen but never launch -- whereas stock, Apple-signed apps launch
- * normally. The SecureROM path has a separate legacy command-line data
- * injection in ipod_touch_compat_command_line; its arguments must not be
- * mistaken for values supplied by stock iBoot or NOR.
- *
- * XNU reads the string live from boot_args->CommandLine (PE_boot_args returns
- * PE_state.bootArgs + 0x38 on every PE_parse_boot_argn call), and the AMFI kext
- * latches amfi_allow_any_signature once in its start(), tens of seconds into
- * boot. So writing the string into the boot_args CommandLine buffer on a short
- * timer -- after iBoot has built boot_args and handed off, before AMFI start --
- * lands in a wide window and needs no guest code patching.
- *
- * boot_args is built by iBoot at a fixed DRAM location for a given image; we
- * find it by signature (rev==1, virtBase==0xC0000000 on 2.x/3.x or 0x80000000
- * on 4.x, physBase==0x08000000) rather than hardcode the address, and
- * overwrite CommandLine at +0x38. 4.2.1 iBoot builds it at 0x08825000, past
- * the first 8 MiB, so the scan covers 16 MiB.
- * boot-args-delay-ms/-repeat/-interval-ms drive the timer. Gated entirely on the
- * boot-args machine property (no environment). Empty disables this timer,
- * but not the separate SecureROM compatibility hook.
- */
-#define BOOT_ARGS_CMDLINE_OFF   0x38
-#define BOOT_ARGS_SCAN_LEN      0x01000000
-
-static bool boot_args_signature(const uint8_t *p)
-{
-    uint32_t virt = ldl_le_p(p + 4);
-    return (ldl_le_p(p) & 0xFFFF) == 1 &&
-           (virt == 0xC0000000 || virt == 0x80000000) &&
-           ldl_le_p(p + 8) == 0x08000000;
-}
-#define BOOT_ARGS_CMDLINE_LEN   256
-
-static uint32_t ipod_touch_boot_args_discovery_interval_ms(IPodTouchMachineState *nms)
-{
-#if !defined(__APPLE__)
-    /* Native TCG can spend minutes in iBoot on a slower portable host. A full
-     * DRAM scan every millisecond competes with that same CPU under the BQL. */
-    return MAX(25, nms->boot_args_interval_ms);
-#else
-    return 1;
-#endif
-}
-
-static uint64_t ipod_touch_boot_args_search_budget_ms(IPodTouchMachineState *nms)
-{
-    uint64_t budget = (uint64_t)MAX(1, nms->boot_args_repeat) *
-                      nms->boot_args_interval_ms;
-#if !defined(__APPLE__)
-    /* Discovery has a separate bound from post-match refresh. Virtual time
-     * without icount advances with host time while slow TCG is still in iBoot. */
-    return MAX(UINT64_C(600000), budget);
-#else
-    return budget;
-#endif
-}
-
-static const char *ipod_touch_requested_boot_args(IPodTouchMachineState *nms)
-{
-    /* Empty disables the host-supplied handoff arguments. Never redirect
-     * iBoot's empty-string literal: it also names the DeviceTree root. */
-    return nms->boot_args[0] ? nms->boot_args : NULL;
-}
-
-static void ipod_touch_set_boot_args_now(void *opaque)
-{
-    IPodTouchMachineState *nms = (IPodTouchMachineState *)opaque;
-    const char *args = ipod_touch_requested_boot_args(nms);
-    uint32_t ba = 0;
-    uint8_t buf[BOOT_ARGS_CMDLINE_LEN];
-    size_t n;
-
-    if (!args) {
-        goto rearm;
-    }
-
-    if (nms->boot_args_addr) {
-        /* Found on an earlier tick; boot_args does not move once the kernel
-         * has built it. Re-verify the signature so a reboot (which rebuilds
-         * DRAM) falls back to a fresh scan instead of scribbling blindly. */
-        uint8_t sig[12] = { 0 };
-        address_space_rw(nms->nsas, nms->boot_args_addr, MEMTXATTRS_UNSPECIFIED,
-                         sig, sizeof(sig), 0);
-        if (boot_args_signature(sig)) {
-            ba = nms->boot_args_addr;
-        } else {
-            nms->boot_args_addr = 0;
-        }
-    }
-    if (!ba && qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) >=
-               nms->boot_args_scan_deadline) {
-#if !defined(__APPLE__)
-        fprintf(stderr, "[IT_BOOT_ARGS] discovery expired after %" PRIu64
-                " ms, %" PRIu64 " scans; no handoff signature\n",
-                qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) -
-                nms->boot_args_scan_started_ms, nms->boot_args_scan_attempts);
-#else
-        fprintf(stderr, "[IT_BOOT_ARGS] no handoff buffer before search deadline\n");
-#endif
-        return;
-    }
-    if (!ba) {
-        /*
-         * Scan DRAM for the boot_args signature -- in bulk. This used to be
-         * three 4-byte address_space_rw calls per word over 8 MB, ~2 million
-         * MMIO-path round trips, 30-45 ms on the main loop with the BQL held,
-         * EVERY 250 ms tick of this timer, for the whole repeat window. Those
-         * were the recurring whole-process freezes that put pages of silence
-         * into the middle of every sound the guest played while the window was
-         * open (see hw/arm/ipod_touch_i2s.c). Read 64 KB at a time instead and
-         * scan in host memory; the windows overlap by 8 bytes so a signature
-         * straddling a boundary is still seen.
-         */
-        uint8_t window[0x10000];
-        uint32_t base;
-        nms->boot_args_scan_attempts++;
-        for (base = 0x08000000; base < 0x08000000 + BOOT_ARGS_SCAN_LEN && !ba;
-             base += sizeof(window) - 8) {
-            uint32_t off;
-            address_space_rw(nms->nsas, base, MEMTXATTRS_UNSPECIFIED,
-                             window, sizeof(window), 0);
-            for (off = 0; off + 12 <= sizeof(window); off += 4) {
-                if (boot_args_signature(window + off)) {
-                    ba = base + off;
-                    nms->boot_args_addr = ba;
-                    break;
-                }
-            }
-        }
-        if (!ba) {
-            /*
-             * Not found YET. This timer can easily fire before the kernel has
-             * built boot_args, so a bare return here gives up permanently and
-             * the command line is never set -- which is exactly the failure it
-             * looks least like: the guest boots, AMFI reads a default-empty
-             * amfi_allow_any_signature, and the device wedges later with
-             * "verify_code_directory server is dead" from a re-signed binary.
-             * Re-arm and look again; the scan is the whole point of the repeat
-             * window. Complain once so a genuinely wrong image is still
-             * diagnosable.
-             */
-            if (!nms->boot_args_scan_failed) {
-                nms->boot_args_scan_failed = true;
-                fprintf(stderr, "[IT_BOOT_ARGS] boot_args not found by "
-                        "signature yet; retrying\n");
-            }
-            goto rearm;
-        }
-    }
-
-    memset(buf, 0, sizeof(buf));
-    n = strlen(args);
-    if (n >= sizeof(buf)) {
-        n = sizeof(buf) - 1;
-    }
-    memcpy(buf, args, n);
-    address_space_rw(nms->nsas, ba + BOOT_ARGS_CMDLINE_OFF,
-                     MEMTXATTRS_UNSPECIFIED, buf, sizeof(buf), 1);
-
-    /*
-     * The kernel latches boot-args early: consumers like AMFI read
-     * amfi_allow_any_signature once in their init, which runs a few seconds
-     * into boot -- and under -cpu max the virtual clock advances fast, so a
-     * single late write can miss it. Re-arm across an early window (guided by
-     * boot-args-repeat / boot-args-interval-ms) so the string is present
-     * before any consumer reads it and stays present afterwards.
-     */
-    if (nms->boot_args_writes == 0) {
-#if !defined(__APPLE__)
-        fprintf(stderr, "[IT_BOOT_ARGS] handoff signature after %" PRIu64
-                " ms, %" PRIu64 " scans; discovery complete\n",
-                qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) -
-                nms->boot_args_scan_started_ms, nms->boot_args_scan_attempts);
-#endif
-        fprintf(stderr, "[IT_BOOT_ARGS] boot_args @ 0x%08x; CommandLine = [ %s ]\n",
-                ba, args);
-    }
-    nms->boot_args_writes++;
-
-rearm:
-    {
-        if (nms->boot_args_writes < nms->boot_args_repeat) {
-            timer_mod(nms->boot_args_timer,
-                      qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) +
-                      (ba ? nms->boot_args_interval_ms :
-                       ipod_touch_boot_args_discovery_interval_ms(nms)));
-        }
-    }
-}
-
-#define IBOOT_SCAN_PA_START  0x0ff00000u
-#define IBOOT_SCAN_LEN       0x00040000u   /* bounded window for loaded n72 iBoot images */
-
-/* Legacy boot-argument data injection. Discover the buffer from the loaded
- * iBoot's literal references, rather than assuming a particular build's BSS.
- * Keep the existing NAND-read timing: iBoot rewrites this buffer during load. */
-static void ipod_touch_compat_command_line(IPodTouchMachineState *nms)
-{
-    static const char boot_args[] =
-        "kextlog=0xfff debug=0x8 cpus=1 rd=disk0s1 serial=1 pmu-debug=0x1 "
-        "io=0xffff8fff debug-usb=0xffffffff amfi_allow_any_signature=1 -v "
-        "zalloc_debug";
-
-    if (nms->direct_iboot[0]) {
-        return;
-    }
-
-    if (!nms->compat_command_line) {
-        g_autofree uint8_t *image = g_try_malloc(IBOOT_SCAN_LEN);
-        if (!image) {
-            return;
-        }
-        cpu_physical_memory_read(IBOOT_SCAN_PA_START, image, IBOOT_SCAN_LEN);
-        nms->compat_command_line = it_iboot_find_command_line(
-            image, IBOOT_SCAN_LEN, IBOOT_SCAN_PA_START);
-        if (!nms->compat_command_line) {
-            return;
-        }
-        printf("[IBOOT] discovered command-line buffer at PA 0x%08x\n",
-               nms->compat_command_line);
-    }
-    cpu_physical_memory_write(nms->compat_command_line, boot_args, sizeof(boot_args));
-}
-
-/* Observes a transfer; firmware edits belong to the board compatibility
- * policy, not to the NAND device. This preserves the old ordering while the
- * underlying iBoot NVRAM behavior is investigated. */
-static void ipod_touch_compat_before_nand_read(Notifier *notifier, void *data)
-{
-    IPodTouchMachineState *nms = container_of(notifier, IPodTouchMachineState,
-                                             compat_nand_read);
-    ipod_touch_compat_command_line(nms);
-}
-
-static void ipod_touch_stage_boot_args(IPodTouchMachineState *nms)
-{
-    uint32_t delay_ms = nms->boot_args_delay_ms;
-
-    if (!ipod_touch_requested_boot_args(nms)) {
-        return;
-    }
-
-    nms->boot_args_writes = 0;
-    nms->boot_args_scan_failed = false;
-    nms->boot_args_scan_attempts = 0;
-    nms->boot_args_scan_started_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
-    /* Keep discovery bounded separately from post-match refresh on portable
-     * hosts, where iBoot can take longer than the original refresh window. */
-    nms->boot_args_scan_deadline = nms->boot_args_scan_started_ms + delay_ms +
-        ipod_touch_boot_args_search_budget_ms(nms);
-#if !defined(__APPLE__)
-    fprintf(stderr, "[IT_BOOT_ARGS] discovery cadence %u ms, budget %" PRIu64
-            " ms after initial delay\n",
-            ipod_touch_boot_args_discovery_interval_ms(nms),
-            ipod_touch_boot_args_search_budget_ms(nms));
-#endif
-    if (!nms->boot_args_timer) {
-        nms->boot_args_timer = timer_new_ms(QEMU_CLOCK_VIRTUAL,
-                                           ipod_touch_set_boot_args_now, nms);
-    }
-    timer_mod(nms->boot_args_timer,
-              qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + delay_ms);
-    fprintf(stderr, "[IT_BOOT_ARGS] first write scheduled at T+%llu ms\n",
-            (unsigned long long)delay_ms);
-}
-
-#else
-/*
- * Portable boot-args: the kernel command line, handed over by iBoot itself.
- * Adapted from upstream 1b451cc86c77c153fae1d7be2d4f151e693a9d75;
- * upstream code retains its original licensing.
+ * boot-args: the kernel command line, handed over by iBoot itself.
  *
  * Release iBoots ignore the boot-args variable: they format
  * gBootArgs.commandLine with snprintf(commandLine, 0x100, "%s ", "") (7E18:
@@ -1451,26 +1087,16 @@ static void ipod_touch_boot_args_before_nand_read(Notifier *notifier, void *data
         nms->boot_args_format = it_iboot_find_boot_args_format(
             image, IBOOT_SCAN_LEN, IBOOT_SCAN_PA_START, &nms->boot_args_command_line);
         if (!nms->boot_args_format) {
-            warn_report_once("boot-args: unqualified iBoot; command-line format was not found; "
+            warn_report_once("boot-args: this iBoot's command-line format was not found; "
                              "the kernel gets iBoot's own command line");
             return;
         }
     }
-    if (!boot_args_as_format(args, format, sizeof(format))) {
-        return; /* The startup setter rejects this; do not write partial data. */
-    }
-    if (!nms->boot_args_reported) {
-        fprintf(stderr, "[IT_BOOT_ARGS] iBoot format slot 0x%08x, CommandLine "
-                "0x%08x; kernel arguments supplied before NAND read\n",
-                nms->boot_args_format, nms->boot_args_command_line);
-        nms->boot_args_reported = true;
-    }
+    boot_args_as_format(args, format, sizeof(format));   /* the setter checked it fits */
     stl_le_p(slot, nms->boot_args_command_line);
     cpu_physical_memory_write(nms->boot_args_format, slot, sizeof(slot));
     cpu_physical_memory_write(nms->boot_args_command_line, format, sizeof(format));
 }
-
-#endif
 
 static void ipod_touch_load_direct_boot(IPodTouchMachineState *nms)
 {
@@ -1507,9 +1133,6 @@ static void ipod_touch_load_direct_boot(IPodTouchMachineState *nms)
 
         /* Optional bring-up helpers run after staging the iBoot image. */
         ipod_touch_stage_ramdisk(nms);
-#ifdef __APPLE__
-        ipod_touch_stage_boot_args(nms);
-#endif
     }
 }
 
@@ -1520,13 +1143,10 @@ static void ipod_touch_cpu_reset(void *opaque)
     CPUState *cs = CPU(cpu);
     bool resume = nms->resume_boot;
 
+    nms->last_reset_was_wake = resume;
+
     nms->resume_boot = false;
-#ifdef __APPLE__
-    nms->compat_command_line = 0;
-#else
     nms->boot_args_format = 0;
-    nms->boot_args_reported = false;
-#endif
     if (!resume) {
         /* Across a hibernate the guest's side of these lives on in DRAM. */
         ipod_agent_reset(nms->agent);
@@ -1566,9 +1186,6 @@ static void ipod_touch_ap_power(void *opaque, int n, int on)
     IPodTouchMachineState *nms = opaque;
 
     if (on) {
-#ifndef __APPLE__
-        nms->gpio_state->ap_wake_reset_pending = true;
-#endif
         nms->resume_boot = true;
         if (nms->sdio_state) {
             nms->sdio_state->ap_waking = true;
@@ -1701,19 +1318,12 @@ static void ipod_touch_set_boot_args(Object *obj, const char *value, Error **err
         error_setg(errp, "boot-args must be set before the machine starts");
         return;
     }
-#ifdef __APPLE__
-    if (strlen(value) >= BOOT_ARGS_CMDLINE_LEN) {
-        error_setg(errp, "boot-args exceeds the kernel's 255-byte command line");
-        return;
-    }
-#else
     char format[BOOT_ARGS_CMDLINE_LEN];
     if (!boot_args_as_format(value, format, sizeof(format))) {
         error_setg(errp, "boot-args exceeds the kernel's 255-byte command line "
                    "(each %% counts twice)");
         return;
     }
-#endif
     g_strlcpy(nms->boot_args, value, sizeof(nms->boot_args));
     nms->boot_args_explicit = true;
 }
@@ -1800,16 +1410,6 @@ static void ipod_touch_set_usb_patch_mux_gate(Object *obj, bool value, Error **e
     if (value) {
         error_setg(errp, "usb-patch-mux-gate is retired: guest kernel patching is unsupported");
     }
-}
-
-static bool ipod_touch_get_mbx_irq(Object *obj, Error **errp)
-{
-    return IPOD_TOUCH_MACHINE(obj)->mbx_irq;
-}
-
-static void ipod_touch_set_mbx_irq(Object *obj, bool value, Error **errp)
-{
-    IPOD_TOUCH_MACHINE(obj)->mbx_irq = value;
 }
 
 /*
@@ -2131,9 +1731,6 @@ static void ipod_touch_instance_init(Object *obj)
     IPOD_TOUCH_MACHINE(obj)->bt_enabled = true;
     IPOD_TOUCH_MACHINE(obj)->bt_latency_us = 2000;
     IPOD_TOUCH_MACHINE(obj)->time_dilation = 1;
-    IPOD_TOUCH_MACHINE(obj)->boot_args_delay_ms = 0;
-    IPOD_TOUCH_MACHINE(obj)->boot_args_repeat = 200;
-    IPOD_TOUCH_MACHINE(obj)->boot_args_interval_ms = 250;
     /* The real decoders and compositor; the off settings are legacy stubs. */
     IPOD_TOUCH_MACHINE(obj)->h264_decode = true;
     IPOD_TOUCH_MACHINE(obj)->scaler_decode = true;
@@ -2185,43 +1782,8 @@ static void ipod_touch_instance_init(Object *obj)
     /* No default override: unconfigured boots retain firmware defaults. */
     object_property_add_str(obj, "boot-args", ipod_touch_get_boot_args, ipod_touch_set_boot_args);
     object_property_set_description(obj, "boot-args",
-#ifdef __APPLE__
-        "Startup kernel command line (at most 255 bytes); empty disables injection"
-#else
-        "Kernel command line handed over by n72 iBoot (255 bytes, each % counts twice); empty keeps firmware arguments"
-#endif
-    );
-
-    object_property_add(obj, "boot-args-delay-ms", "uint32",
-                        ipod_touch_get_boot_args_delay_ms,
-                        ipod_touch_set_boot_args_delay_ms, NULL, NULL);
-    object_property_set_description(obj, "boot-args-delay-ms",
-#ifdef __APPLE__
-        "Initial command-line write delay in virtual milliseconds (0..3600000; default 0)"
-#else
-        "Deprecated compatibility option; parsed but inert on portable n72 early-handoff hook"
-#endif
-    );
-    object_property_add(obj, "boot-args-repeat", "uint32",
-                        ipod_touch_get_boot_args_repeat,
-                        ipod_touch_set_boot_args_repeat, NULL, NULL);
-    object_property_set_description(obj, "boot-args-repeat",
-#ifdef __APPLE__
-        "Command-line write count (0..1000000; default 24; 0 still performs the initial write)"
-#else
-        "Deprecated compatibility option; parsed but inert on portable n72 early-handoff hook"
-#endif
-    );
-    object_property_add(obj, "boot-args-interval-ms", "uint32",
-                        ipod_touch_get_boot_args_interval_ms,
-                        ipod_touch_set_boot_args_interval_ms, NULL, NULL);
-    object_property_set_description(obj, "boot-args-interval-ms",
-#ifdef __APPLE__
-        "Command-line refresh interval after discovery, in virtual milliseconds (1..3600000; default 500)"
-#else
-        "Deprecated compatibility option; parsed but inert on portable n72 early-handoff hook"
-#endif
-    );
+        "Kernel command line iBoot hands over (at most 255 bytes, each % counting twice); "
+        "empty keeps iBoot's own");
 
     object_property_add_str(obj, "usb-tcp-addr", ipod_touch_get_usb_tcp_addr, ipod_touch_set_usb_tcp_addr);
     object_property_set_description(obj, "usb-tcp-addr",
@@ -2243,15 +1805,6 @@ static void ipod_touch_instance_init(Object *obj)
         "Percent per virtual minute while unplugged or charging is forced off; zero disables drain");
     object_property_add_str(obj, "battery-charging", ipod_touch_get_battery_charging,
                             ipod_touch_set_battery_charging);
-    /* On by default: this gates the verified MBX MMU request/ack mirror
-     * (ipod_touch_mbx.c), which stops the ~21M-read disable-loop spin that
-     * froze OpenGL ES apps. The 2D boot path does not touch the MMU handshake,
-     * so defaulting it on is safe there. */
-    IPOD_TOUCH_MACHINE(obj)->mbx_irq = true;
-    object_property_add_bool(obj, "mbx-irq", ipod_touch_get_mbx_irq, ipod_touch_set_mbx_irq);
-    object_property_set_description(obj, "mbx-irq",
-        "Raise a completion interrupt for the unemulated MBX GPU so an app that "
-        "submits work does not wait for it forever. Cannot make anything render");
 
     object_property_add_bool(obj, "usb-attached", ipod_touch_get_usb_attached, ipod_touch_set_usb_attached);
     object_property_set_description(obj, "usb-attached",
@@ -2334,25 +1887,6 @@ static void ipod_touch_key_event(void *opaque, int keycode)
     uint32_t button_gpio = 0;
 
     IPodTouchMultitouchState *s = (IPodTouchMultitouchState *)opaque;
-#ifndef __APPLE__
-    /* Record the physical level even when reset made the pad already equal. */
-    uint32_t host_gpio = 0;
-    bool host_high = false;
-    switch (keycode) {
-    case KEY_P_DOWN: host_gpio = GPIO_BUTTON_POWER; host_high = true; break;
-    case KEY_P_UP: host_gpio = GPIO_BUTTON_POWER; break;
-    case KEY_H_DOWN: host_gpio = GPIO_BUTTON_HOME; host_high = true; break;
-    case KEY_H_UP: host_gpio = GPIO_BUTTON_HOME; break;
-    case KEY_MIN_DOWN: host_gpio = GPIO_BUTTON_VOLDOWN; break;
-    case KEY_MIN_UP: host_gpio = GPIO_BUTTON_VOLDOWN; host_high = true; break;
-    case KEY_PLUS_DOWN: host_gpio = GPIO_BUTTON_VOLUP; break;
-    case KEY_PLUS_UP: host_gpio = GPIO_BUTTON_VOLUP; host_high = true; break;
-    default: break;
-    }
-    if (host_gpio) {
-        ipod_touch_gpio_record_host_input(s->gpio_state, host_gpio, host_high);
-    }
-#endif
     if(keycode == KEY_P_DOWN || keycode == KEY_P_UP) {
         // power button
         gpio_group = GPIO_BUTTON_POWER_IRQ / NUM_GPIO_PINS;
@@ -2416,37 +1950,13 @@ static void ipod_touch_key_event(void *opaque, int keycode)
         }
     }
     else return;
+    ipod_touch_gpio_input_changed(s->gpio_state, button_gpio);
 
     // Only raise a GPIO interrupt on a genuine press/release edge. Without this
     // guard, SDL key auto-repeat (which resends KEY_*_DOWN while a key is held)
     // would fire a fresh interrupt each time even though the button state did
     // not change, spamming the interrupt controller with phantom presses.
     if(do_irq) {
-#ifndef __APPLE__
-        /* This timestamp is taken after the actual pad transition. It is
-         * guest virtual time, independent of the frontend's wall-time pulse.
-         * PC may be zero when the host bottom half has no current vCPU. */
-        static IpodGPIOWakeTraceBudget wake_trace;
-        bool is_wake_button = button_gpio == GPIO_BUTTON_HOME ||
-                              button_gpio == GPIO_BUTTON_POWER;
-        if (ipod_gpio_wake_trace_take(&wake_trace,
-                trace_event_get_state_backends(TRACE_IPOD_TOUCH_GPIO_READ_LOG),
-                is_wake_button, 16)) {
-            uint32_t pc = 0;
-            if (current_cpu && object_dynamic_cast(OBJECT(current_cpu), TYPE_ARM_CPU)) {
-                pc = ARM_CPU(current_cpu)->env.regs[15];
-            }
-            TRACE_PRINTF(trace_ipod_touch_gpio_read_log,
-                         "[gpio-wake] edge button=%s down=%u offset=0x184 "
-                         "value=0x%08x irq=0x%02x pc=0x%08x virtual_ns=%" PRId64
-                         " sample=%u/16\n",
-                         button_gpio == GPIO_BUTTON_HOME ? "home" : "power",
-                         (unsigned)gpio_is_on(s->gpio_state->gpio_state, button_gpio),
-                         s->gpio_state->gpio_state[GPIO2PAD(button_gpio)],
-                         gpio_group * NUM_GPIO_PINS + gpio_selector, pc,
-                         qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), wake_trace.used);
-        }
-#endif
         // Mirror the physical pin level into the sysic. GPIO_INTLEVEL was read
         // by the guest (sysic read handler) but never written anywhere, so it
         // always returned 0 regardless of the real pin state. Reflect the
@@ -2498,6 +2008,13 @@ static void ipod_touch_key_event(void *opaque, int keycode)
  */
 static IPodTouchMachineState *s_kbd_nms;
 static IPodTouchMultitouchState *s_kbd_mt;
+static IPodTouchMachineState *s_ap_machine;
+
+/* The reset in progress is the AP's wake from hibernate (qemu-ios-ui keeps held buttons through it). */
+bool ipod_touch_ap_wake_reset_pending(void)
+{
+    return s_ap_machine && s_ap_machine->last_reset_was_wake;
+}
 
 static uint16_t qcode_to_unichar(int q, bool shift)
 {
@@ -2884,13 +2401,6 @@ static void ipod_touch_powerdown_arm(IPodTouchMachineState *nms, int ms)
  * power and home buttons an emulated device that sleeps can never be woken.
  * This is the same key path, addressed by name instead of by keystroke.
  */
-#ifndef __APPLE__
-bool ipod_touch_ap_wake_reset_pending(void)
-{
-    return s_kbd_mt && s_kbd_mt->gpio_state->ap_wake_reset_pending;
-}
-#endif
-
 void ipod_touch_press_button(IPodTouchButton button, bool down)
 {
 	int base;
@@ -3474,7 +2984,7 @@ static void ipod_touch_machine_init(MachineState *machine)
      * once DMAC0 exists.
      */
     uart1_dev = exynos4210_uart_create(UART1_MEM_BASE, 256, 1,
-                                       it_bt_chardev(serial_hd(1), nms->bt_enabled, nms->bt_latency_us),
+                                       it_bt_chardev(serial_hd(1), nms->bt_enabled, nms->bt_latency_us, "BCM4325"),
                                        nms->irq[0][25], true);
     if (!uart1_dev) {
         hw_error("Failed to create UART1 device!");
@@ -3690,7 +3200,11 @@ static void ipod_touch_machine_init(MachineState *machine)
     // init the accelerometer. Keep the handle so the machine's QMP properties
     // (accel-orientation / accel-x/y/z / accel-shake, added in instance_init)
     // can drive it, e.g.  qom-set path=/machine property=accel-orientation value=3
-    I2CSlave *accelerometer = i2c_slave_create_simple(i2c_state->bus, "lis302dl", 0x1D);
+    // ponytail: the DT accelerometer orientation of 3.0 on (4); 2.x's DT says 5, which ios_dt_mount reads as 1.x
+    // does: read the booted DT's if a 2.x row ever fails the rotation check.
+    I2CSlave *accelerometer = i2c_slave_new("lis302dl", 0x1D);
+    qdev_prop_set_string(DEVICE(accelerometer), "dt-orientation", "04000000");
+    i2c_slave_realize_and_unref(accelerometer, i2c_state->bus, &error_fatal);
     nms->lis302dl_state = LIS302DL(accelerometer);
     lis302dl_apply_attitude(nms->lis302dl_state, nms->accel_pitch, nms->accel_roll, nms->accel_flat);
     nms->lis302dl_state->rate_hz = nms->accel_rate_hz;
@@ -3762,7 +3276,11 @@ static void ipod_touch_machine_init(MachineState *machine)
     sysbus_connect_irq(busdev, 0, s5l8900_get_irq(nms, S5L8720_I2C1_IRQ));
     
     // Init the light sensor
-    I2CSlave *isl29003dl = i2c_slave_create_simple(i2c_state->bus, "isl29003dl", 0x44);
+    I2CSlave *isl29003dl = i2c_slave_new("isl29003dl", 0x44);
+    object_property_add_child(OBJECT(machine), "lightsensor", OBJECT(isl29003dl));
+    i2c_slave_realize_and_unref(isl29003dl, i2c_state->bus, &error_fatal);
+    qdev_connect_gpio_out(DEVICE(isl29003dl), 0,
+                          qdev_get_gpio_in(DEVICE(nms->sysic), GPIO_LIGHTSENSOR_IRQ));
 
     // init the Mikey
     I2CSlave *cd327mikey = i2c_slave_create_simple(i2c_state->bus, "cd3272mikey", 0x39);
@@ -3784,13 +3302,8 @@ static void ipod_touch_machine_init(MachineState *machine)
     fmss_state->nand_path = nms->nand_path;
     fmss_state->nand_overlay = nms->nand_overlay[0] ? nms->nand_overlay : NULL;
     nms->fmss_state = fmss_state;
-#ifdef __APPLE__
-    nms->compat_nand_read.notify = ipod_touch_compat_before_nand_read;
-    notifier_list_add(&fmss_state->before_read, &nms->compat_nand_read);
-#else
     nms->boot_args_nand_read.notify = ipod_touch_boot_args_before_nand_read;
     notifier_list_add(&fmss_state->before_read, &nms->boot_args_nand_read);
-#endif
     busdev = SYS_BUS_DEVICE(dev);
     memory_region_add_subregion(sysmem, FMSS_MEM_BASE, &fmss_state->iomem);
     sysbus_realize(busdev, &error_fatal);
@@ -3884,7 +3397,6 @@ static void ipod_touch_machine_init(MachineState *machine)
     dev = qdev_new("ipodtouch.mbx");
     IPodTouchMBXState *mbx_state = IPOD_TOUCH_MBX(dev);
     nms->mbx_state = mbx_state;
-    mbx_state->irq_enabled = nms->mbx_irq;
     sysbus_realize(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, s5l8900_get_irq(nms, S5L8720_MBX_IRQ));
     memory_region_add_subregion(sysmem, MBX1_MEM_BASE, &mbx_state->iomem1);
@@ -3899,6 +3411,7 @@ static void ipod_touch_machine_init(MachineState *machine)
      */
     s_kbd_nms = nms;
     s_kbd_mt = spi4_state->mt;
+    s_ap_machine = nms;
     qemu_input_handler_register(DEVICE(nms->cpu), &ipod_touch_kbd_handler);
 
     /*

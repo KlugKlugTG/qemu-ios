@@ -63,6 +63,7 @@
 #include "hw/misc/ios_baseband.h"
 #include "hw/misc/ios_vibrator.h"
 #include "hw/i2c/ipod_touch_i2c.h"
+#include "hw/arm/s5l8930.h"
 #include "system/system.h"
 #include "system/reset.h"
 #include "system/runstate.h"
@@ -81,7 +82,9 @@ static const uint32_t s5l8900_usb_hwcfg[] = { 0, 0x7a8f60d0, 0x082000e8, 0x01f08
 /* n45ap 3A101a's device tree. */
 static const S5L8900Board n45_board = {
     .name = "n45",
+    .accel_dt = "03000000",
     .pmu_i2c = 1,
+    .als = "isl29003dl", .als_addr = 0x44, .als_irq = 0x4c,   /* "als,isl29003", interrupts <0x4c 1> */
     /* i2s1: dma-parent dmac1, TX config 0x884 (peripheral 2), interrupts <0xaa> */
     .codec_i2s = { N45_IIS1_BASE, 1, N45_I2S1_DMA_REQ_ID, 0xaa, .host_output = false },
     .i2s_ram_bases = { N45_IIS0_BASE, N45_IIS2_BASE },
@@ -103,6 +106,7 @@ static const S5L8900Board n45_board = {
 static const S5L8900Board m68_board = {
     .name = "m68",
     .pmu_i2c = 0,
+    .als = TYPE_S5L8930_TSL2561, .als_addr = 0x49, .als_irq = 0x49,   /* "als,tsl2561", interrupts <0x49 1> */
     .codec_i2s = { N45_IIS2_BASE, 0, 0, 0x86, .host_output = true },
     /*
      * i2s1 (audio-data,baseband): dmac1, TX config 0x884 (peripheral 2), interrupts <0xaa>, the N45 codec's
@@ -118,10 +122,7 @@ static const S5L8900Board m68_board = {
     .voldown_gpio = M68_GPIO_BUTTON_VOLDOWN, .voldown_irq = M68_GPIO_BUTTON_VOLDOWN_IRQ,
     .ring_gpio = M68_GPIO_RING_SWITCH, .ring_irq = M68_GPIO_RING_SWITCH_IRQ,
     .nand_banks = 4,
-    /* DT accelerometer orientation 0 (none), where the N45's is 3: AppleLIS302DL negates x for bit 0 and y
-     * for bit 1, so the N45's part sits turned 180 degrees about Z to the M68's. The model reads as the
-     * N45's part; on the M68 each axis reads the negated device x and y. */
-    .accel_mount = "-1,-2,3",
+    .accel_dt = "00000000",              /* the DT has no orientation: the driver's 0 */
     /* 1.0 builds its "slide to power off" sheet slowly (up 13 s into a hold,
      * guest time, where 1.1's is up in 3-4 s); a release before it locks instead. */
     .pwroff_hold_ms = 20000, .pwroff_settle_ms = 3000,
@@ -419,7 +420,7 @@ static void n45_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t val
     qemu_call_t q;
     int32_t err = 0;
 
-    if (cpu_memory_rw_debug(cs, value, (uint8_t *)&q, sizeof(q), 0)) {
+    if (qemu_call_rw(cs, value, &q, false)) {
         return;
     }
     switch (q.call_number) {
@@ -436,7 +437,7 @@ static void n45_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t val
         }
     }
     q.error = err;
-    cpu_memory_rw_debug(cs, value, (uint8_t *)&q, sizeof(q), 1);
+    qemu_call_rw(cs, value, &q, true);
 }
 
 static const ARMCPRegInfo n45_cp_reginfo[] = {
@@ -709,9 +710,13 @@ static void m68_modem_battery(void *opaque)
 
 /* One S5L8900 I2S controller (the 2G's model, the same AppleS5L8900XI2SController driver) at its DT wiring. */
 static void n45_i2s_port(IPodTouch1GMachineState *s, MemoryRegion *sysmem, PL080State **dmac,
-                         const S5L8900I2SPort *port)
+                         const S5L8900I2SPort *port, Clock *lrclk)
 {
     DeviceState *dev = qdev_new(TYPE_IPOD_TOUCH_I2S);
+
+    if (lrclk) {
+        qdev_connect_clock_in(dev, "lrclk", lrclk);
+    }
 
     IPOD_TOUCH_I2S(dev)->sysic = s->sysic;
     IPOD_TOUCH_I2S(dev)->dmac = dmac[port->dmac];
@@ -1067,14 +1072,12 @@ static void n45_machine_init(MachineState *machine)
         i2c[i] = IPOD_TOUCH_I2C(dev)->bus;
     }
     dev = DEVICE(i2c_slave_new("lis302dl", 0x1D));
-    if (s->board->accel_mount) {
-        qdev_prop_set_string(dev, "mount", s->board->accel_mount);
-    }
+    qdev_prop_set_string(dev, "dt-orientation", s->board->accel_dt);
     i2c_slave_realize_and_unref(I2C_SLAVE(dev), i2c[0], &error_fatal);
     s->accel = LIS302DL(dev);
     lis302dl_apply_orientation(s->accel, 1);   /* init ran before the mount was set */
     /* The host's controls, the same names as the 2G and the iPad: UIDeviceOrientation 1-6
-     * (lis302dl_apply_orientation also turns the LCD's presented picture, as the 2G's), raw
+     * (the LCD scans out as is, as the 2G's; the host turns the picture), raw
      * counts, a shake; accel-pitch/-roll/-pose are machine properties. Without them the app's
      * rotation never reached the 1G: the guest stayed portrait under a turned shell. */
     object_property_add_alias(OBJECT(machine), "accel-orientation", OBJECT(s->accel), "orientation");
@@ -1104,8 +1107,24 @@ static void n45_machine_init(MachineState *machine)
         i2c_slave_realize_and_unref(pmu, i2c[s->board->pmu_i2c], &error_fatal);
         qdev_connect_gpio_out(DEVICE(pmu), 0, qdev_get_gpio_in(DEVICE(s->sysic), 0x55));
     }
-    /* WM8758 codec at 0x1A beside it (the DT's audio0@1A). */
-    i2c_slave_create_simple(i2c[s->board->pmu_i2c], "wm8758", 0x1A);
+    /*
+     * WM8758 codec at 0x1A beside it (the DT's audio0@1A), master of its port's frame clock from a 9.0036 MHz
+     * MCLK (AppleWM8758Audio's PLL table; hw/arm/ipod_touch_wm8758.c).
+     */
+    I2CSlave *codec = i2c_slave_new("wm8758", 0x1A);
+    qdev_prop_set_uint32(DEVICE(codec), "mclk-hz", 9003600);
+    i2c_slave_realize_and_unref(codec, i2c[s->board->pmu_i2c], &error_fatal);
+
+    /*
+     * The ambient light sensor on I2C0, its INT a GPIO-IC line (the DT's als node), at the 2G's and the A4
+     * boards' 300 lux unless the host sets /machine/lightsensor's lux. Without it AppleTSL2561 and AppleISL29003
+     * found no part, and IOKit's display kept mixing Auto-Brightness with the sensor's 0.5 default: 1.0's iPhone,
+     * which runs Auto-Brightness from boot, lit Home at LEDOUT 0x2d where its 100% is 0x2e.
+     */
+    I2CSlave *als = i2c_slave_new(s->board->als, s->board->als_addr);
+    object_property_add_child(OBJECT(machine), "lightsensor", OBJECT(als));
+    i2c_slave_realize_and_unref(als, i2c[0], &error_fatal);
+    qdev_connect_gpio_out(DEVICE(als), 0, qdev_get_gpio_in(DEVICE(s->sysic), s->board->als_irq));
 
     /*
      * The WM8758's data port (the N45's I2S1, the M68's I2S0): the 2G's model (the same
@@ -1126,24 +1145,22 @@ static void n45_machine_init(MachineState *machine)
      * an N45 with nothing in the jack plays. The M68 has no piezo: its clicks
      * and ringer are this PCM, so the host plays it.
      */
-    n45_i2s_port(s, sysmem, dmac, &bd->codec_i2s);
+    n45_i2s_port(s, sysmem, dmac, &bd->codec_i2s, qdev_get_clock_out(DEVICE(codec), "lrclk"));
     /*
      * The M68's baseband voice port, which carries what the speaker plays. With the window plain RAM,
      * AppleBasebandOutput's DMA start failed (device not ready), mediaserverd's StartIO with it, and the
-     * device played nothing at all.
+     * device played nothing at all. The baseband masters its frame clock (TX config bit 20, as the codec's
+     * port); the modem drives none here, so the port stays at 44.1 kHz.
      */
     if (bd->bb_i2s.base) {
-        n45_i2s_port(s, sysmem, dmac, &bd->bb_i2s);
+        n45_i2s_port(s, sysmem, dmac, &bd->bb_i2s, NULL);
     }
 
     /*
-     * MBX: the 2G's model, the same PowerVR MBX Lite and the same AppleMBX driver. The id stub it
-     * replaces read 0x12c (interrupt status) without the idle bit 0x40, so the first time anything
-     * drove the engine (LayerKit's GL path, a display swap) the driver spun on it forever.
-     * Interrupt 0xC is the mbx node's in the n45ap device tree.
+     * MBX: the 2G's model, the same PowerVR MBX Lite and the same AppleMBX driver, with no wrapper
+     * registers mapped here. Interrupt 0xC is the mbx node's in the n45ap device tree.
      */
     dev = qdev_new("ipodtouch.mbx");
-    IPOD_TOUCH_MBX(dev)->irq_enabled = true;
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_connect_irq(SYS_BUS_DEVICE(dev), 0, n45_irq(s, N45_MBX_IRQ));
     memory_region_add_subregion(sysmem, N45_MBX_BASE, &IPOD_TOUCH_MBX(dev)->iomem1);
@@ -1347,7 +1364,7 @@ static void n45_machine_class_init(ObjectClass *klass, const void *data)
     object_class_property_add_str(klass, "iboot", n45_get_iboot_path, n45_set_iboot_path);
     object_class_property_set_description(klass, "iboot", "decrypted iBoot-204 (entered at 0x18000000)");
     object_class_property_add_str(klass, "nand", n45_get_nand_path, n45_set_nand_path);
-    object_class_property_set_description(klass, "nand", "NAND directory: bank<N>/<page>.page");
+    object_class_property_set_description(klass, "nand", "NAND directory: an image store (geometry.json, cs<N>.pages) or bank<N>/<page>.page");
     object_class_property_add_str(klass, "nand-overlay", n45_get_nand_overlay, n45_set_nand_overlay);
     object_class_property_set_description(klass, "nand-overlay", "writable directory guest NAND programs land in");
     object_class_property_add_str(klass, "usb-tcp-addr", n45_get_usb_tcp_addr, n45_set_usb_tcp_addr);

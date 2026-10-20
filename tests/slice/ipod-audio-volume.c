@@ -39,6 +39,7 @@ typedef struct {
     double output_gain;
 } IPodTouchI2SState;
 #define QEMU_CLOCK_VIRTUAL 0
+#define trace_event_get_state_backends(id) 0
 static unsigned scheduled;
 static uint64_t qemu_clock_get_ns(int clock) { return 1000; }
 static void timer_mod(void *timer, uint64_t now) { assert(now==1000);scheduled++; }

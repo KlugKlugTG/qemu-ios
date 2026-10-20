@@ -29,5 +29,4 @@ pending event; version 1 falls back to its old frame-enable behavior. The old
 render field remains in the wire layout for compatibility.
 
 `tests/slice/ipod-lcd-irq.c` exercises masked frames, delayed enable, partial W1C,
-mask removal and old/current restore under ASan/UBSan. Native evidence and the
-broader acceptance status are recorded in `docs/archive/plan-progress.md`.
+mask removal and old/current restore under ASan/UBSan.

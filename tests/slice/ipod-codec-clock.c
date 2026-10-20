@@ -33,6 +33,7 @@ typedef struct {
     unsigned cmd;
     bool have_cmd, autoinc;
     uint8_t regs[128];
+    uint8_t rate_reg;
     Clock *lrclk;
 } CS42L58State;
 typedef CS42L58State I2CSlave;
@@ -83,7 +84,7 @@ static void audio_be_set_active_out(void *be, void *voice, int active) { voice_a
 
 int main(void) {
     Clock clock = 44100;
-    CS42L58State codec = { .lrclk = &clock };
+    CS42L58State codec = { .rate_reg = 5, .lrclk = &clock };
     output = (IPodTouchI2SState) { .lrclk = &clock, .as.freq = 44100,
         .enable = true, .active = true, .card_ok = true, .pace_debt = 123, .voice_rate=44100 };
     voice_rate=44100;

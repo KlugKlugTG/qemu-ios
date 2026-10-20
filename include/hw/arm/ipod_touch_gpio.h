@@ -20,6 +20,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPodTouchGPIOState, IPOD_TOUCH_GPIO)
 #define GPIO_BUTTON_HOME_IRQ    0x79
 #define GPIO_BUTTON_VOLUP_IRQ   0x78
 #define GPIO_BUTTON_VOLDOWN_IRQ 0x62
+#define GPIO_LIGHTSENSOR_IRQ    0x25   /* the DT's als interrupts */
 
 // The GPIO pad index is (gpio >> 8) & 0xFF, and reads cover addresses up to
 // 0x184 which maps to pad 0xC. The buttons HOLD/HOME/VOLDOWN all live on pad
@@ -42,20 +43,16 @@ typedef struct IPodTouchGPIOState
     qemu_irq outputs[NUM_GPIO_PADS * 8];
     uint32_t fsel_offset;            /* "fsel-offset": the pad function select register */
     uint32_t rest_high_pad, rest_high_mask;   /* "rest-high-pad"/"-mask": active-low inputs at rest */
-#ifndef __APPLE__
-    /* n72 external button levels outlive an AP hibernate reset. */
-    uint32_t host_input_mask[NUM_GPIO_PADS], host_input_level[NUM_GPIO_PADS];
-    bool ap_wake_reset_pending;
-#endif
+    /* Pins a button outside the SoC drives, and their levels: a reset of the
+     * block (the AP's wake from hibernate is one) doesn't move them. */
+    uint32_t input_mask[NUM_GPIO_PADS], input_level[NUM_GPIO_PADS];
 } IPodTouchGPIOState;
 
 bool gpio_is_on(uint32_t *state, uint32_t gpio);
 bool gpio_is_off(uint32_t *state, uint32_t gpio);
 void gpio_set_on(uint32_t *state, uint32_t gpio);
 void gpio_set_off(uint32_t *state, uint32_t gpio);
-#ifndef __APPLE__
-void ipod_touch_gpio_record_host_input(IPodTouchGPIOState *s, uint32_t gpio,
-                                      bool high);
-#endif
+/* @gpio is driven from outside: keep its current level across resets. */
+void ipod_touch_gpio_input_changed(IPodTouchGPIOState *s, uint32_t gpio);
 
 #endif

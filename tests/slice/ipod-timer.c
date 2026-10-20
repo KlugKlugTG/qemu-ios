@@ -24,6 +24,7 @@ static void timer_mod(QEMUTimer *timer, int64_t value) { assert(value>=now);dead
 static void timer_del(QEMUTimer *timer) {}
 static void qemu_irq_lower(qemu_irq irq) {}
 static uint64_t muldiv64(uint64_t a,uint64_t b,uint64_t c) { return (unsigned __int128)a*b/c; }
+#define BQL_LOCK_GUARD() do { } while (0)   /* one thread here */
 #include "slice.h"
 
 int main(void) {

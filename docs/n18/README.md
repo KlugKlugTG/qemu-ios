@@ -226,7 +226,7 @@ offsets at 0x80000000).
 | H2FMI | `s5l8930.h2fmi` at 0x81200000/0x81300000, IRQs 0x1f/0x1e | as the iPad | R |
 | CDMA + AES | `s5l8930.cdma`, `version=1` (no channel-enable block: every channel live), 28 channels from IRQ 0x2a | variant | R |
 | SHA-1, PKE | `s5l8930.sha1`, `ipodtouch.pke` | as the iPad | R |
-| UART0-1 | `exynos4210.uart`, IRQs counting down from 0x18 | as the iPad | R |
+| UART0-1 | `exynos4210.uart`, IRQs counting down from 0x18; uart1 is the BCM4329's Bluetooth HCI (`bluetooth,n18`, `ipod_touch_bt.c`, as the N88's uart3): with nothing on it 3.1.1's BlueTool never got its HCI_Reset answered and SpringBoard's status bar waited out two 5 s BTSessionAttach timeouts on every turn | as the iPad | R |
 | I2C0, I2C2 | `s5l8930.i2c`, IRQs 0x13/0x11 | as the iPad | R |
 | PMU D1755 | the S5L8720's Dialog model (`pcf50633`): `event-count=4` (events 0x01-0x04, status 0x05, masks 0x09-0x0c), `shutdown-reg=0x0d`, `adc-reg=0x30`, `rtc-reg=0x4c`; IRQ to GPIO 0x9d | variant | H |
 | Codec, Mikey, accelerometer | `cs42l58` 0x4a, `cd3272mikey` 0x3a, `lis302dl` i2c2 0x1d | shared | H |

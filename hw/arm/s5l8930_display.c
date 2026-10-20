@@ -45,6 +45,7 @@
 #define DP_UI_FORMAT        0x40
 #define DP_UI_ADDR          0x44
 #define DP_UI_STRIDE        0x48
+#define DP_UI_UNSCALED      0x4c      /* bit0: placed at 0,0 at its source size; DST_ORIGIN and DST_END unused */
 #define DP_UI_DST_ORIGIN    0x54      /* x << 16 | y on the panel */
 #define DP_UI_SRC_SIZE      0x60      /* w << 16 | h of the source buffer */
 #define DP_UI_DST_END       0x64      /* x1 << 16 | y1, the destination's far corner */
@@ -67,7 +68,7 @@
 #define CLCD_LUT_TABLES     8
 #define CLCD_LUT_GAMMA      4         /* tables 4, 5, 6: the output gamma of R, G, B */
 
-#define VBL_PERIOD_NS       (NANOSECONDS_PER_SECOND / 60)
+#define VBL_PERIOD_NS(s)    (NANOSECONDS_PER_SECOND / (s)->refresh_hz)   /* 60 Hz unless "refresh-hz" */
 #define QUIET_RELATCH_VBLS  15        /* ~250 ms without a swap */
 
 OBJECT_DECLARE_SIMPLE_TYPE(S5L8930DisplayState, S5L8930_DISPLAY)
@@ -101,6 +102,7 @@ struct S5L8930DisplayState {
     uint64_t fb_base;        /* property: seed iBoot's scanout when nonzero */
     uint16_t width, height;  /* properties: the board's panel, as iBoot programs it */
     uint32_t pw, ph;         /* "panel-width"/"panel-height": panel= override (issue #21), 0 = the board's */
+    uint32_t refresh_hz;     /* "refresh-hz": the VBL's rate, 60 as on the devices */
 
     DisplayPipe pipe[2];     /* 0 = DisplayPipe0 (scanned out), 1 = RGBOUT */
     uint32_t clcd[2][CLCD_WORDS];
@@ -355,7 +357,7 @@ static void vbl_tick(void *opaque)
                 s->pipe[i].regs[DP_IRQ_STATUS / 4] |= DP_IRQ_VBL;
                 pipe_update_irq(&s->pipe[i]);
             }
-            timer_mod(s->vbl, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBL_PERIOD_NS);
+            timer_mod(s->vbl, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBL_PERIOD_NS(s));
             return;
         }
     }
@@ -386,19 +388,20 @@ static void vbl_tick(void *opaque)
     s->pipe[1].swap_pending = false;
     pipe_frame_end(&s->pipe[0]);
     pipe_frame_end(&s->pipe[1]);
-    /* ponytail: the frame is the only CLCD source raised, the one AppleCLCD enables (its LUT and dither updates). */
-    s->clcd_status |= CLCD_IRQ_FRAME;
-    clcd_update_irq(s);
-#ifndef __APPLE__
-    /* Adapted from upstream 97860b36b0e9fcdd008e95e58efff9609ca44aee.
-     * Paint the completed latch at vsync for visible portable consoles, so
-     * deferred host publication does not wait for the 30 ms GUI refresh.
-     * display_update already skips an unchanged latched frame. */
+    /*
+     * Paint the latched frame now, at the vsync, when something shows the
+     * console, as ipod_touch_lcd's refresh_timer_tick does. Left to QEMU's
+     * 30 ms display refresh, a guest swapping every vsync reached the host
+     * at under 33 fps, unevenly. display_update returns at once when the
+     * surface already holds this frame.
+     */
     if (s->con && qemu_console_is_visible(s->con)) {
         graphic_hw_update(s->con);
     }
-#endif
-    timer_mod(s->vbl, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBL_PERIOD_NS);
+    /* ponytail: the frame is the only CLCD source raised, the one AppleCLCD enables (its LUT and dither updates). */
+    s->clcd_status |= CLCD_IRQ_FRAME;
+    clcd_update_irq(s);
+    timer_mod(s->vbl, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBL_PERIOD_NS(s));
 }
 
 /* ---- CLCD timing generator ---------------------------------------------- */
@@ -579,6 +582,17 @@ static bool scanout_layer(S5L8930DisplayState *s, int layer, unsigned w, unsigne
     uint32_t *r = s->pipe[0].regs, *ui = r + DP_UI_BASE(layer) / 4;
     uint32_t org = ui[DP_UI_DST_ORIGIN / 4], sz = ui[DP_UI_SRC_SIZE / 4];
     uint32_t end = ui[DP_UI_DST_END / 4];
+
+    /*
+     * 3.2's AppleDisplayPipe (7B500 0xc058d4de) programs DST_ORIGIN and DST_END only for a layer placed off 0,0 and
+     * otherwise sets UNSCALED and leaves them as they were: after an iPhone app's compatibility window (its
+     * destination 2x or 1x, centered), SpringBoard's full-screen layer arrives with the window's corners still in
+     * them, and honoring those drew the whole Home screen into the window (LightTouchMac issue 87). 4.x writes 0 to
+     * UNSCALED and both corners on every swap (8C148 0x806cf468).
+     */
+    if (ui[DP_UI_UNSCALED / 4] & 1) {
+        org = end = 0;
+    }
 
     if (!(r[DP_LAYERS / 4] & (0x100 << layer))) {
         return false;
@@ -1027,13 +1041,17 @@ static void s5l8930_display_reset(DeviceState *dev)
         r[0x4060 / 4] = s->width << 16 | s->height;
     }
     pipes_update_irq(s);
-    timer_mod(s->vbl, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBL_PERIOD_NS);
+    timer_mod(s->vbl, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBL_PERIOD_NS(s));
 }
 
 static void s5l8930_display_realize(DeviceState *dev, Error **errp)
 {
     S5L8930DisplayState *s = S5L8930_DISPLAY(dev);
 
+    if (s->refresh_hz < 1 || s->refresh_hz > 240) {
+        error_setg(errp, "refresh-hz must be 1 to 240, not %u", s->refresh_hz);
+        return;
+    }
     s->vbl = timer_new_ns(QEMU_CLOCK_VIRTUAL, vbl_tick, s);
     s->con = graphic_console_init(dev, 0, &display_gfx_ops, s);
     s->pipe[0].native = s->width << 16 | s->height;
@@ -1188,6 +1206,8 @@ static const Property s5l8930_display_properties[] = {
     DEFINE_PROP_UINT16("height", S5L8930DisplayState, height, 768),
     DEFINE_PROP_UINT32("panel-width", S5L8930DisplayState, pw, 0),     /* unset: width */
     DEFINE_PROP_UINT32("panel-height", S5L8930DisplayState, ph, 0),
+    /* Faster than the devices' 60 Hz on request (Light Touch's experimental 120 Hz), as ipod_touch_lcd's. */
+    DEFINE_PROP_UINT32("refresh-hz", S5L8930DisplayState, refresh_hz, 60),
 };
 
 static void s5l8930_display_class_init(ObjectClass *klass, const void *data)

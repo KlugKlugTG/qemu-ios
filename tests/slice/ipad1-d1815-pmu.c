@@ -10,6 +10,12 @@
  *   - mux 6 is the dock D+/D- the charger biased: with a host's pull-downs it
  *     reads 0 mV (USBHost), otherwise mid-scale 0x800 (a brick, "Detached").
  *     mV = adc * 5000 / 4096. (4.3.x cable detection, smoke #35)
+ *   - The temperature muxes read a room-temperature device through the driver's
+ *     own conversions: the 10k NTCs (tbat, adc_in7, tdev1-4) 20-30 C, tjunc
+ *     20-40 C, and the calibration resistor (tcal) within 0.5 C of the 51.82 C
+ *     iOS 7's ThermalMonitor expects of it on N90. With everything at mid-scale
+ *     (2 C) ThermalMonitor added the difference to every sensor and iOS 7.0
+ *     showed its "needs to cool down" screen (LightTouchMac issue 83).
  *   - "pmu go hib" (0x12 bit 1) drops the AP rail ("ap-power") when the board
  *     wires it; Home powers it back on, and the AP's power-on reset leaves the
  *     PMU's registers (0x8F's suspend marker, the button event) as they were.
@@ -20,9 +26,12 @@
  *     if (0) {
  * so a stay-off restart is never confirmed as the halt.
  *
+ *   - The RTC counter (0x4C) reads QEMU's RTC (qemu_get_timedate, so -rtc base= moves it), and rtc-epoch
+ *     pins it at power-on and runs on from there.
+ *
  * SLICE hw/arm/s5l8930_i2c.c define PMU_[A-Za-z0-9_]+|D1815_ADDR
  * SLICE hw/arm/s5l8930_i2c.c range struct S5L8930D1815State { | \n/*\n * The guest's own power-off
- * SLICE hw/arm/s5l8930_i2c.c fn d1815_halt_reason d1815_set_ap_power d1815_update_irq d1815_adc_done s5l8930_d1815_button s5l8930_d1815_take_suspend s5l8930_d1815_set_usb_host s5l8930_d1815_set_vbat s5l8930_d1815_usb_cable_event d1815_rtc_count d1815_recv d1815_send d1815_reset s5l8930_d1815_guest_shutdown_confirmed d1815_post_load
+ * SLICE hw/arm/s5l8930_i2c.c fn d1815_halt_reason d1815_set_ap_power d1815_update_irq d1815_adc_done s5l8930_d1815_button s5l8930_d1815_take_suspend s5l8930_d1815_set_usb_host s5l8930_d1815_set_vbat s5l8930_d1815_usb_cable_event d1815_rtc_clock d1815_rtc_count d1815_recv d1815_send d1815_reset s5l8930_d1815_guest_shutdown_confirmed d1815_post_load
  */
 #include <assert.h>
 #define trace_event_get_state_backends(id) 0
@@ -48,6 +57,10 @@ typedef S5L8930D1815State DeviceState;
 #define qatomic_read(p) (*(p))
 #define qatomic_set(p,v) (*(p)=(v))
 static int64_t now;
+static time_t host_now = 1700000000;  /* the host clock */
+static time_t rtc_base_shift;         /* -rtc base=: QEMU's RTC this far from the host */
+static void qemu_get_timedate(struct tm *tm, int offset) { time_t t = host_now + rtc_base_shift + offset; gmtime_r(&t, tm); }
+#define mktimegm timegm
 static int shutdowns, resets;
 static int d1815_shutdown_confirmed;
 static int64_t qemu_clock_get_ns(int c) { return now; }
@@ -70,6 +83,11 @@ static void wr(S5L8930D1815State *s, uint8_t reg, uint8_t val) {
 static unsigned rd(S5L8930D1815State *s, uint8_t reg) {
     s->reg = reg;
     return d1815_recv((I2CSlave *)s);
+}
+static uint32_t rd32(S5L8930D1815State *s, uint8_t reg) {
+    uint32_t v = 0;
+    for (int i = 0; i < 4; i++) v |= (uint32_t)rd(s, reg + i) << (8 * i);
+    return v;
 }
 static void advance(S5L8930D1815State *s) {
     assert(s->adc_timer->pending);
@@ -110,6 +128,34 @@ int main(void) {
     brick = (s.regs[PMU_ADC_RES] & 0xf) | (s.regs[PMU_ADC_RES + 1] << 4);
     assert(brick == 0x800);                                  /* no host: mid-scale (brick / Detached) */
 
+    /* --- temperatures, converted as AppleD1815PMU does (7.0b1 809d5e34): a room-temperature device --- */
+    static const unsigned ntc_muxes[] = { 2, 7, 11, 12, 13, 14, 10 };   /* tbat adc_in7 tdev1-4, tcal */
+    /* the driver's 10k NTC table: ohms at -40, -35, ... 60 C */
+    static const long ntc_r[] = { 188500, 144290, 111330, 86560, 67790, 53460, 42450, 33930, 27280,
+                                  22070, 17960, 14700, 12090, 10000, 8310, 6940, 5830, 4910, 4160,
+                                  3540, 3020 };
+    for (unsigned i = 0; i < sizeof(ntc_muxes) / sizeof(ntc_muxes[0]); i++) {
+        wr(&s, PMU_ADC_CTRL, ntc_muxes[i] | PMU_ADC_START);
+        advance(&s);
+        long raw = (s.regs[PMU_ADC_RES] & 0xf) | (s.regs[PMU_ADC_RES + 1] << 4);
+        long ohms = raw * 40 * 20000 >> 16;                      /* V (16.16) = raw * 40; R = V * 20000 */
+        int k = 1;
+        while (k < 20 && ntc_r[k] > ohms) k++;
+        double c = -40 + 5 * (k - 1) + 5.0 * (ntc_r[k - 1] - ohms) / (ntc_r[k - 1] - ntc_r[k]);
+        if (ntc_muxes[i] == 10) {
+            assert(c > 51.32 && c < 52.32);                      /* ThermalMonitor's N90 default, 51.82 */
+        } else {
+            assert(c > 20 && c < 30);
+        }
+    }
+    wr(&s, PMU_ADC_CTRL, PMU_ADC_MUX_TJUNC | PMU_ADC_START);
+    advance(&s);
+    int tj = (s.regs[PMU_ADC_RES] & 0xf) | (s.regs[PMU_ADC_RES + 1] << 4);
+    int cal = (s.regs[0x43] << 4 | (s.regs[0x44] & 0xf)) & 0xfff;
+    if (!(cal & 0xff0)) cal = 0x425;                             /* unprogrammed: the driver's default */
+    double tjunc = 26 + 0.32 * (cal - tj);
+    assert(tjunc > 20 && tjunc < 40);
+
     /* --- restart with no stay-off flag is a reboot --- */
     assert(!resets && !shutdowns);
     s.regs[PMU_BOOT_REASON] = 0x00;
@@ -146,6 +192,17 @@ int main(void) {
     wr(&u, PMU_OOC, 0x02);
     assert(!u.ap_off && (u.regs[PMU_OOC] & 2));
 
+    /* --- the RTC counter: QEMU's RTC, then rtc-epoch on top --- */
+    S5L8930D1815State r = { .irq = &irq, .adc_timer = &timer };
+    d1815_reset((DeviceState *)&r);
+    assert(rd32(&r, PMU_RTC_COUNT) == 1700000000);           /* no -rtc: the host's UTC */
+    rtc_base_shift = 1265068800 - host_now;                  /* -rtc base=2010-02-02 */
+    assert(rd32(&r, PMU_RTC_COUNT) == 1265068800);
+    r.rtc_epoch = 1300000000;                                /* a pinned date: power-on reads it */
+    d1815_reset((DeviceState *)&r);
+    host_now += 5;
+    assert(rd32(&r, PMU_RTC_COUNT) == 1300000005);
+
     puts("PASS: D1815 restart confirms a stay-off halt, ADC start-bit clear, mux-6 cable classification, "
-         "hibernate rail");
+         "room-temperature thermistors and die, hibernate rail, RTC from QEMU's RTC and rtc-epoch");
 }

@@ -194,15 +194,6 @@ typedef struct {
     bool ecid_explicit;
 	AddressSpace *nsas;
 	/* boot-args: repeated early writes of the kernel command line. */
-	QEMUTimer *boot_args_timer;
-	unsigned boot_args_writes;
-    uint64_t boot_args_scan_deadline;
-    uint64_t boot_args_scan_started_ms, boot_args_scan_attempts;
-    uint32_t boot_args_delay_ms, boot_args_repeat, boot_args_interval_ms;
-    bool boot_args_delay_ms_explicit, boot_args_repeat_explicit;
-    bool boot_args_interval_ms_explicit;
-	bool boot_args_scan_failed;	/* complain once, not every retry */
-	uint32_t boot_args_addr;	/* signature hit from an earlier tick; 0 = rescan */
 	qemu_irq **irq;
 	ARMCPU *cpu;
 	PL192State *vic0;
@@ -226,13 +217,9 @@ typedef struct {
 	IPodTouchLCDState *lcd_state;
 	IPodTouchMIPIDSIState *mipi_dsi_state;
 	IPodTouchFMSSState *fmss_state;
-    Notifier compat_nand_read;
-    uint32_t compat_command_line;
-#ifndef __APPLE__
     Notifier boot_args_nand_read;
-    uint32_t boot_args_format, boot_args_command_line;
-    bool boot_args_reported;
-#endif
+    uint32_t boot_args_format;        /* iBoot's "%s " literal slot; 0 = not found yet */
+    uint32_t boot_args_command_line;  /* gBootArgs.commandLine */
 	IPodTouchMBXState *mbx_state;
 	IPodTouchSDIOState *sdio_state;
 	IPodTouchTVOutState *tvout_state;
@@ -256,7 +243,6 @@ typedef struct {
 	/* USB device-mode options; see ipod_touch_instance_init(). */
 	char usb_tcp_addr[256];   /* host:port of the host bridge, empty = disabled */
 	bool usb_attached;        /* assert PMU USB cable presence */
-	bool mbx_irq;             /* wire the MBX completion interrupt */
 	bool usb_patch_mux_gate;  /* retired option, always false */
 	bool wifi;                /* present a BCM4325 on the SDIO bus */
 	bool gles_debug;          /* paint what the GL bridge refuses magenta (tests) */
@@ -304,6 +290,7 @@ typedef struct {
     char direct_iboot[PATH_MAX], direct_llb[PATH_MAX];
     MemoryRegion dram_at_zero;   /* DRAM's base, shown at 0 by the remap */
     bool resume_boot;   /* the next reset is the PMU powering the AP on from hibernate */
+    bool last_reset_was_wake;   /* the latest reset was that wake (the host keeps held buttons) */
     uint32_t panel_w, panel_h;   /* "panel=WxH": opt-in larger panel (0: the shipped 320x480) */
     char gid_blobs[PATH_MAX];
     bool aes_uid_engine;             /* aes-uid=engine; see ipod_touch_aes.c AES_GO */
@@ -332,6 +319,6 @@ typedef struct {
  * `user` unchanged if the user pointed -serial at that port, so the HCI can be
  * watched or replaced from outside. bt=off disables the model entirely.
  */
-Chardev *it_bt_chardev(Chardev *user, bool enabled, uint32_t latency_us);
+Chardev *it_bt_chardev(Chardev *user, bool enabled, uint32_t latency_us, const char *chip);
 
 #endif

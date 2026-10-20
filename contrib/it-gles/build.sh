@@ -14,14 +14,6 @@ sh "$HERE/genstubs.sh" "$HERE/gles_stubs.h"
 # one front end, contrib/gles-public.
 bash "$HERE/build-gles1x.sh" "$HERE/OpenGLES-1x"
 
-# GLTest.app -- a real app bundle with a CAEAGLLayer. UIKit, QuartzCore, Foundation,
-# OpenGLES and libobjc are all dlopen'd, so nothing here links anything but libSystem:
-# `ld -framework OpenGLES` against the 3.1.3 SDK is a hard error (its 2009 dylibs read
-# as platform 'unknown', fatal for a framework though only a warning for -l).
-cc6 "$HERE/glapp.c" "$HERE/glapp.o"
-link6 -execute "$HERE/GLTest" "$HERE/glapp.o"
-rm -f "$HERE/glapp.o"
-
 cc6 "$HERE/sblaunch.c" "$HERE/sblaunch.o"
 link6 -execute "$HERE/sblaunch" "$HERE/sblaunch.o"
 rm -f "$HERE/sblaunch.o"
@@ -33,17 +25,4 @@ if command -v ldid >/dev/null; then
     ldid "-S$HERE/sblaunch-entitlements.xml" "$HERE/sblaunch"
 fi
 
-APP="$HERE/GLTest.app"
-rm -rf "$APP"
-mkdir -p "$APP"
-cp "$HERE/GLTest" "$APP/GLTest"
-cp "$HERE/glapp-Info.plist" "$APP/Info.plist"
-chmod 755 "$APP/GLTest"
-# Ad-hoc sign it. The image's boot args disable enforcement, but installd and
-# SpringBoard both walk the signature before anything is executed, and an
-# unsigned binary is a different rejection from a bad one.
-if command -v ldid >/dev/null; then
-    ldid -S "$APP/GLTest"
-fi
-
-file "$HERE/OpenGLES-1x" "$APP/GLTest"
+file "$HERE/OpenGLES-1x"

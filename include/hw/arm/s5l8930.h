@@ -288,20 +288,18 @@ void s5l8930_cdma_sink_done(DeviceState *dev, uint32_t fifo_base, uint32_t size)
 #define TYPE_S5L8930_I2S "s5l8930.i2s"
 
 /*
- * Frame rate of I2S port n. Its bit clock is PMGR NCO n (0xbf100100 +
- * 0x10 n): AppleS5L8930XPerformanceControllerFunctionNCOFrequency writes
+ * Frame rate of I2S port n. As the slave of its frame clock (its own
+ * configuration says which), its "lrclk" input's: the codec's. As the
+ * master, its MCLK over its dividers: on the A4 the port's bit clock is
+ * PMGR NCO n (0xbf100100 + 0x10 n), where
+ * AppleS5L8930XPerformanceControllerFunctionNCOFrequency writes
  * +4 = 64 * fs (0x002b1100 for 44.1 kHz, c0645046) when AppleARMIISAudio
- * sets the device rate. 44.1 kHz until the kernel has programmed it.
+ * sets the device rate. 44.1 kHz until the kernel has programmed either.
  */
 #define S5L8930_NCO_BCLK(n)      (S5L8930_PMGR_BASE + 0x104 + 0x10 * (n))
-static inline unsigned s5l8930_i2s_rate(unsigned port)
-{
-    uint32_t bclk = address_space_ldl_le(&address_space_memory,
-                                         S5L8930_NCO_BCLK(port),
-                                         MEMTXATTRS_UNSPECIFIED, NULL);
-
-    return bclk >= 64 * 8000 && bclk <= 64 * 192000 ? bclk / 64 : 44100;
-}
+unsigned s5l8930_i2s_rate(unsigned port);
+/* The same, with the port's output voice set to it while TX runs: a CDMA chain's start. */
+unsigned s5l8930_i2s_sync_rate(unsigned port);
 #define S5L8930_CDMA_CHANNELS    0x26
 
 /*

@@ -1550,6 +1550,62 @@ static void reg_schedule(IosBbCore *bb)
     TRACE("registration burst scheduled\n");
 }
 
+/*
+ * How long the modem searches before it is registered, from when it can (radio on, the SIM's
+ * IMSI readable, automatic selection, a network there), on the guest's clock (QEMU_CLOCK_VIRTUAL,
+ * which stops with the machine). Without stored information (3GPP TS 25.304 5.2.3.1.1 initial
+ * cell selection, TS 23.122 4.4.3.1.1) the modem scans every carrier of its bands on the 200 kHz
+ * raster for one cell of a PLMN, reads its system information and makes its location update; with
+ * the last registered area on the SIM (EF_LOCI) and that PLMN still the one to select, it goes
+ * straight to the stored carrier (stored information cell selection). The SIM's EF_LOCI is kept in
+ * sim_file with the PIN state, so only a SIM's first boot, or one on another network, pays the scan.
+ * Neither duration is a measurement of an iPhone: no power-on-to-+CREG trace of a 3GS or an iPhone 4
+ * is to hand, and 3GPP sets the procedure, not its length. They are estimates from it: a few
+ * thousand carriers over the three UMTS and four GSM bands at tens of ms each, the BCCH's system
+ * information and an RRC connection for the update give several seconds cold, a stored carrier
+ * about the last two. The machine property search-ms sets the cold one.
+ * ponytail: fixed durations; make them depend on signal or RAT if anything ever reads that.
+ */
+#define IOS_BB_SEARCH_MS 8000
+#define IOS_BB_STORED_SEARCH_MS 3000
+
+/* The modem can search: radio on, automatic selection, an unlocked SIM, a network there. */
+static bool camp_possible(const IosBbCore *bb)
+{
+    return bb->cfun == 1 && !bb->cops_detached && !sim_locked(bb) && bb->registered;
+}
+
+static void sim_save(const IosBbCore *bb);
+
+/* Start a search when one becomes possible, drop it when it no longer is; at its end the location
+ * update writes the SIM's EF_LOCI. */
+static void camp_update(IosBbCore *bb)
+{
+    if (!camp_possible(bb)) {
+        bb->camp_due_ms = 0;
+    } else if (!bb->camp_due_ms) {
+        bool stored = bb->loci_plmn[0] && strcmp(bb->loci_plmn, bb->plmn) == 0;
+
+        bb->camp_due_ms = bb->now_ms + (stored ? IOS_BB_STORED_SEARCH_MS
+                                        : bb->search_ms ? bb->search_ms : IOS_BB_SEARCH_MS);
+        bb->camp_due_ms += !bb->camp_due_ms;     /* 0 means not searching */
+        bb->camp_noted = false;
+        TRACE("%" PRId64 " searching (%s)\n", bb->now_ms, stored ? "stored EF_LOCI" : "no stored information");
+    } else if (bb->now_ms >= bb->camp_due_ms && !bb->camp_noted) {
+        TRACE("%" PRId64 " camped on the network\n", bb->now_ms);
+        bb->camp_noted = true;
+        if (strcmp(bb->loci_plmn, bb->plmn) != 0) {
+            snprintf(bb->loci_plmn, sizeof(bb->loci_plmn), "%s", bb->plmn);
+            sim_save(bb);
+        }
+    }
+}
+
+static bool camped(const IosBbCore *bb)
+{
+    return camp_possible(bb) && bb->camp_due_ms && bb->now_ms >= bb->camp_due_ms;
+}
+
 /* The current +CREG stat the model would report. */
 static int reg_stat(const IosBbCore *bb)
 {
@@ -1559,7 +1615,7 @@ static int reg_stat(const IosBbCore *bb)
     if (bb->cops_detached || sim_locked(bb)) {
         return 0;                                /* a locked SIM has no IMSI to register with */
     }
-    return bb->registered ? 1 : 2;
+    return camped(bb) ? 1 : 2;
 }
 
 /*
@@ -1641,6 +1697,7 @@ void ios_bb_changed(IosBbCore *bb)
             emit_xsigstr(bb);
         }
     }
+    camp_update(bb);
     if (bb->cfun == 1 && bb->ch[bb->creg_ch].open && reg_stat(bb) != bb->last_creg) {
         reg_schedule(bb);
     }
@@ -1981,13 +2038,16 @@ static void sim_save(const IosBbCore *bb)
         return;
     }
     fprintf(f, "sim-pin %d %s %s %d %d\n", bb->pin_on, bb->pin, bb->puk, bb->pin_left, bb->puk_left);
+    if (bb->loci_plmn[0]) {
+        fprintf(f, "loci %s\n", bb->loci_plmn);  /* EF_LOCI: the last registered PLMN */
+    }
     fclose(f);
 }
 
 /* A new SIM, or the one sim_file describes. */
 static void sim_load(IosBbCore *bb)
 {
-    char pin[16], puk[16];
+    char pin[16], puk[16], loci[7];
     int on, pin_left, puk_left;
     FILE *f;
 
@@ -1996,6 +2056,7 @@ static void sim_load(IosBbCore *bb)
     snprintf(bb->puk, sizeof(bb->puk), "12345678");
     bb->pin_left = IOS_BB_PIN_TRIES;
     bb->puk_left = IOS_BB_PUK_TRIES;
+    bb->loci_plmn[0] = 0;
     if (!bb->sim_file[0] || !(f = fopen(bb->sim_file, "r"))) {
         return;
     }
@@ -2007,6 +2068,9 @@ static void sim_load(IosBbCore *bb)
         snprintf(bb->puk, sizeof(bb->puk), "%s", puk);
         bb->pin_left = pin_left;
         bb->puk_left = puk_left;
+    }
+    if (fscanf(f, " loci %6[0-9]", loci) == 1 && strlen(loci) >= 5) {
+        snprintf(bb->loci_plmn, sizeof(bb->loci_plmn), "%s", loci);
     }
     fclose(f);
 }
@@ -2165,8 +2229,16 @@ static bool sim_command(IosBbCore *bb, int ch, const char *cmd)
     return false;
 }
 
-/* Parse one complete "at<cmd>" line (already lower-cased). */
+static void at_command_line(IosBbCore *bb, int ch, const char *line);
+
+/* One complete "at<cmd>" line (already lower-cased), then the search it may start or stop. */
 static void at_command(IosBbCore *bb, int ch, const char *line)
+{
+    at_command_line(bb, ch, line);
+    camp_update(bb);
+}
+
+static void at_command_line(IosBbCore *bb, int ch, const char *line)
 {
     const char *arg;
     char buf[600];
@@ -3071,6 +3143,15 @@ void ios_bb_tick(IosBbCore *bb, int64_t now_ms)
         return;
     }
 
+    camp_update(bb);
+    if (!bb->reg_step && bb->creg_n > 0 && bb->ch[bb->creg_ch].open && reg_stat(bb) != bb->last_creg) {
+        if (reg_stat(bb) == 1 && bb->last_creg == 2) {
+            bb->reg_step = 2;                    /* the search found the cell: registered, now */
+            bb->reg_due_ms = now_ms;
+        } else {
+            reg_schedule(bb);
+        }
+    }
     if (bb->reg_step && now_ms >= bb->reg_due_ms) {
         reg_tick(bb);
     }
@@ -3157,6 +3238,9 @@ int64_t ios_bb_next_due(const IosBbCore *bb)
     if (bb->reg_step) {
         due = bb->reg_due_ms;
     }
+    if (bb->camp_due_ms > bb->now_ms && (!due || bb->camp_due_ms < due)) {
+        due = bb->camp_due_ms;
+    }
     if (bb->temp_due_ms && (!due || bb->temp_due_ms < due)) {
         due = bb->temp_due_ms;
     }
@@ -3201,6 +3285,8 @@ void ios_bb_reset(IosBbCore *bb)
     int signal_dbm = bb->signal_dbm, battery = bb->battery, answer_delay_ms = bb->answer_delay_ms;
     unsigned lac = bb->lac, ci = bb->ci;
     bool registered = bb->registered, sim_present = bb->sim_present, nitz = bb->nitz;
+    uint32_t search_ms = bb->search_ms;
+    char loci_plmn[sizeof(bb->loci_plmn)];
     IosBbOutFn out = bb->out, data_out = bb->data_out;
     void *opaque = bb->opaque, *data_opaque = bb->data_opaque;
     int64_t now_ms = bb->now_ms, wall_offset_ms = bb->wall_offset_ms;
@@ -3222,6 +3308,7 @@ void ios_bb_reset(IosBbCore *bb)
     memcpy(pin, bb->pin, sizeof(pin));
     memcpy(puk, bb->puk, sizeof(puk));
     memcpy(sim_file, bb->sim_file, sizeof(sim_file));
+    memcpy(loci_plmn, bb->loci_plmn, sizeof(loci_plmn));
 
     memset(bb, 0, sizeof(*bb));
 
@@ -3231,6 +3318,7 @@ void ios_bb_reset(IosBbCore *bb)
     memcpy(bb->pin, pin, sizeof(pin));
     memcpy(bb->puk, puk, sizeof(puk));
     memcpy(bb->sim_file, sim_file, sizeof(sim_file));
+    memcpy(bb->loci_plmn, loci_plmn, sizeof(loci_plmn));
 
     memcpy(bb->operator_long, operator_long, sizeof(operator_long));
     memcpy(bb->operator_short, operator_short, sizeof(operator_short));
@@ -3246,6 +3334,7 @@ void ios_bb_reset(IosBbCore *bb)
     bb->lac = lac;
     bb->ci = ci;
     bb->registered = registered;
+    bb->search_ms = search_ms;
     bb->sim_present = sim_present;
 
     bb->out = out;

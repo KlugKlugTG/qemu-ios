@@ -96,6 +96,7 @@
 #define S5L8920_SWI_BASE        0x89100000
 #define S5L8920_DART_BASE(n)    (0xbfe00000 + (n) * 0x100000)
 #define S5L8920_AUDIO_COMPLEX   0x84300000      /* DT audio-complex reg[0]: its NCOs */
+#define S5L8920_NCOREF_HZ       162000000       /* their reference, PLL1 (DT ncoref-frequency) */
 #define S5L8920_AUDIO_COMPLEX_SIZE 0x5000
 #define S5L8920_I2S0_FIFO       0x84500000      /* DT i2s0 reg; what the CDMA writes */
 #define S5L8920_I2S0_BASE       0x84500400      /* its registers, the A4's i2s layout */
@@ -146,7 +147,8 @@ typedef struct S5L8920Board {
     uint8_t board_id;                    /* PMGR POWER_ID[23:16] */
     int nuarts;
     int8_t gauge_uart;                   /* bq27540 HDQ gas gauge; -1 = none */
-    int8_t bt_uart;                      /* the BCM4325's H4 HCI (ipod_touch_bt.c); 0 = none */
+    int8_t bt_uart;                      /* the Bluetooth chip's H4 HCI (ipod_touch_bt.c); 0 = none */
+    const char *bt_chip;                 /* which chip answers it (ipod_touch_bt.c's bt_chips) */
     uint16_t gauge_mah;
     bool nor;                            /* a SPI NOR on spi0 (the N88's; the N18 boots from NAND) */
     bool baseband;                       /* spi2, the baseband link */
@@ -170,7 +172,7 @@ typedef struct S5L8920Board {
     bool vibrator;
     uint8_t vibrator_pwm;
     S5L8920I2CDevice i2c[8];             /* in creation order (the snapshot's) */
-    const char *accel_mount;             /* the LIS302DL model's "mount" axes; NULL: as the N18's/N72's */
+    const char *accel_dt;                /* the DT accelerometer's "orientation" (ios_dt_mount) */
     uint8_t compass_orientation;         /* the AK8973 model's orientation (the DT compass node's encoding) */
     S5L8920PowerKnob pwroff_knob;
     BCMSDIOChip wifi;                    /* the Wi-Fi card, as AppleBCMWLAN matches it; prodid 0 = none */
@@ -186,6 +188,8 @@ static const S5L8920Board s5l8920_n18 = {
     .fmc_off = 0x40000,                  /* the s5l8922x IOP firmware: the A4's layout */
     .nuarts = 2,
     .gauge_uart = -1,
+    .bt_uart = 1,                        /* uart1/bluetooth,n18: the BCM4329's Bluetooth side */
+    .bt_chip = "BCM4329B1",
     .mt_atn = 0xb4,
     .mt_profile = &mt_profile_n81,       /* the N81's N1F55 sensor */
     .buttons = { .hold = 0xb7, .menu = 0xb6, .volup = 0xb0, .voldown = 0xb1 },
@@ -196,6 +200,7 @@ static const S5L8920Board s5l8920_n18 = {
         { 0, 0x3a, TYPE_CD3272MIKEY },
         { 2, 0x1d, TYPE_LIS302DL },       /* its DT interrupt (0xa2) is not driven */
     },
+    .accel_dt = "04000000",
     .pwroff_knob = { 57, 67, 240 },      /* off a 4.2.1 screendump of the sheet */
     /* A BCM4329 B1: AppleBCMWLAN's "N18 - 4329 B1" (s=B1, P=N18 -> 4329b1/n18.bin, whose version this is). */
     .wifi = {
@@ -220,6 +225,7 @@ static const S5L8920Board s5l8920_n88 = {
     .nuarts = 5,                         /* iap, debug, umts, bluetooth, gas gauge */
     .gauge_uart = 4,
     .bt_uart = 3,                        /* uart3/bluetooth,n88 */
+    .bt_chip = "BCM4325",                /* the D1 */
     .gauge_mah = 1219,                   /* ponytail: the 3GS's rated cell, not measured */
     .nor = true,
     .baseband = true,
@@ -251,12 +257,9 @@ static const S5L8920Board s5l8920_n88 = {
         { 0, 0x39, TYPE_CD3272MIKEY },
         { 0, 0x1d, TYPE_LIS302DL },
         { 0, 0x1e, TYPE_S5L8930_AK8973 },
-        { 2, 0x49, TYPE_S5L8930_TSL2561 },
+        { 2, 0x49, TYPE_S5L8930_TSL2561, 0x9e },     /* DT als interrupt */
     },
-    /* DT accelerometer orientation 7 where the N18's (and the N72's) is 4: bits 0 and 1 more, which negate x
-     * and y in AppleLIS302DL, as the M68's 0 to the N45's 3. The model reads as the N18's part; without this
-     * the 3GS took Home-left (4) for Home-right (3) and drew landscape upside down (issues 23, 43). */
-    .accel_mount = "-1,-2,3",
+    .accel_dt = "07000000",              /* where the N18's is 4: read as 4, landscape was upside down (issues 23, 43) */
     .compass_orientation = 9,            /* DT compass (0x1e): x and y swapped, then x negated */
     .pwroff_knob = { 57, 67, 240 },
 };
@@ -277,6 +280,7 @@ struct S5L8920MachineState {
     MemoryRegion dram, dram_hi, dram_lo, sram, chipid, cpu_debug, audio_complex;
     DeviceState *vic[S5L8920_VIC_COUNT];
     DeviceState *gpio;
+    DeviceState *codec;                  /* the CS42L58 on i2s0 (the 3GS's CS42L61 as its register file) */
     DeviceState *iopcore;
     IPodTouchMultitouchState *mt;
     synopsys_usb_state *usb_otg;
@@ -520,8 +524,11 @@ static void s5l8920_i2c_create(S5L8920MachineState *s, int n)
             continue;
         }
         slave = i2c_slave_new(d->type, d->addr);
-        if (!strcmp(d->type, TYPE_LIS302DL) && s->board->accel_mount) {
-            qdev_prop_set_string(DEVICE(slave), "mount", s->board->accel_mount);
+        if (object_dynamic_cast(OBJECT(slave), TYPE_S5L8930_TSL2581)) {
+            object_property_add_child(OBJECT(s), "lightsensor", OBJECT(slave));   /* qom-set its lux */
+        }
+        if (!strcmp(d->type, TYPE_LIS302DL)) {
+            qdev_prop_set_string(DEVICE(slave), "dt-orientation", s->board->accel_dt);
         }
         if (!strcmp(d->type, TYPE_S5L8930_AK8973)) {
             qdev_prop_set_uint8(DEVICE(slave), "orientation", s->board->compass_orientation);
@@ -578,9 +585,7 @@ static void s5l8920_i2c_create(S5L8920MachineState *s, int n)
             ipod_agent_set_clock_offset(s->agent, s->pmu->rtc_offset);
         } else if (!strcmp(d->type, TYPE_LIS302DL)) {
             s->accel = LIS302DL(slave);
-            if (s->board->accel_mount) {
-                lis302dl_apply_orientation(s->accel, 1);   /* init ran before the mount was set */
-            }
+            lis302dl_apply_orientation(s->accel, 1);   /* init ran before the mount was set */
             /* the iPod/iPad machines' names, which the app's tilt and shake set */
             object_property_add_alias(OBJECT(s), "accel-orientation", OBJECT(slave), "orientation");
             object_property_add_alias(OBJECT(s), "accel-x", OBJECT(slave), "x");
@@ -592,6 +597,8 @@ static void s5l8920_i2c_create(S5L8920MachineState *s, int n)
              * (listed first) */
             object_property_add_alias(OBJECT(s), "compass-heading", OBJECT(slave), "heading");
             s5l8930_ak8973_set_accel(DEVICE(slave), s->accel);
+        } else if (!strcmp(d->type, TYPE_CS42L58)) {
+            s->codec = DEVICE(slave);
         }
     }
 }
@@ -616,7 +623,7 @@ static void s5l8920_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t
     qemu_call_t q;
     int32_t err = 0;
 
-    if (cpu_memory_rw_debug(cs, value, (uint8_t *)&q, sizeof(q), 0)) {
+    if (qemu_call_rw(cs, value, &q, false)) {
         return;
     }
     switch (q.call_number) {
@@ -653,7 +660,7 @@ static void s5l8920_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t
         }
     }
     q.error = err;
-    cpu_memory_rw_debug(cs, value, (uint8_t *)&q, sizeof(q), 1);
+    qemu_call_rw(cs, value, &q, true);
 }
 
 static const ARMCPRegInfo s5l8920_cp_reginfo[] = {
@@ -799,7 +806,7 @@ static void s5l8920_init(MachineState *machine)
             fifo = 16;
         }
         if (i == s->board->bt_uart) {
-            chr = it_bt_chardev(chr, true, 2000);
+            chr = it_bt_chardev(chr, true, 2000, s->board->bt_chip);
         }
         dev = exynos4210_uart_create(S5L8920_UART_BASE(i), fifo, i, chr,
                                      s5l8920_irq(s, S5L8920_IRQ_UART(i)), true);
@@ -1102,11 +1109,21 @@ static void s5l8920_init(MachineState *machine)
      * I2S0, the CS42L58 codec's port: the A4's controller (registers at
      * +0x400, as AppleS5L8920XI2SController writes them), its TX FIFO at
      * the block's base where CDMA channel 0x15 streams PCM. Without it
-     * mediaserverd's stop path never sees the FIFO drain.
+     * mediaserverd's stop path never sees the FIFO drain. On the 3GS the port
+     * masters the frame clock and its rate is the audio complex's MCLK (the
+     * NCO above, from PLL1) over its own dividers; on the iPod touch 3G the
+     * CS42L58 masters it from a fixed 6 MHz MCLK and its register 05 picks
+     * the rate (0x0b 44.1 kHz, 0x13 the 22.05 kHz VoiceOver's speech runs at),
+     * which the port follows while its config says it is the slave.
      */
     dev = qdev_new(TYPE_S5L8930_I2S);
     qdev_prop_set_bit(dev, "audio-out", true);
     qdev_prop_set_bit(dev, "ctrl-run", true);   /* AppleS5L8920XI2SController starts TX with CTRL bit 0 */
+    qdev_prop_set_uint64(dev, "nco-base", S5L8920_AUDIO_COMPLEX);
+    qdev_prop_set_uint32(dev, "nco-ref-hz", S5L8920_NCOREF_HZ);
+    if (s->codec) {
+        qdev_connect_clock_in(dev, "lrclk", qdev_get_clock_out(s->codec, "lrclk"));
+    }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(dev), &error_fatal);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 0, S5L8920_I2S0_BASE);
     sysbus_mmio_map(SYS_BUS_DEVICE(dev), 1, S5L8920_I2S0_FIFO);

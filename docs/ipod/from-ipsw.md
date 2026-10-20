@@ -166,9 +166,8 @@ matched by name to `include/hw/arm/guest-services/gles-names.h`, the table the h
 are what the wire carries (3.1.3's slot numbers below 822, assigned above). A firmware without the @encode gets
 its layout from OpenGLES's exported trampolines instead, decoded in place (the slot is loaded straight into pc,
 `mov lr, pc; ldr pc, [ip, #off]`, or tail-called after a conditional early return, `popeq`/`bxeq lr`; 4.x's
-`glIs*` call it with `blxne`), which is also the cross-check `gles-debug=on` runs. `contrib/ipad1-gles/glitsv.py`
-still derives a `gli-dispatch-<BUILD>.tsv` offline, as research: `docs/ipod/gli-dispatch-*.tsv` are what the
-discovered tables were checked against, not build inputs.
+`glIs*` call it with `blxne`), which is also the cross-check `gles-debug=on` runs. The offline
+`gli-dispatch-<BUILD>.tsv` tables the discovered ones were first checked against are in git history.
 
 What 4.2.1 changed, read from the 8C148 cache: EAGL still loads `MBXGLEngine.bundle` through `GLESGetEGLInterface`
 when `AppleMBXDevice` matches (`eagl_init` 0x34ff870c; no libGFXShared or gld plugin on the MBX path), and the
@@ -1112,3 +1111,133 @@ guest PMU-confirmed shutdowns and durable cold-boot persistence/fsck. This
 qualifies the combined build, not an isolated FIFO binary. NAND FMC40=0xc1
 transmission and ECC/OOB routing
 remain unimplemented; this change does not claim physical restore completion.
+
+## In-emulator stock restore (2026-10-13)
+
+A stock 3.1.3 (7E18) erase restore now runs to "Status: Restore Finished" inside the emulator, from SecureROM DFU on
+a NOR with only its superblock, SysCfg and nvram, onto an empty NAND directory, in about 130 s on the Mac mini. The
+emulator formats nothing: the restore kernel finds a blank NAND, production-formats it itself (it scans for initial
+bad blocks, writes its own BBT and NANDDRIVERSIGN, VSVFL and YAFTL), takes the filesystem over asr and writes the NOR
+with the NORData images. The tools and the exact commands are in contrib/ipod-restore/ (README.md there).
+
+### What it needed
+
+- FMSS, physical images only (FMSS_PHYSICAL; generated images are unchanged):
+  - BLOCK ERASE through the sequencer. The stock erase program (AppleS5L8720xFMSS, VA 0xc074d328 in 7E18) selects the
+    chip in FMCTRL0, sends 0x60, the row in FMADDR0 (0x0C) and 0xD0, one block per D10 chip index and D0C row
+    entry, and counts D18 down in place (sequencer stores to D18 are now kept). fmss_run_script erases the block
+    in the overlay on the 0x60/0xD0 pair; FMSS_ERASE's inferred erase is not needed.
+  - CSSTATUS (0xC30) bit 29, clean, for the program run whose read found only erased pages. The driver checks
+    `status & 0x2000ffff == 0x20000000` and returns a blank page (0xc0743c78). The status belongs to that run:
+    left set until the next read, a following write or erase run read it as clean and the restore stopped at
+    "nand status = failed" (wait_for_storage_device).
+- No new host protocol code. Host side: upstream idevicerestore (4b3e847) linked against the libirecovery QEMU
+  transport and usb_recovery_bridge.py, back from the retired tree (git 5508b504b8) in contrib/ipod-restore/, and the
+  usbmuxd fork for restore mode. contrib/ipod-restore/run-restore.sh is the run, run-boot.sh the cold boot.
+- Personalization: idevicerestore asks Apple's TSS for 3.x (build major <= 8 looks for a local record first).
+  A local SHSH record that is an empty dictionary (`cache/shsh/<ecid>-iPod2,1-3.1.3.shsh`) makes it send every
+  component unpersonalized ("Not personalizing component ..."). The emulated SecureROM 240.4, iBSS and the restore
+  kernel accept the stock IPSW signatures; no forge-sigcheck and no image changes.
+
+### The restored NAND's layout (as the 3.1.3 driver formats it)
+
+| what | where |
+|---|---|
+| NANDDRIVERSIGN, `411C`, length 0x108, spare meta `6BITMAXECC` | CE0 block 4091, all 128 pages |
+| DEVICEINFOBBT, length 0x200, bitmap `fe ff ...` (block 0 reserved) | two blocks per CE: 4094 and 4095 (CE1: 4092/4093 in one run, 4089/4090 in an inferred-erase run) |
+
+FirmwareKit's N72NAND keeps its own layout (signature on CE0 block 4095 page 0, a header-only BBT on page 1 of
+block 4095 of every CE). Nothing in the emulator formats a NAND any more, so there is no second layout to keep
+consistent, and prepared devices are untouched. The shared block only matters on a physical image that meets a
+NAND epoch update (the driver erases the whole signature block); generated images never erase.
+
+### Cold boot of the restored device: blocked on the UID key direction
+
+The restore wrote every NOR image (LLB included) with its SHSH wrapped under key 0x89a. The restore kernel derives
+that key with an AES engine operation of mode 0xf on the UID (encrypt in the model); the SecureROM, LLB and iBoot
+derive it with mode 0x8 (decrypt in the model). The two keys differ, so the SecureROM rejects the restored LLB and
+stops at 0x3186 with nothing on the serial port. FirmwareKit's NOR builder derives with decrypt, matching the boot
+chain, which is why prepared devices boot.
+
+With an uncommitted experiment in which every UID operation encrypts (Martijn de Vos's finding for the hardware),
+the same restored NOR and NAND boot: SecureROM unwraps and decrypts the LLB, LLB the iBoot, iBoot prints
+`read new style signature 0x43313134`, VFL_Open and FTL_Open [OK], mounts the restored HFS and loads the kernel.
+The kernel reaches userland: the message buffer shows the USB functions registered, Wi-Fi joined `qemu-ios`,
+repeated `AppleMBXDevice: Graphics Recovery Event` and then system sleep, where it spins with interrupts masked in
+the S5L8900X I2C controller's polled write (`[base+0x10] != 0`, VA 0xc0567e2c). The screen stays black.
+
+So a restored device reaching Home needs, in order:
+1. The UID direction decided in hw/arm/ipod_touch_aes.c (another agent's area). If the hardware always encrypts with
+   the UID, FirmwareKit's N72NOR key derivation (decrypt, N72NOR.swift:42) has to change with it, and existing
+   prepared NORs need their SHSH rewrapped or a migration; the 0x220100ac/0x0bf08468/0x0fb9bcdc "preserve" addresses
+   in the custom-key path are tied to the old NOR format too.
+2. MBX 2D for stock SpringBoard (prepared devices set LK_ENABLE_MBX2D=0; a restored system has the stock
+   environment), the MBX model work.
+3. The I2C controller's polled path used on the way into sleep (or a first boot that does not idle into sleep).
+
+All three are resolved or turned out not to be bugs; see the next section.
+
+### Cold boot under aes-uid=hardware: to the Connect to iTunes screen (2026-10-14)
+
+With main at 8e9b64d422 (aes-uid=hardware, the MBX model) the restored device boots, and so does a fresh restore made
+with that build. run-restore.sh and run-boot.sh now default to aes-uid=hardware (AES_UID overrides).
+
+- Boot chain: the restore kernel and the SecureROM, LLB and iBoot now derive the 0x89a key in the same direction.
+  The r4 NAND and NOR from 2026-10-13 boot unchanged, and so does r6, a fresh 7E18 restore (Restore Finished in
+  117 s). Both go through SecureROM, LLB, iBoot (`read new style signature`), the kernel and launchd.
+- MBX: no `Graphics Recovery Event` any more. Stock SpringBoard starts and draws its unactivated "Connect to
+  iTunes" view on the emulated MBX. The frame is lit at 12 and 16 s; the Apple logo shows at 4 s.
+- Lockdown: with USBMUXD set, run-boot.sh gives the device its own usbmuxd. `ideviceinfo` answers with
+  `ActivationState: Unactivated`, `ProductVersion: 3.1.3`, `BuildVersion: 7E18`, and idevicesyslog works.
+  SpringBoard logs `lockdown says the device is: [Unactivated], state is 1`, and lockdownd enables the brick state.
+- The "polled I2C spin" was not a hang. Its last I2C transaction (traced) is the PMU write 0x0a = 0x0a, which is
+  "pmu go hib". The model then powers the AP off (`arm_set_cpu_off`) as the hardware does, so the CPU stays parked
+  after the store in AppleS5L8900XI2CController's register write (VA 0xc0567e24: wait for [regs+0x10] == 0, then
+  store). Without USB, the restored device idles into hibernate about 60 s after boot. A Home press wakes it
+  (`pmu wake events: menu`, `System Wake`, resume through LLB) and it sleeps again. With USB attached it stays
+  awake. The emulator needs no I2C change.
+- The display goes dark about 12 s after SpringBoard starts (`uilock state: 0 -> 1`, `_lcdEnable: enable: 0`), the
+  lock idle timeout. Home and power presses after that do not light it again: SpringBoard logs nothing, and the
+  Connect to iTunes lockout view stays as it is. Whether real hardware relights here is open.
+- run-restore.sh used to stop QEMU as soon as idevicerestore printed Restore Finished. That can come before restored
+  writes `auto-boot=true` to the NOR, and one run (r5) cold-booted into iBoot's recovery prompt. The script now
+  waits for `auto-boot=true` in nor-rw.bin.
+
+Home is out of reach for a stock restore, and the emulator is not what blocks it: the device is unactivated. Apple
+activation needs a record for the unit's identity (see P1). Light Touch's prepared devices pass because FirmwareKit
+patches lockdownd (FirmwareKit `Activation`). A restored NAND has no offline write path for that edit, and AFC does
+not reach /usr/libexec. So the slide-to-unlock check does not apply yet: there is no lock screen, only the lockout view.
+
+How close this is to Light Touch preparing devices by an in-emulator restore: the emulator side works for 7E18. It
+runs the stock restore from DFU, boots the result with its own keys and NAND layout, and stock SpringBoard draws.
+Three gaps remain. (1) Activation: something has to change lockdownd or seed its state after the restore. The
+restored filesystem is only reachable through the guest (an HFS write path into the physical-NAND FTL, or a
+ramdisk boot that mounts and edits it), so the offline FirmwareKit edit has to move into the guest. (2) The other
+offline edits (guest agent, GL switches, preferences, keyboards) need the same route. (3) The restore needs a
+prepared NOR for SysCfg and nvram, and 2.x and 4.x do not restore yet (below). Until (1) and (2) exist, the
+in-emulator restore is a fidelity check on the boot chain and storage, not a replacement for FirmwareKit's build.
+
+### 2.1.1 and 4.2.1
+
+- 5F138: upstream idevicerestore refuses an IPSW without a BuildManifest. LukeZGD's fork (5ea1b08) sends iBSS and the
+  25 MB restore ramdisk, then fails to upload the DeviceTree ("Unable to upload data to device"); the bridge logs
+  USB timeouts. This is the 2.x iBSS recovery-USB stall recorded above, not NAND.
+- 8C148: with the same empty SHSH record the SecureROM does not leave DFU after the unpersonalized stock iBSS
+  (no serial output, PID stays 1227, "Device did not reconnect in recovery mode"). Not investigated further: whether
+  the 240.4 ROM requires a personalized 4.x iBSS or the emulated ROM path misses something is open.
+
+### Run log (Mac mini, 2026-10-13)
+
+| run | binary | NAND mode | result |
+|---|---|---|---|
+| b0 | main | physical + FMSS_ERASE (inferred erase), C30 = 1 | 7E18 Restore Finished, 142 s; cold boot stops in the SecureROM at 0x3186 |
+| r1 | erase + clean status left set | physical | "nand status = failed" |
+| r2 | erase, clean status off | physical | Restore Finished, 127 s; AES trace: kernel derives with mode 0xf, ROM with 0x8 |
+| r3, r4 | this branch | physical | Restore Finished, 165 s and 130 s |
+| r4 cold boot | this branch + UID-encrypt experiment | physical | SecureROM, LLB, iBoot, kernel, userland; black screen, MBX recovery events, sleep, I2C spin |
+| h1-h6 (10-14) | main 8e9b64d422, aes-uid=hardware | physical | r4 image boots to SpringBoard's Connect to iTunes view; no recovery events; hibernates at about 60 s without USB, Home wakes it |
+| r5, r6 (10-14) | main 8e9b64d422 | physical | Restore Finished, 165 s and 117 s; r5 stopped before auto-boot=true (recovery prompt), r6 with the wait boots like r4, lockdown answers Unactivated |
+| 5F138 | this branch, LukeZGD fork | physical | DeviceTree upload fails after the ramdisk (2.x iBSS USB) |
+| 8C148 | this branch | physical | SecureROM stays in DFU after iBSS |
+
+Regression: `sessions single` n72ap-7E18 19/19 and n18ap-9B206-dev 17/17 with this branch's dylib.

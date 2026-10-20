@@ -26,6 +26,12 @@ typedef struct IPodTouchPKEState {
     uint32_t seg_size_reg;
     uint32_t segment_size;
     bool forge_sigcheck; /* Startup compatibility policy, not guest state. */
+    /* The Montgomery radix inverse for inverse_modulus at inverse_bits, derived
+     * and not snapshot state: a signature check is hundreds of products against
+     * one modulus. */
+    struct bignum_st *radix_inverse;
+    uint8_t inverse_modulus[256];
+    uint32_t inverse_size, inverse_bits;
 } IPodTouchPKEState;
 
 #endif

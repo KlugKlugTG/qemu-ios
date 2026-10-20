@@ -179,23 +179,25 @@ static bool arm_cpu_has_work(CPUState *cs)
 #endif /* !CONFIG_USER_ONLY */
 
 void arm_register_pre_el_change_hook(ARMCPU *cpu, ARMELChangeHookFn *hook,
-                                 void *opaque)
+                                     void *opaque, bool needs_bql)
 {
     ARMELChangeHook *entry = g_new0(ARMELChangeHook, 1);
 
     entry->hook = hook;
     entry->opaque = opaque;
+    cpu->el_change_hooks_need_bql |= needs_bql;
 
     QLIST_INSERT_HEAD(&cpu->pre_el_change_hooks, entry, node);
 }
 
 void arm_register_el_change_hook(ARMCPU *cpu, ARMELChangeHookFn *hook,
-                                 void *opaque)
+                                 void *opaque, bool needs_bql)
 {
     ARMELChangeHook *entry = g_new0(ARMELChangeHook, 1);
 
     entry->hook = hook;
     entry->opaque = opaque;
+    cpu->el_change_hooks_need_bql |= needs_bql;
 
     QLIST_INSERT_HEAD(&cpu->el_change_hooks, entry, node);
 }
@@ -2004,8 +2006,12 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
         pmu_init(cpu);
 
         if (!kvm_enabled()) {
-            arm_register_pre_el_change_hook(cpu, &pmu_pre_el_change, 0);
-            arm_register_el_change_hook(cpu, &pmu_post_el_change, 0);
+            /*
+             * The PMU's counters are this CPU's; the timer and the overflow
+             * interrupt take care of themselves (cpregs-pmu.c).
+             */
+            arm_register_pre_el_change_hook(cpu, &pmu_pre_el_change, 0, false);
+            arm_register_el_change_hook(cpu, &pmu_post_el_change, 0, false);
         }
 
 #ifndef CONFIG_USER_ONLY
@@ -2158,7 +2164,7 @@ static void arm_cpu_realizefn(DeviceState *dev, Error **errp)
 
 #ifndef CONFIG_USER_ONLY
     if (tcg_enabled() && cpu_isar_feature(aa64_rme, cpu)) {
-        arm_register_el_change_hook(cpu, &gt_rme_post_el_change, 0);
+        arm_register_el_change_hook(cpu, &gt_rme_post_el_change, 0, true);
     }
 #endif
 

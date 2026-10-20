@@ -29,12 +29,17 @@ static void request(const char *header,const void *body,unsigned len) {
 }
 int main(void) {
     request("1 ping\n","",0);
-    assert(!result_status && result_len==strlen(AG_HELLO) && !memcmp(result,"it_agent v4\nops ",16));
-    assert(strstr(AG_HELLO," cadebug ") && strstr(AG_HELLO," statusbar\n"));
+    assert(!result_status && result_len==strlen(AG_HELLO) && !memcmp(result,"it_agent v5\nops ",16));
+    assert(strstr(AG_HELLO," cadebug ") && strstr(AG_HELLO," statusbar ") && strstr(AG_HELLO," statusbarget\n"));
     /* malformed requests are refused before any framework is touched */
     request("1b cadebug 4\n","",0);assert(result_status==-EINVAL);
     request("1c cadebug x 4\n","",0);assert(result_status==-EINVAL);
     request("1d statusbar\n","",0);assert(result_status==-EINVAL);
+    request("1e statusbarget\n","",0);assert(result_status==-EINVAL);
+    request("1f statusbarget other 2000\n","",0);assert(result_status==-EINVAL);
+    request("1g statusbarget override 0\n","",0);assert(result_status==-EINVAL);
+    request("1h statusbarget data 4097\n","",0);assert(result_status==-EINVAL);
+    request("1i statusbarget override 20x\n","",0);assert(result_status==-EINVAL);
     assert(strstr(AG_HELLO," putpart "));
     assert(strstr(AG_HELLO," spawn ") && strstr(AG_HELLO," chown ") && strstr(AG_HELLO," dlicon ") && !strstr(AG_HELLO," kill "));
     char binary[10000];for(int i=0;i<sizeof(binary);i++)binary[i]=i;

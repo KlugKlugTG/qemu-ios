@@ -5,6 +5,7 @@
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "qemu/ios-frame-path.h"
+#include "qapi/error.h"
 #include "system/runstate.h"
 #include "system/address-spaces.h"
 #include <sys/stat.h>
@@ -259,6 +260,8 @@ static uint32_t fmss_var_read(IPodTouchFMSSState *s, uint32_t reg, bool *ok)
     return 0;
 }
 
+static bool fmss_script_erase(IPodTouchFMSSState *s, unsigned select, uint32_t row);
+
 static void fmss_run_script(IPodTouchFMSSState *s)
 {
     uint32_t r[32] = { 0 }, fmc[0x100 / 4] = { 0 };
@@ -305,6 +308,13 @@ static void fmss_run_script(IPodTouchFMSSState *s)
                 } else {
                     ok = false; /* Only captured scalar register-write form. */
                 }
+            } else if (b == FMSS_NUM_PAGES) {
+                if (op == 2 && !imm) {
+                    /* The stock erase program counts its block list down here. */
+                    s->reg_num_pages = r[a];
+                } else {
+                    ok = false;
+                }
             } else if (b == FMSS_CS_BUF_ADDR) {
                 if (op == 2 && !imm) {
                     s->reg_cs_buf_addr = r[a];
@@ -342,6 +352,12 @@ static void fmss_run_script(IPodTouchFMSSState *s)
                     fmc[b / 4] = v;
                 }
                 if (b == 0x8) {
+                    /* BLOCK ERASE: 0x60, the row address in FMADDR0 (0x0C), 0xD0; the chip enable is FMCTRL0
+                     * bits 1..8 (the stock kernel's erase program, one block per D0C/D10 entry). */
+                    if (v == 0xd0 && cmd == 0x60 &&
+                        !fmss_script_erase(s, (fmc[0] >> 1) & 0xff, fmc[0x0c / 4])) {
+                        return;
+                    }
                     cmd = v;
                     id_fifo_size = id_fifo_head = 0;
                 } else if (b == 0x4 && v == 0xe2 && cmd == 0x90) {
@@ -478,8 +494,9 @@ static void fmss_run_script(IPodTouchFMSSState *s)
 /*
  * Erased-block bookkeeping.
  *
- * The FMSS driver only ever issues read (csgenrc 0xa01) and write (0xa02)
- * through the trigger register, so a block erase is never visible to us -- but
+ * The driver erases through a sequencer program (0x60, row, 0xD0), which
+ * fmss_run_script carries out on physical images. Generated images relocate
+ * writes to their logical home, so a physical erase means nothing there -- but
  * it certainly happens, because the FTL rewrites blocks that are fully
  * populated in the base image while only programming a handful of their pages.
  * Without modeling the erase, the pages the FTL did not rewrite still read
@@ -487,7 +504,7 @@ static void fmss_run_script(IPodTouchFMSSState *s)
  * the next boot the FTL's scan finds stale valid-looking data where it expects
  * clean pages.
  *
- * NAND cannot program a page without erasing its block first, so we can infer
+ * NAND cannot program a page without erasing its block first, so FMSS_ERASE infers
  * the erase from the write: the first time a block is programmed in the
  * overlay (and again whenever a page already present in the overlay is
  * reprogrammed) the whole block must have been erased just beforehand. We
@@ -525,7 +542,7 @@ static bool fmss_block_is_erased(IPodTouchFMSSState *s, uint32_t cs, uint32_t bl
 {
     char marker[1152];
 
-    if (!s->nand_overlay || !fmss_erase_on()) {
+    if (!s->nand_overlay || !(fmss_erase_on() || fmss_physical())) {
         return false;
     }
     if (g_tree_lookup(s->erased_blocks, fmss_block_key(cs, block))) {
@@ -607,6 +624,9 @@ static bool fmss_erase_block_inner(IPodTouchFMSSState *s, uint32_t cs, uint32_t 
         if (s->overlay_pages) {
             g_hash_table_remove(s->overlay_pages, fmss_block_key(cs, p));
         }
+        if (s->phys_pages) {
+            g_tree_remove(s->phys_pages, fmss_block_key(cs, p));
+        }
     }
 
     fmss_remember_erased(s, cs, block);
@@ -619,6 +639,31 @@ static bool fmss_erase_block(IPodTouchFMSSState *s, uint32_t cs, uint32_t block)
     bool result = fmss_erase_block_inner(s, cs, block);
     fmss_path_end(id, 3, cs, block);
     return result;
+}
+
+/* A BLOCK ERASE the sequencer issued: `select` is FMCTRL0's chip-enable bits, `row` the page address. Only
+ * physical images erase; generated images keep writes at their logical home, where a physical block means
+ * nothing. False stops the program (the host could not persist the erase). */
+static bool fmss_script_erase(IPodTouchFMSSState *s, unsigned select, uint32_t row)
+{
+    unsigned ce = ctz32(select | 0x100);
+    uint32_t block = row / NAND_PAGES_PER_BLOCK;
+
+    if (!fmss_physical() || (!s->nand_overlay && !s->image)) {
+        return true;
+    }
+    if (ce >= FMSS_CHIPS || select != (1u << ce) || block >= 4096) {
+        qemu_log_mask(LOG_GUEST_ERROR, "[fmss] erase of row 0x%x on chip select 0x%x ignored\n", row, select);
+        return true;
+    }
+    if (s->image) {
+        int result = nand_image_erase(s->image, ce, block);
+        for (uint32_t p = block * NAND_PAGES_PER_BLOCK; p < (block + 1) * NAND_PAGES_PER_BLOCK; p++) {
+            g_tree_remove(s->phys_pages, fmss_block_key(ce, p));
+        }
+        return result < 0 ? fmss_io_error(s->nand_path, -result) : true;
+    }
+    return fmss_erase_block(s, ce, block);
 }
 
 /*
@@ -871,6 +916,22 @@ static void fmss_blank_page(uint8_t *data, uint8_t *spare, bool erased)
     }
 }
 
+/* All ones in the data and the 12 metadata bytes the driver sees: what the ECC engine calls clean. */
+static bool fmss_page_erased(const uint8_t *data, const uint8_t *spare)
+{
+    for (unsigned i = 0; i < NAND_BYTES_PER_PAGE; i++) {
+        if (data[i] != 0xff) {
+            return false;
+        }
+    }
+    for (unsigned i = 0; i < 0xc; i++) {
+        if (spare[i] != 0xff) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static void fmss_load_page_inner(IPodTouchFMSSState *s, uint32_t cs,
                                  uint32_t page_nr, uint8_t *data,
                                  uint8_t *spare)
@@ -891,6 +952,24 @@ static void fmss_load_page_inner(IPodTouchFMSSState *s, uint32_t cs,
         fmss_stats.recall++;
         if (fmss_rtrace()) {
             TRACE_PRINTF(trace_ipod_touch_fmss_read_log, "RP cs=%u page=%u", cs, page_nr);
+        }
+        return;
+    }
+
+    if (s->image) {
+        uint8_t record[NAND_BYTES_PER_PAGE + NAND_BYTES_PER_SPARE];
+        int result = nand_image_read(s->image, cs, page_nr, record);
+        if (result < 0) {
+            /* As an unreadable page file: the permissive blank, never presented as erased flash. */
+            error_report("FMSS: cannot read cs%u page %u of %s: %s", cs, page_nr, s->nand_path, strerror(-result));
+            fmss_blank_page(data, spare, false);
+            return;
+        }
+        memcpy(data, record, NAND_BYTES_PER_PAGE);
+        memcpy(spare, record + NAND_BYTES_PER_PAGE, NAND_BYTES_PER_SPARE);
+        fmss_stats.base++;
+        if (fmss_usedspare() && ((uint32_t *)spare)[2] == 0x00FF00FF) {
+            ((uint32_t *)spare)[2] = 0xFFFF40FF;
         }
         return;
     }
@@ -1046,7 +1125,11 @@ static uint32_t fmss_total_blocks(IPodTouchFMSSState *s)
     s->total_blocks = NAND_DEFAULT_TOTAL_BLOCKS;
 
     /* logical 2 is cs2 page 256 under the formula below */
-    if (s->packed) {
+    if (s->image) {
+        uint8_t record[NAND_BYTES_PER_PAGE + NAND_BYTES_PER_SPARE];
+        got = nand_image_read(s->image, 2, 256, record) == 0;
+        memcpy(ent, record, sizeof(ent));
+    } else if (s->packed) {
         got = fmss_packed_page(s, 2, 256, ent, spare) == FMSS_PACKED_DATA;
     } else {
         snprintf(path, sizeof(path), "%s/cs2/256.page", s->nand_path);
@@ -1132,6 +1215,15 @@ static bool fmss_store_page_inner(IPodTouchFMSSState *s, uint32_t cs, uint32_t p
 {
     char dir[1088], filename[1152], tmp[1200];
     uint32_t block = page_nr / NAND_PAGES_PER_BLOCK;
+
+    if (s->image) {
+        /* In place: the kernel's page cache keeps it through a killed process, and a VM stop flushes it. */
+        uint8_t record[NAND_BYTES_PER_PAGE + NAND_BYTES_PER_SPARE];
+        memcpy(record, data, NAND_BYTES_PER_PAGE);
+        memcpy(record + NAND_BYTES_PER_PAGE, spare, NAND_BYTES_PER_SPARE);
+        int result = nand_image_write(s->image, cs, page_nr, record);
+        return result < 0 ? fmss_io_error(s->nand_path, -result) : true;
+    }
 
     snprintf(dir, sizeof(dir), "%s/cs%d", s->nand_overlay, cs);
     if (g_mkdir_with_parents(dir, 0755) != 0) {
@@ -1278,6 +1370,11 @@ static void read_nand_pages(IPodTouchFMSSState *s)
 {
     notifier_list_notify(&s->before_read, s);
 
+    /* CSSTATUS (0xC30): the ECC engine reports a read of nothing but erased pages as clean (bit 29), which the
+     * driver returns as a blank page instead of data. Only physical images have erased pages to read. The read
+     * moves its data here, before the CPU starts the program; the status belongs to that program run. */
+    bool clean = fmss_physical() && s->reg_num_pages > 0;
+    s->read_clean = false;
     int page_out_buf_ind = 0;
     for(int page_ind = 0; page_ind < s->reg_num_pages; page_ind++) {
         uint32_t page_nr = 0;
@@ -1302,6 +1399,7 @@ static void read_nand_pages(IPodTouchFMSSState *s)
         }
 
         fmss_load_page(s, cs, page_nr, s->page_buffer, s->page_spare_buffer);
+        clean = clean && fmss_page_erased(s->page_buffer, s->page_spare_buffer);
 
         // we write away the page in two parts, 2048 bytes first and then the other 2048 bytes.
         int write_buf_size = NAND_BYTES_PER_PAGE / 2;
@@ -1337,6 +1435,7 @@ static void read_nand_pages(IPodTouchFMSSState *s)
             return;
         }
     }
+    s->read_clean = clean;
 }
 
 /*
@@ -1379,7 +1478,8 @@ static void write_nand_pages(IPodTouchFMSSState *s)
         vm_stop(RUN_STATE_IO_ERROR);
         return;
     }
-    if (!s->nand_overlay) {
+    s->read_clean = false;
+    if (!s->nand_overlay && !s->image) {
         return; /* no writable overlay -> writes are discarded (original behavior) */
     }
 
@@ -1546,8 +1646,8 @@ static uint64_t ipod_touch_fmss_read(void *opaque, hwaddr addr, unsigned size)
             return (0x1 << 30);
         case 0xD00:
             return 42;
-        case 0x00000C30:
-            return 0x1;
+        case FMSS_CS_STATUS:
+            return s->reg_cs_status;
         default:
             qemu_log_mask(LOG_UNIMP, "%s: read invalid location 0x%08x.\n",
                           __func__, (unsigned)addr);
@@ -1600,6 +1700,8 @@ static void ipod_touch_fmss_write(void *opaque, hwaddr addr, uint64_t val, unsig
         case 0xC00:
             s->reg_cs_ctrl = val;
             if (val & 1) {
+                s->reg_cs_status = s->read_clean ? FMSS_STATUS_CLEAN : FMSS_STATUS_DONE;
+                s->read_clean = false;
                 fmss_run_script(s);
                 timer_mod(s->completion_timer,
                           qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 1000);
@@ -1698,6 +1800,11 @@ static const MemoryRegionOps fmss_ops = {
 
 static void ipod_touch_fmss_realize(DeviceState *dev, Error **errp)
 {
+    IPodTouchFMSSState *s = IPOD_TOUCH_FMSS(dev);
+    static const NANDImageGeometry geo = {
+        .chips = FMSS_CHIPS, .page_bytes = NAND_BYTES_PER_PAGE, .spare_bytes = NAND_BYTES_PER_SPARE,
+        .pages_per_block = NAND_PAGES_PER_BLOCK, .blocks_per_chip = 4096,
+    };
     const char *mode = getenv("LT_FMSS_PATH");
     const char *path = getenv("LT_FRAME_PATH");
     bool requested = mode && !strcmp(mode, "on");
@@ -1707,7 +1814,16 @@ static void ipod_touch_fmss_realize(DeviceState *dev, Error **errp)
         fprintf(stderr, "[fmss-path] requested=on configured=%s; "
                 "requires active LT_FRAME_PATH\n", fmss_path_on ? "on" : "off");
     }
-    fmss_try_map_packed(IPOD_TOUCH_FMSS(dev));
+    if (s->nand_path && nand_image_is_store(s->nand_path)) {
+        if (s->nand_overlay) {
+            error_setg(errp, "%s is a NAND image store, written in place: it takes no nandrw overlay",
+                       s->nand_path);
+            return;
+        }
+        s->image = nand_image_open(dev, s->nand_path, &geo, errp);
+        return;
+    }
+    fmss_try_map_packed(s);
 }
 
 static void ipod_touch_fmss_init(Object *obj)
@@ -1780,6 +1896,8 @@ static void ipod_touch_fmss_reset(DeviceState *dev)
     s->reg_script_scratch_d3c = 0;
     s->reg_script_scratch_d7c = 0;
     s->reg_script_csgenr15 = 0;
+    s->reg_cs_status = FMSS_STATUS_DONE;
+    s->read_clean = false;
     memset(s->page_buffer, 0, NAND_BYTES_PER_PAGE);
     memset(s->page_spare_buffer, 0, NAND_BYTES_PER_SPARE);
     if (s->irq) {
@@ -1836,6 +1954,8 @@ static int fmss_pre_load(void *opaque)
     s->reg_script_scratch_d3c = 0; /* Absent from pre-v12 streams. */
     s->reg_script_scratch_d7c = 0; /* Absent from pre-v11 streams. */
     s->reg_script_csgenr15 = 0; /* Absent from pre-v9 streams. */
+    s->reg_cs_status = FMSS_STATUS_DONE; /* Absent from pre-v13 streams. */
+    s->read_clean = false;
     return 0;
 }
 
@@ -1873,7 +1993,7 @@ static int fmss_post_load(void *opaque, int version_id)
 
 static const VMStateDescription vmstate_ipod_touch_fmss = {
     .name = "ipod_touch_fmss",
-    .version_id = 12,
+    .version_id = 13,
     .minimum_version_id = 4,
     .pre_load = fmss_pre_load,
     .post_load = fmss_post_load,
@@ -1905,6 +2025,8 @@ static const VMStateDescription vmstate_ipod_touch_fmss = {
         VMSTATE_UINT32_V(reg_script_param_d38, IPodTouchFMSSState, 10),
         VMSTATE_UINT32_V(reg_script_scratch_d7c, IPodTouchFMSSState, 11),
         VMSTATE_UINT32_V(reg_script_scratch_d3c, IPodTouchFMSSState, 12),
+        VMSTATE_UINT32_V(reg_cs_status, IPodTouchFMSSState, 13),
+        VMSTATE_BOOL_V(read_clean, IPodTouchFMSSState, 13),
         VMSTATE_END_OF_LIST()
     }
 };

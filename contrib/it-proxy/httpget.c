@@ -4,7 +4,6 @@ extern long write(int,const void*,unsigned long);
 extern void _exit(int);
 extern int fflush(void*);
 extern int printf(const char*,...);
-__attribute__((naked)) void _start(void) { __asm__ volatile("ldr r0,[sp]\n\tadd r1,sp,#4\n\tb _main"); }
 int main(int argc,char **argv) {
  if(argc!=2)_exit(2);
  dlopen("/System/Library/Frameworks/Foundation.framework/Foundation",2);

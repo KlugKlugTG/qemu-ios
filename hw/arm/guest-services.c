@@ -72,6 +72,12 @@ static int qcall_rw(CPUState *cpu, uint64_t va, void *buf, size_t len, bool writ
     return cpu_memory_rw_debug(cpu, va, buf, len, write);
 }
 
+/* The other boards' QEMU_CALL handlers read and write the request block through this. */
+int qemu_call_rw(CPUState *cpu, uint64_t va, qemu_call_t *q, bool write)
+{
+    return qcall_rw(cpu, va, q, sizeof(*q), write);
+}
+
 void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
 {
     CPUState *cpu = qemu_get_cpu(0);

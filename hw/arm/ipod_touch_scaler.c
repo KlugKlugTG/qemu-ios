@@ -42,7 +42,7 @@ void ipod_scaler_set_iommu(DeviceState *dev,
  * AppleM2ScalerCSCDriver reads +0x260 once at start (8F190 0x80a45696, kept at driver+0x34) and gates features
  * on it: tiled buffers from 0x20002, more capabilities past 0x20006 and past 0x40006. 4.3's QuartzCore scales an
  * EAGL layer from a tiled surface, which version 0 refuses ("Scaler block (version = 0x0) for this chip does not
- * support tiled buffers"). The model reads the rows linearly either way: the host writes rendered surfaces linear.
+ * support tiled buffers"). scaler_row addresses a tiled buffer's tiles; their pixels are linear, as the host writes them.
  */
 void ipod_scaler_set_version(DeviceState *dev, uint32_t version);
 void ipod_scaler_set_version(DeviceState *dev, uint32_t version)
@@ -81,21 +81,19 @@ static bool scaler_write_bus(IPodScalerState *s, uint32_t va, const void *buf,
 }
 
 /*
- * The bus address of row `y` of a buffer whose rows are `pitch` bytes apart in memory and
- * `stride` apart as the block is programmed (+0x1c/+0x3c). Where the stride is a power of
- * two past the pitch, the kernel maps the buffer in 64 KiB windows of 64 KiB / stride rows,
- * each packed at the pitch and only as many pages mapped as those rows fill: 2x of a 1x
- * iPad app, 960x640 at stride 4096 (16 rows of 3840 bytes, 15 pages of each window; issue
- * 47), as the iPad 3.2 Zoom source (11 of 16 at 683 wide).
+ * The bus address of row `y` of a buffer programmed at `stride` bytes a row (+0x1c/+0x3c). A tiled buffer (+0x10/+0x30
+ * bit 10, which AppleM2ScalerCSCHal sets from the request's isSourceTiled/isDestTiled: 9B206 0x80a4e286) is a grid
+ * of 4 KiB tiles, 16 rows of 256 bytes each, a power of two of them across (potTilesX; the stride is potTilesX * 256
+ * bytes), so a row of tiles is 16 strides long; the kernel maps the surface's own pages a tile apiece through the DART
+ * from the start of each row of tiles and leaves the padding past them unmapped (isTiledAddressSourceMisaligned's
+ * potTilesX, potTilesY and PAGE_SIZE). The tile pages hold the surface as the CPU sees it, which is how the GL bridge
+ * writes it: rows of `pitch` = tilesX * 256 bytes, linear across a row of tiles. A 1x iPad app's 2x destination
+ * (960x640 at 4096: 15 of each 16 pages; issue 47), the iPad 3.2 Zoom source (11 of 16 at 683 wide) and 5.1.1's 2x
+ * source (320x480 at 2048: 5 of 8; issue 96) are tiled; a linear buffer is read at its stride, whatever the stride.
  */
-static uint32_t scaler_row(uint32_t base, unsigned y, unsigned stride, unsigned pitch)
+static uint32_t scaler_row(uint32_t base, unsigned y, unsigned stride, unsigned pitch, bool tiled)
 {
-    if (pitch < stride && stride < 0x10000 && !(stride & (stride - 1))) {
-        unsigned rows = 0x10000 / stride;
-
-        return base + (y / rows) * 0x10000 + (y % rows) * pitch;
-    }
-    return base + y * stride;
+    return tiled ? base + y / 16 * 16 * stride + y % 16 * pitch : base + y * stride;
 }
 
 /* Read `len` bytes at a bus address, a page at a time. False if any page is unmapped. */
@@ -127,11 +125,10 @@ static bool scaler_read_bus(IPodScalerState *s, uint32_t va, void *buf, unsigned
  * destination, +0x3c destination stride in pixels, +0x40 destination
  * w << 16 | h, +0x50/+0x54 x/y step in 16.16.
  *
- * Both sides are addressed the same way (scaler_row). The iPad 3.2 Zoom
- * source is programmed at a stride of 1024 pixels and mapped in 64 KiB
- * windows of rows packed at ALIGN(w, 64) (11 of 16 pages for w = 683); 4.x's
- * crop on the iPhone 4 is linear at the stride it programs (432 pixels for a
- * 427-wide crop, not a multiple of 64), which reading the source as packed at
+ * Both sides are addressed the same way (scaler_row), tiled or linear as
+ * their format says. The iPad 3.2 Zoom source is tiled; 4.x's crop on the
+ * iPhone 4 is linear at the stride it programs (432 pixels for a 427-wide
+ * crop, not a multiple of 64), which reading the source as packed at
  * ALIGN(w, 64) sheared into streaks.
  * ponytail: nearest sampling where the hardware has polyphase taps at +0x70
  * on.
@@ -143,6 +140,7 @@ static bool scaler_rgb(IPodScalerState *s)
     unsigned dw = (r[0x40 / 4] >> 16) & 0x1fff, dh = r[0x40 / 4] & 0x1fff;
     unsigned ss = (r[0x1c / 4] & 0xffff) * 4, ds = (r[0x3c / 4] & 0xffff) * 4, pitch = sw;
     uint32_t sx = r[0x50 / 4], sy = r[0x54 / 4];
+    bool stiled = r[0x10 / 4] & 0x400, dtiled = r[0x30 / 4] & 0x400;
 
     if ((r[0x10 / 4] & 7) != 6 || (r[0x30 / 4] & 7) != 6 || !sw || !sh ||
         !dw || !dh || sw > 2048 || sh > 2048 || dw > 2048 || dh > 2048 ||
@@ -153,11 +151,16 @@ static bool scaler_rgb(IPodScalerState *s)
      * columns: a 1x iPhone app on the iPad's landscape panel (320x480 -> 480x320 at 1:1,
      * 960x640 at 2x), the way the rest of the portrait UI is turned. */
     bool rot = sx && sy && sw != sh && ((uint64_t)dw * sx) >> 16 == sh && ((uint64_t)dh * sy) >> 16 == sw;
+    /* +0x58 bits 0-1 are the turn (11D257 AppleM2ScalerCSCDriver 0x808457f8): 3 is a quarter turn clockwise,
+     * the source's top row along the destination's right edge. CoreAnimation asks for it to put a landscape-right
+     * app's 960x640 layer on the iPhone 4's portrait panel; turned the other way, the app showed upside down
+     * (issue 47). */
+    bool cw = rot && (r[0x58 / 4] & 3) == 3;
     sx = sx ? sx : ((uint64_t)sw << 16) / dw;
     sy = sy ? sy : ((uint64_t)sh << 16) / dh;
     g_autofree uint8_t *src = g_malloc((size_t)pitch * sh * 4);
     for (unsigned y = 0; y < sh; y++) {
-        if (!scaler_read_bus(s, scaler_row(r[0x14 / 4], y, ss, ROUND_UP(sw, 64) * 4),
+        if (!scaler_read_bus(s, scaler_row(r[0x14 / 4], y, ss, ROUND_UP(sw * 4, 256), stiled),
                              src + (size_t)y * pitch * 4, sw * 4)) {
             return false;
         }
@@ -168,14 +171,17 @@ static bool scaler_rgb(IPodScalerState *s)
             (size_t)MIN(((uint64_t)y * sy) >> 16, sh - 1) * pitch;
 
         for (unsigned x = 0; x < dw; x++) {
-            if (rot) {      /* destination (x, y) is source column sw - 1 - y, row x */
+            if (cw) {       /* destination (x, y) is source column y, row sh - 1 - x */
+                unsigned v = sh - 1 - MIN(((uint64_t)x * sx) >> 16, sh - 1);
+                row[x] = ((const uint32_t *)src)[(size_t)v * pitch + MIN(((uint64_t)y * sy) >> 16, sw - 1)];
+            } else if (rot) {   /* destination (x, y) is source column sw - 1 - y, row x */
                 unsigned u = sw - 1 - MIN(((uint64_t)y * sy) >> 16, sw - 1);
                 row[x] = ((const uint32_t *)src)[(size_t)MIN(((uint64_t)x * sx) >> 16, sh - 1) * pitch + u];
             } else {
                 row[x] = line[MIN(((uint64_t)x * sx) >> 16, sw - 1)];
             }
         }
-        if (!scaler_write_bus(s, scaler_row(r[0x34 / 4], y, ds, ROUND_UP(dw, 64) * 4), row, dw * 4)) {
+        if (!scaler_write_bus(s, scaler_row(r[0x34 / 4], y, ds, ROUND_UP(dw * 4, 256), dtiled), row, dw * 4)) {
             return false;
         }
     }

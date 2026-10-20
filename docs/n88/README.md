@@ -106,7 +106,7 @@ Machine properties as the N18's (docs/n18/README.md).
 | SPI2 | baseband controller, no device | | S |
 | GPS | the baseband's own receiver: `+XLSR` fixes from the modem's `gps-fix` (`bb_gps`; docs/baseband/gps.md) | board data | H |
 | I2C0 | D1755 0x74, CS42L61 0x4a (CS42L58 model), CD3272 0x39, LIS302DL 0x1d, AK8973 0x1e (`compass-heading`; DT orientation 9: x and y swapped, x negated) | board data | H |
-| I2C2 | TSL2561 0x49 (`s5l8930.tsl2561`, a TSL2581 layout variant; no threshold interrupt) | board data | H |
+| I2C2 | TSL2561 0x49 (`s5l8930.tsl2561`, a TSL2581 layout variant; INT on GPIO 0x9e; `qom-set /machine/lightsensor lux`) | board data | H |
 | UART3 | BCM4325 HCI (`ipod_touch_bt.c`'s chardev); the CDMA receive chain from URXH is paced by the UART's FIFO | board data | H |
 | ISP | none: the DT's `isp` node is unmatched (`no_isp`), as the A4 machines' | board data | S |
 | PWM (0x83500000) | `s5l8920.pwm` (`hw/arm/s5l8920_pwm.c`): channel 0 (DT pwm/vibrator) runs the vibration motor, which the app hears (`qemu_ios_ui_vibrator`, `hw/misc/ios_vibrator.c`); channel 2 is the codec MCLK, unwired | shared | H |

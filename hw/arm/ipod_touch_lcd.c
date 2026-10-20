@@ -3,6 +3,7 @@
 #include "qemu/ios-frame-path.h"
 #include "hw/arm/panel-gamma.h"
 #include "hw/core/qdev-properties.h"
+#include "qapi/error.h"
 #include "migration/vmstate.h"
 #include "ui/pixel_ops.h"
 #include "ui/console.h"
@@ -474,6 +475,38 @@ static uint64_t ipod_touch_lcd_read(void *opaque, hwaddr addr, unsigned size)
     return 0;
 }
 
+static bool lcd_needs_plane_composition(const uint32_t *r, unsigned pw, unsigned ph);
+
+/*
+ * A swap: AppleM2CLCD programs window 1 and commits it with +0x4 bit 4, once a frame. When it commits the page
+ * the panel already shows, the guest renders in place (software CoreAnimation with page flipping off, 3.0 on the
+ * iPhone 3GS) and starts the next frame in that page as soon as the swap completes; scanned live, the panel showed
+ * cleared and half-drawn frames in every animation (issue 98). The frame as committed is copied here and shown
+ * until the next commit, as the second page a real panel would scan out. A commit of another page (page
+ * flipping, the bridge's triple buffering) or a composition of planes is scanned live as before.
+ * ponytail: a writer that changes the page and never commits again after CoreAnimation has is not shown.
+ */
+static void lcd_commit(IPodTouchLCDState *s)
+{
+    uint32_t base = s->w1_framebuffer_base;
+    bool same = base && base == s->last_commit_base;
+
+    s->last_commit_base = base;
+    if (!same || lcd_needs_plane_composition(s->plane_regs, s->pw, s->ph)) {
+        if (s->front_valid) {
+            s->front_valid = false;
+            s->invalidate = 1;
+        }
+        return;
+    }
+    if (!s->front) {
+        s->front = g_malloc(s->pw * s->ph * 4);
+    }
+    lcd_bus_read(s, base, s->front, s->pw * s->ph * 4);
+    s->front_valid = true;
+    s->front_gen++;
+}
+
 static void ipod_touch_lcd_write(void *opaque, hwaddr addr, uint64_t val, unsigned size)
 {
     IPodTouchLCDState *s = (IPodTouchLCDState *)opaque;
@@ -510,6 +543,9 @@ static void ipod_touch_lcd_write(void *opaque, hwaddr addr, uint64_t val, unsign
             break;
         case 0x4:
             s->lcd_con = val;
+            if (!s->s5l8900 && (val & 0x10)) {
+                lcd_commit(s);
+            }
             break;
         case 0x8:
         case 0xC:
@@ -1106,7 +1142,7 @@ static void lcd_refresh_impl(void *opaque)
         lcd_bright_effective() == lcd->last_bright &&
         lcd->last_present_ns &&
         qemu_clock_get_ns(QEMU_CLOCK_REALTIME) - lcd->last_present_ns <
-            2 * LCD_VSYNC_PERIOD_NS) {
+            2 * LCD_VSYNC_PERIOD_NS(lcd)) {
         lcd_frame_count(&lcd->frame_counters.duplicate_poll_skips);
         lcd_ft("scanskip", lcd->scanout_base);
         return;
@@ -1133,6 +1169,19 @@ static void lcd_refresh_impl(void *opaque)
     }
 
     bool composed = false;
+    if (lcd->front_valid) {     /* the committed frame of a page drawn in place (lcd_commit) */
+        int bri = lcd_bright_effective();
+
+        if (lcd->front_shown_gen == lcd->front_gen && !lcd->invalidate && lcd->last_surface == surface &&
+            lcd->last_bright == bri) {
+            return;
+        }
+        if (!lcd->rotbuf) lcd->rotbuf = g_malloc(lcd->pw * lcd->ph * 4);
+        memcpy(lcd->rotbuf, lcd->front, lcd->pw * lcd->ph * 4);
+        lcd->front_shown_gen = lcd->front_gen;
+        lcd->last_surface = surface;
+        composed = true;
+    }
     /*
      * Composition follows the programmed plane registers whether or not
      * lcd-planes (which gates their readback) is on. CoreAnimation scans an
@@ -1144,7 +1193,7 @@ static void lcd_refresh_impl(void *opaque)
     const uint32_t *planes = lcd->plane_scanout;
     /* The S5L8900 layout keeps its own words in plane_regs (LCDCON2, VIDCON,
      * window 2); the S5L8720 plane test would misread them as a composition. */
-    if (!lcd->s5l8900 && lcd_needs_plane_composition(planes, lcd->pw, lcd->ph)) {
+    if (!composed && !lcd->s5l8900 && lcd_needs_plane_composition(planes, lcd->pw, lcd->ph)) {
         if (!lcd->rotbuf) lcd->rotbuf = g_malloc(lcd->pw * lcd->ph * 4);
         /* Reads guest memory and the planes latched at vblank: see lcd_blit_unlock(). */
         bool unlocked = lcd_blit_unlock(lcd);
@@ -1486,12 +1535,12 @@ static void refresh_timer_tick(void *opaque)
      * two can be A/B'd from one binary. Bisecting only. */
     if (lcd_vsync_legacy()) {
         ios_frame_path(IOS_FP_VSYNC_END, s->scanout_base, 0, 0);
-        s->next_vsync = now + LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
+        s->next_vsync = now + LCD_VSYNC_PERIOD_NS(s) * lcd_vsync_divisor();
         timer_mod(s->refresh_timer, s->next_vsync);
         return;
     }
 
-    s->next_vsync += LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
+    s->next_vsync += LCD_VSYNC_PERIOD_NS(s) * lcd_vsync_divisor();
     if (s->next_vsync <= now) {
         /*
          * More than a whole frame behind -- the host was descheduled, or the
@@ -1499,7 +1548,7 @@ static void refresh_timer_tick(void *opaque)
          * hand the guest a burst of frame interrupts it cannot use, so
          * resynchronize to the current time and carry on.
          */
-        s->next_vsync = now + LCD_VSYNC_PERIOD_NS * lcd_vsync_divisor();
+        s->next_vsync = now + LCD_VSYNC_PERIOD_NS(s) * lcd_vsync_divisor();
     }
     timer_mod(s->refresh_timer, s->next_vsync);
     ios_frame_path(IOS_FP_VSYNC_END, s->scanout_base, 0, 0);
@@ -1532,6 +1581,8 @@ static void ipod_touch_lcd_reset(DeviceState *dev)
     s->w1_display_resolution_info = 0;
     s->w1_framebuffer_base = 0;
     s->scanout_base = 0;
+    s->front_valid = false;
+    s->last_commit_base = 0;
     frame_timeline_reset(&s->ftl);
     s->ftl_last_base = 0;
     s->w1_hspan = 0;
@@ -1578,7 +1629,7 @@ static void ipod_touch_lcd_reset(DeviceState *dev)
      * state.
      */
     it_display_rotation_req = 0;
-    s->next_vsync = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCD_VSYNC_PERIOD_NS;
+    s->next_vsync = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCD_VSYNC_PERIOD_NS(s);
     if (lcd_trace()) {
         TRACE_PRINTF(trace_ipod_touch_lcd_log, "[LCD] ==== reset ====\n");
     }
@@ -1587,6 +1638,11 @@ static void ipod_touch_lcd_reset(DeviceState *dev)
 static void ipod_touch_lcd_realize(DeviceState *dev, Error **errp)
 {
     IPodTouchLCDState *s = IPOD_TOUCH_LCD(dev);
+
+    if (s->refresh_hz < 1 || s->refresh_hz > 240) {
+        error_setg(errp, "refresh-hz must be 1 to 240, not %u", s->refresh_hz);
+        return;
+    }
     s->con = graphic_console_init(dev, 0, &gfx_ops, s);
     qemu_console_resize(s->con, s->pw, s->ph);
 
@@ -1599,7 +1655,7 @@ static void ipod_touch_lcd_realize(DeviceState *dev, Error **errp)
 
     // initialize the refresh timer
     s->refresh_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, refresh_timer_tick, s);
-    s->next_vsync = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCD_VSYNC_PERIOD_NS;
+    s->next_vsync = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + LCD_VSYNC_PERIOD_NS(s);
     timer_mod(s->refresh_timer, s->next_vsync);
 }
 
@@ -1697,6 +1753,8 @@ static int ipod_touch_lcd_post_load(void *opaque, int version_id)
     /* scanout_base is re-latched by the next frame interrupt anyway, but a
      * repaint can be asked for before that and would otherwise draw black. */
     s->scanout_base = lcd_scanout_base(s);
+    s->front_valid = false;     /* the next commit latches again */
+    s->last_commit_base = 0;
     lcd_gamma_update(s);
     return 0;
 }
@@ -1750,6 +1808,9 @@ static const Property lcd_properties[] = {
     DEFINE_PROP_BOOL("ctrl-readback", IPodTouchLCDState, ctrl_readback, false),
     DEFINE_PROP_UINT32("panel-width", IPodTouchLCDState, pw, LCD_FB_WIDTH),
     DEFINE_PROP_UINT32("panel-height", IPodTouchLCDState, ph, LCD_FB_HEIGHT),
+    /* Faster than the hardware's 60 Hz on request (Light Touch's experimental 120 Hz): the guest's compositor
+     * draws on the frame interrupt, so it follows the rate, but apps that count frames run fast. */
+    DEFINE_PROP_UINT32("refresh-hz", IPodTouchLCDState, refresh_hz, 60),
 };
 
 static void ipod_touch_lcd_class_init(ObjectClass *klass, const void *data)

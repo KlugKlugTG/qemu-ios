@@ -14,7 +14,9 @@
  * populates that; `-audiodev` alone leaves this device with nowhere to send
  * samples and looks exactly like a broken audio path.
  *
- * Sample format: 16-bit stereo little-endian, clocked by the CS42L58's LRCLK.
+ * Sample format: 16-bit stereo little-endian, clocked by the codec's LRCLK (the N72's CS42L58, the M68's and
+ * N45's WM8758), which masters the frame clock on every board this model serves (TX config bit 20: see
+ * hw/arm/s5l8930_i2s.c).
  * System sounds use 44100 Hz, but movie playback can change the codec clock
  * (for example register 05: cb -> d3 selects 22050 Hz). IT_I2S_RATE overrides
  * this for diagnostics. QEMU's audio mixer converts to the host output rate.

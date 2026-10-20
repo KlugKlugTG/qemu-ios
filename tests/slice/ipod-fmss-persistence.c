@@ -36,7 +36,8 @@ static int stops, erase_enabled, physical_enabled, fault_at, calls;
 static const char *fault;
 static struct { uint64_t shadowed; } fmss_stats;
 typedef struct {
-    char *nand_overlay;
+    char *nand_overlay, *nand_path;
+    void *image;
     GTree *phys_pages, *erased_blocks;
     GHashTable *overlay_pages;
     uint32_t reg_cs_irq_bit, reg_cinfo_target_addr, reg_csgenrc;
@@ -46,7 +47,13 @@ typedef struct {
     uint32_t reg_cs_buf_addr, reg_pages_in_addr, reg_num_pages;
     uint32_t reg_pages_out_addr, reg_page_spare_out_addr;
     uint8_t page_buffer[4096], page_spare_buffer[64];
+    uint32_t reg_cs_status;
+    bool read_clean;
 } IPodTouchFMSSState;
+/* The image store (nand-image.c) is not under test here: no state has one. */
+static int nand_image_write(void *n, unsigned chip, uint32_t page, const uint8_t *record) { return -EIO; }
+static int nand_image_erase(void *n, unsigned chip, uint32_t block) { return -EIO; }
+#define FMSS_STATUS_DONE 0x1
 typedef IPodTouchFMSSState DeviceState;
 #define IPOD_TOUCH_FMSS(s) (s)
 static void qemu_irq_lower(int irq) {}

@@ -20,6 +20,9 @@ typedef pthread_mutex_t QemuMutex;
 #define qemu_mutex_destroy pthread_mutex_destroy
 #define qemu_mutex_lock pthread_mutex_lock
 #define qemu_mutex_unlock pthread_mutex_unlock
+static time_t rtc_now = 1265068800;   /* QEMU's RTC (-rtc base=2010-02-02), not the host's */
+static void qemu_get_timedate(struct tm *tm, int offset) { time_t t = rtc_now + offset; gmtime_r(&t, tm); }
+#define mktimegm timegm
 #include "slice.h"
 static uint8_t memory[4096];
 static bool fail;
@@ -152,5 +155,12 @@ int main(void) {
     ipod_agent_free(reader);
     assert(!ipod_agent_acquire());
     g_free(request);g_free(encoded);
-    puts("PASS: binary windows, malformed input, memory faults, bounds, ownership, restart, reset");
+    /* op 0x165, the clock the agent keeps the guest on: QEMU's RTC, plus a pinned machine clock's offset */
+    IPodAgent *c=ipod_agent_new();
+    int64_t ct=call(c,0x160,0,0,0,0);
+    assert(call(c,0x165,ct,0,0,0)==1265068800);
+    ipod_agent_set_clock_offset(c,34931200);
+    assert(call(c,0x165,ct,0,0,0)==1300000000);
+    ipod_agent_free(c);
+    puts("PASS: binary windows, malformed input, memory faults, bounds, ownership, restart, reset, clock");
 }

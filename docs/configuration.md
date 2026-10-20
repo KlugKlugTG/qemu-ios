@@ -5,10 +5,7 @@ incremental; most existing `IT_*` variables still retain their documented behavi
 
 | Property | Values | Default | Legacy alias |
 | --- | --- | --- | --- |
-| `boot-args` | kernel command line, at most 255 bytes; empty disables injection | no override | none: the property is the only input |
-| `boot-args-delay-ms` | 0..3600000 virtual milliseconds | `0` | none |
-| `boot-args-repeat` | 0..1000000 writes; 0 still performs the initial write | `200` | none |
-| `boot-args-interval-ms` | 1..3600000 virtual milliseconds | `250` | none |
+| `boot-args` | kernel command line iBoot hands over, at most 255 bytes with each `%` counted twice; empty keeps iBoot's own | no override | none: the property is the only input |
 | `bt` | `on`, `off` | `on` | `IT_BT`: leading `0` disables, otherwise enables |
 | `bt-latency-us` | unsigned 32-bit microseconds | `2000` | `IT_BT_LATENCY_US` |
 | `osk` | `on`, `off` | `off` | `IT_OSK`: any present value enables |
@@ -41,34 +38,24 @@ invalid, negative and oversized legacy values are rejected. These controls do
 not add Bluetooth peers. `test_bt_config.py` checked the real paused machine,
 including aliases, boundaries and runtime rejection (retired; see git history at 5508b504b8).
 
-## Boot-argument scheduling
+## Boot arguments
 
-`boot-args` and its three scheduling properties are fixed before machine startup and
-have no environment aliases (the `IT_BOOT_ARGS*` variables are ignored). The command
-line is limited to the kernel buffer's 255 bytes; longer strings are rejected. An
-empty command line disables injection. The string reaches the kernel two ways, both
-derived from the staged iBoot image by pattern (hw/arm/it_iboot.c, any iPod touch 2G
-build): its normal-boot command-line literal is redirected to the string before
-iBoot hands off, and the kernel's `boot_args.CommandLine` is rewritten on the timer
-until AMFI has latched it.
-
-The first timer write occurs after `boot-args-delay-ms`. Later writes use
-`boot-args-interval-ms`; an interval of zero is rejected to prevent a busy timer
-loop. `boot-args-repeat` counts successful writes, including the first. As before,
-zero still permits the initial write, and a pending AMFI task-port patch can keep
-the shared timer active beyond that count. The independent AMFI option is
-unchanged. Delays and intervals use guest virtual time, not wall-clock time.
-
-Legacy scheduling aliases are resolved once during startup with strict bounded
-integer parsing, and emit deprecation warnings. Explicit properties take priority
-even over malformed aliases. Reset reuses these resolved settings. The
-machine's defaults are 0 ms / 200 writes / 250 ms, what every iPod boot uses. The paused native matrix in
-`test_time_dilation_config.py` covered defaults, aliases, explicit precedence,
-boundaries, malformed input and runtime mutation rejection (retired; see git history at 5508b504b8).
+`boot-args` is fixed before machine startup and has no environment alias (the
+`IT_BOOT_ARGS*` variables are ignored). Release iBoots ignore the boot-args NVRAM
+variable and format the kernel command line with
+`snprintf(gBootArgs.commandLine, 0x100, "%s ", "")`. The literal-pool slot holding
+that format's address is found by pattern in the staged iBoot
+(`it_iboot_find_boot_args_format`, every iPod touch 2G build from 2.1.1 to 4.2.1) and
+pointed at `commandLine`, which is filled with the arguments, `%` doubled, before each
+NAND read iBoot makes (its BSS is cleared when it starts). iBoot then hands the kernel
+exactly those arguments, on direct-iBoot and SecureROM boots alike. The arguments
+become the format, so they are limited to 255 bytes with each `%` counted twice;
+longer strings are rejected. An empty value leaves iBoot's own command line.
+`tests/qtest/ipod-boot-args-test.c` and `tests/slice/ipod-early-boot-args.c` check it.
 
 ## Firmware profiles
 
 There are none. The per-build kernel-banner table (`ipod_touch_firmware.c`, 5F138 and 7E18) had no caller
 left and was deleted with its unit test; the build-specific addresses it once keyed (MBX, FMSS, the AMFI
-task-port patch, the 5F138 clock trampoline) were removed before it. iBoot's boot-args literal, security
-epoch and 2.x command line are found by pattern in any iBoot (`hw/arm/it_iboot.c`).
+task-port patch, the 5F138 clock trampoline) were removed before it. iBoot's command-line format slot and
+security epoch are found by pattern in any iBoot (`hw/arm/it_iboot.c`).

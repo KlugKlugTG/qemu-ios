@@ -740,10 +740,12 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
      * taking the BQL twice each time for hooks a CPU without them never
      * runs was a large share of the vCPU's BQL waits.
      */
-    if (!QLIST_EMPTY(&cpu->pre_el_change_hooks)) {
+    if (cpu->el_change_hooks_need_bql) {
         bql_lock();
         arm_call_pre_el_change_hook(cpu);
         bql_unlock();
+    } else {
+        arm_call_pre_el_change_hook(cpu);
     }
 
     mask = aarch32_cpsr_valid_mask(env->features, &cpu->isar);
@@ -757,10 +759,12 @@ void HELPER(cpsr_write_eret)(CPUARMState *env, uint32_t val)
     env->regs[15] &= (env->thumb ? ~1 : ~3);
     arm_rebuild_hflags(env);
 
-    if (!QLIST_EMPTY(&cpu->el_change_hooks)) {
+    if (cpu->el_change_hooks_need_bql) {
         bql_lock();
         arm_call_el_change_hook(cpu);
         bql_unlock();
+    } else {
+        arm_call_el_change_hook(cpu);
     }
 }
 

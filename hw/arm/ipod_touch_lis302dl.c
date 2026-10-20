@@ -34,22 +34,14 @@ static bool lis302dl_debug(void)
 /* The mounted sensor's reading of a device vector g (in g), in 1/64 g. */
 static void lis302dl_mounted(LIS302DLState *s, const double g[3], int out[3])
 {
-    if (s->mount && !s->axis[0]) {
-        int x, y, z;
-        if (sscanf(s->mount, "%d,%d,%d", &x, &y, &z) == 3 &&
-            x && y && z && x >= -3 && x <= 3 && y >= -3 && y <= 3 && z >= -3 && z <= 3) {
-            s->axis[0] = x; s->axis[1] = y; s->axis[2] = z;
-        }
+    if (s->dt_orientation && !s->axis[0] && !ios_dt_mount(s->dt_orientation, true, s->axis)) {
+        s->axis[0] = 0;
     }
     for (int i = 0; i < 3; i++) {
         double v = g[i];
         if (s->axis[0]) {
-            /* Any other mounting: each sensor axis reads a signed device axis. */
             int a = (s->axis[i] < 0 ? -s->axis[i] : s->axis[i]) - 1;
             v = s->axis[i] < 0 ? -g[a] : g[a];
-        } else if (i && s->mount_flipped) {
-            /* Turned 180 degrees about X on the board (the iPad 1): Y and Z negated. */
-            v = -v;
         }
         out[i] = lround(64 * v);
     }
@@ -526,8 +518,7 @@ static const VMStateDescription vmstate_lis302dl = {
 
 static const Property lis302dl_properties[] = {
     DEFINE_PROP_UINT8("whoami", LIS302DLState, whoami, ACCEL_WHOAMI_VALUE),
-    DEFINE_PROP_BOOL("mount-flipped", LIS302DLState, mount_flipped, false),
-    DEFINE_PROP_STRING("mount", LIS302DLState, mount),
+    DEFINE_PROP_STRING("dt-orientation", LIS302DLState, dt_orientation),
 };
 
 static void lis302dl_class_init(ObjectClass *klass, const void *data)

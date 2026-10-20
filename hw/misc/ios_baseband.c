@@ -743,11 +743,36 @@ static bool iosbb_vib_needed(void *opaque)
     return IOS_BASEBAND(opaque)->bb.vib_mode != 0;
 }
 
+/* The network search's state; a snapshot from before it was modeled says camped where it said registered. */
+static const VMStateDescription vmstate_ios_baseband_camp = {
+    .name = "ios-baseband/camp",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .fields = (const VMStateField[]) {
+        VMSTATE_INT64(bb.camp_due_ms, IosBasebandState),
+        VMSTATE_BOOL(bb.camp_noted, IosBasebandState),
+        VMSTATE_CHAR_ARRAY(bb.loci_plmn, IosBasebandState, 7),
+        VMSTATE_END_OF_LIST()
+    }
+};
+
+static int iosbb_pre_load(void *opaque)
+{
+    IOS_BASEBAND(opaque)->bb.camp_due_ms = -1;   /* stays -1 without the camp subsection */
+    return 0;
+}
+
 /* The motor line follows the restored state (off unless the vibrator subsection came). */
 static int iosbb_post_load(void *opaque, int version_id)
 {
     IosBasebandState *s = opaque;
 
+    if (s->bb.camp_due_ms == -1) {
+        bool reg = s->bb.last_creg == 1 || s->bb.last_creg == 5;
+
+        s->bb.camp_due_ms = reg ? 1 : 0;
+        s->bb.camp_noted = reg;
+    }
     s->bb.now_ms = qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL);
     iosbb_vibrator_update(s);
     return 0;
@@ -829,6 +854,7 @@ static const VMStateDescription vmstate_ios_baseband = {
     .name = "ios-baseband",
     .version_id = 2,
     .minimum_version_id = 1,
+    .pre_load = iosbb_pre_load,
     .post_load = iosbb_post_load,
     .fields = (const VMStateField[]) {
         /* Controls: re-set by the board at realize, but kept so a restored
@@ -924,6 +950,7 @@ static const VMStateDescription vmstate_ios_baseband = {
         &vmstate_ios_baseband_vib,
         &vmstate_ios_baseband_gps,
         &vmstate_ios_baseband_sim_pin,
+        &vmstate_ios_baseband_camp,
         NULL
     }
 };
@@ -1117,6 +1144,7 @@ static const Property iosbb_props[] = {
     DEFINE_PROP_INT32("ifx-max-data", IosBasebandState, ifx_max_data, 0),
     /* NITZ (+CTZV with the host's offset) once the host enables +CTZR; the M68 turns it on. */
     DEFINE_PROP_BOOL("nitz", IosBasebandState, nitz, false),
+    DEFINE_PROP_UINT32("search-ms", IosBasebandState, bb.search_ms, 0),
     DEFINE_PROP_UINT64("rtc-epoch", IosBasebandState, rtc_epoch, 0),
     /* The baseband's own GPS receiver (the 3GS's), reporting gps-fix through +XLSR. */
     DEFINE_PROP_BOOL("gps", IosBasebandState, bb.gps.present, false),

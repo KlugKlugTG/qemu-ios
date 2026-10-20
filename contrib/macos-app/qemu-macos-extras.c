@@ -114,7 +114,7 @@ void qemu_ios_ui_touch2(int phase, double nx, double ny)
     t->phase = phase;
     t->nx = nx;
     t->ny = ny;
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), mtt_bh, t);
+    qemu_ios_ui_input_later(mtt_bh, t);
 }
 
 /* --- keyboard ------------------------------------------------------------ */
@@ -144,7 +144,7 @@ static void qemu_ios_ui_key(int qcode, bool down)
     struct key_event *k = g_new0(struct key_event, 1);
     k->qcode = qcode;
     k->down = down;
-    aio_bh_schedule_oneshot(qemu_get_aio_context(), key_bh, k);
+    qemu_ios_ui_input_later(key_bh, k);
 }
 
 void qemu_ios_ui_key_mac(int mac_keycode, bool down)
@@ -502,6 +502,13 @@ void qemu_ios_ui_paste(const char *utf8)
         return;
     }
     aio_bh_schedule_oneshot(qemu_get_aio_context(), paste_bh, g_strdup(utf8));
+}
+
+/* hw/arm/guest-pasteboard.c; its own lock, so no BQL or ready check needed. */
+extern char *guest_pb_guest_text(uint64_t *serial);
+char *qemu_ios_ui_guest_pasteboard(uint64_t *serial)
+{
+    return serial ? guest_pb_guest_text(serial) : NULL;
 }
 
 /* --- machine controls ---------------------------------------------------- */

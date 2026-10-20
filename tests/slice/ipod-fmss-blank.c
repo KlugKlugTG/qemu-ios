@@ -62,12 +62,16 @@ static struct {
 } fmss_stats;
 typedef struct {
     char *nand_path, *nand_overlay;
+    void *image;
     GTree *erased_blocks;
     const uint8_t *packed, *packed_records;
     const uint32_t *packed_index;
     unsigned packed_num_cs, packed_pages_per_cs;
     size_t packed_record_count;
 } IPodTouchFMSSState;
+#define error_report(...) ((void)0)
+/* The image store (nand-image.c) is not under test here: no state has one. */
+static int nand_image_read(void *n, unsigned chip, uint32_t page, uint8_t *record) { return -EIO; }
 static bool
 fmss_recall_physical(IPodTouchFMSSState *s, unsigned cs, unsigned p, uint8_t *d, uint8_t *sp)
 {

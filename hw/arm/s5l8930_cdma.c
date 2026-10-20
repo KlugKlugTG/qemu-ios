@@ -11,7 +11,7 @@
  * Global window (offsets < 0x1000): +0x00/+0x04 channel-enable set,
  * +0x08/+0x0C clear, +0x10/+0x14 the enabled channels (read). Channel n lives
  * at n << 12 (n = 1..0x25; channel 0's slot is the global block):
- *   +0x00 ctrl/status: write bit0 go, bit1 reset, bit2 abort, bit5 hold;
+ *   +0x00 ctrl/status: write bit0 go, bit1 reset, bit2 abort, bit3 interrupt, bit5 hold;
  *                      bits 16-17 state (1 = running), 0x40000 error,
  *                      0x80000 done, 0x100000 descriptor flag, 0x200000
  *                      abort done; the 0x3C0000 bits are write-1-to-clear.
@@ -32,8 +32,8 @@
  * CDMAChannelM2M): channel 1, with the context number in ctrl bits 8-15 and
  * no device address, feeds its descriptors through the context into the
  * engine; channel 2, with neither, drains the engine's output into its own
- * descriptors. Only the draining channel interrupts; the feeding channel's
- * done bit is polled/reset by the driver, never acked.
+ * descriptors. Each interrupts when its chain is done if control bit 3 asks
+ * (cdma_update_irq): 7.x sets it on both, 3.2 on neither (it polls).
  *
  * A chain runs to completion inside the go write, so the guest never observes
  * the running state and the resume/abort handshakes degenerate to flag
@@ -76,6 +76,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(S5L8930CDMAState, S5L8930_CDMA)
 #define CTRL_GO             (1u << 0)
 #define CTRL_RESET          (1u << 1)
 #define CTRL_ABORT          (1u << 2)
+#define CTRL_IRQ_EN         (1u << 3)       /* the done/error interrupt (cdma_update_irq) */
 #define CTRL_HOLD           (1u << 5)
 #define CTRL_CONFIG_MASK    0xFFF8u         /* bits the guest owns */
 #define CTRL_AES_CTX(ctrl)  (((ctrl) >> 8) & 0xFF)
@@ -369,15 +370,29 @@ static bool cdma_fifo_fed(S5L8930CDMAState *s, CDMAChannel *c)
 
 static void cdma_update_irq(S5L8930CDMAState *s, int ch)
 {
+    CDMAChannel *c = &s->ch[ch];
     bool en = s->enabled[ch >> 5] & (1u << (ch & 31));
-    /* The AES-feeding channel's line is never acked by the driver: an
-     * asserted level there re-enters the draining channel's handler after it
-     * has finished and panics ("CDMA M2M unexpected interrupt"). */
-    if (CTRL_AES_CTX(s->ch[ch].ctrl) && !cdma_fifo_fed(s, &s->ch[ch]) &&
-        (!s->ch[ch].fifo || cdma_is_memory(s, s->ch[ch].fifo))) {
-        en = false;     /* memory-to-memory only: a device-FIFO channel's context is an inline filter */
+
+    /*
+     * Control bit 3 enables a channel's done/error interrupt. Every driver
+     * path that waits on the interrupt sets it (AppleCDMA's channel start
+     * |= 0x18, 3.2 c044d5c8 and 7.0b1 80a75e52; 7.x's CDMAChannelM2M start
+     * 0x88, 80a7743a), and 3.2's AES pair, which polls, runs with 0x180 and
+     * 0x80. Each CDMAChannelM2M has its own handler (3.2 c044e0cc, 7.0b1
+     * 80a76af0) that panics ("CDMA M2M unexpected interrupt") if its channel
+     * is not clocked, and 7.x turns the channel's clock off only there: with
+     * the AES feeder's line held low, as this model had it, its clock stayed
+     * on after the first AES operation and AppleCDMA's sleep check panicked
+     * ("client driver(s) left channel(s) 0x2 active when sleeping";
+     * LightTouchMac issue 83), while with it raised 3.2 panicked in the
+     * handler. ponytail: the gate applies to memory-to-memory channels only;
+     * the device channels (and the IOP firmware's) interrupt as before
+     * whatever bit 3 says.
+     */
+    if (!(c->ctrl & CTRL_IRQ_EN) && (!c->fifo || cdma_is_memory(s, c->fifo))) {
+        en = false;
     }
-    qemu_set_irq(s->irq[ch], en && (s->ch[ch].ctrl & (ST_DONE | ST_ERROR)));
+    qemu_set_irq(s->irq[ch], en && (c->ctrl & (ST_DONE | ST_ERROR)));
 }
 
 static void fifo_push(S5L8930CDMAState *s, const uint8_t *buf, uint32_t len)
@@ -767,7 +782,7 @@ static bool cdma_start_paced(S5L8930CDMAState *s, int ch)
     c->ctrl = (c->ctrl & ~ST_ERROR) | ST_RUNNING;
     s->paced_desc[ch] = c->desc;
     s->paced_sent[ch] = 0;
-    s->paced_bps[ch] = 4 * s5l8930_i2s_rate((c->fifo - CDMA_PACED_LO) >> 12);
+    s->paced_bps[ch] = 4 * s5l8930_i2s_sync_rate((c->fifo - CDMA_PACED_LO) >> 12);
     s->paced_start[ch] = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     /*
      * A chain re-armed from the previous one's completion interrupt continues

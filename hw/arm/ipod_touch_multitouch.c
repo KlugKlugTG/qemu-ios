@@ -1,6 +1,8 @@
 #include "hw/arm/ipod_touch_multitouch.h"
 #include "hw/arm/ipod_touch_guard.h"
 #include "migration/vmstate.h"
+#include "hw/core/qdev-properties.h"
+#include "qapi/error.h"
 #include "qemu/log.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
@@ -226,8 +228,9 @@ static void prepare_short_control_response(IPodTouchMultitouchState *s, uint8_t 
         s->out_buffer[3] = MT_ENDIANNESS;
         s->out_buffer[4] = s->profile->rows;
         s->out_buffer[5] = s->profile->cols;
-        s->out_buffer[6] = (s->profile->bcd_version & 0xFF);
-        s->out_buffer[7] = (s->profile->bcd_version >> 8) & 0xFF;
+        /* big-endian, as the Z1 model sends it: the drivers read 0x0146 and 0x0079 off the real k48 and n90 */
+        s->out_buffer[6] = (s->profile->bcd_version >> 8) & 0xFF;
+        s->out_buffer[7] = (s->profile->bcd_version & 0xFF);
     }
     else if(report_id == MT_REPORT_SENSOR_REGION_DESC) {
         memcpy(&s->out_buffer[3], s->profile->region_desc,
@@ -354,6 +357,16 @@ static MTFrame *mt_take_pending(IPodTouchMultitouchState *s, uint32_t *length)
     }
 #endif
     return frame;
+}
+
+/* A reader outside this file took next_frame (the Z1 controller): the next queued report takes the slot. */
+void ipod_touch_multitouch_frame_taken(IPodTouchMultitouchState *s)
+{
+    uint32_t len;
+
+    if (!s->next_frame) {
+        mt_take_pending(s, &len);
+    }
 }
 
 static void mt_n1_read(IPodTouchMultitouchState *s)
@@ -1033,12 +1046,17 @@ static void ipod_touch_multitouch_inform_frame_ready(IPodTouchMultitouchState *s
  * speed by about 6x, which is its own reason the slide-to-unlock recognizer
  * struggled. Raising the rate fixes the magnitude as well as the smoothness.
  *
- * IT_MT_HZ overrides it, for bisecting against the old behavior (IT_MT_HZ=10).
+ * The "report-hz" property raises it with the panel's refresh (Light Touch's
+ * experimental 120 Hz); IT_MT_HZ overrides the default, for bisecting against
+ * the old behavior (IT_MT_HZ=10).
  */
-static int64_t mt_frame_period_ns(void)
+static int64_t mt_frame_period_ns(IPodTouchMultitouchState *s)
 {
     static int64_t ns = -1;
 
+    if (s->report_hz) {
+        return NANOSECONDS_PER_SECOND / s->report_hz;
+    }
     if (ns < 0) {
         const char *e = getenv("IT_MT_HZ");
         int hz = e ? atoi(e) : 0;
@@ -1264,7 +1282,7 @@ void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
          * interrupts, and next_frame is a single slot so the extra frames would
          * be discarded anyway.
          */
-        if (now - s->last_motion_ns < mt_frame_period_ns()) {
+        if (now - s->last_motion_ns < mt_frame_period_ns(s)) {
             return;
         }
     }
@@ -1272,11 +1290,11 @@ void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
     mt_emit_frame(s);
 
     if (mt_any_down(s)) {
-        timer_mod(s->touch_timer, now + mt_frame_period_ns());
+        timer_mod(s->touch_timer, now + mt_frame_period_ns(s));
     } else {
 #if !defined(__APPLE__)
         if (s->next_frame) {
-            timer_mod(s->touch_timer, now + mt_frame_period_ns());
+            timer_mod(s->touch_timer, now + mt_frame_period_ns(s));
         } else
 #endif
         {
@@ -1320,7 +1338,7 @@ static void touch_timer_tick(void *opaque)
 #if !defined(__APPLE__)
         if (s->next_frame) {
             ipod_touch_multitouch_inform_frame_ready(s);
-            timer_mod(s->touch_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns());
+            timer_mod(s->touch_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns(s));
         }
 #endif
         return;
@@ -1329,12 +1347,12 @@ static void touch_timer_tick(void *opaque)
 
     if (mt_any_down(s)) {
         s->last_motion_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        timer_mod(s->touch_timer, s->last_motion_ns + mt_frame_period_ns());
+        timer_mod(s->touch_timer, s->last_motion_ns + mt_frame_period_ns(s));
     }
 #if !defined(__APPLE__)
     else if (s->next_frame) {
         ipod_touch_multitouch_inform_frame_ready(s);
-        timer_mod(s->touch_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns());
+        timer_mod(s->touch_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns(s));
     }
 #endif
 }
@@ -1349,7 +1367,7 @@ static void touch_end_timer_tick(void *opaque)
     mt_emit_frame(s);
 #if !defined(__APPLE__)
     if (mt_any_active(s)) {
-        timer_mod(s->touch_end_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns());
+        timer_mod(s->touch_end_timer, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + mt_frame_period_ns(s));
     }
 #endif
 }
@@ -1357,6 +1375,11 @@ static void touch_end_timer_tick(void *opaque)
 static void ipod_touch_multitouch_realize(SSIPeripheral *d, Error **errp)
 {
     IPodTouchMultitouchState *s = IPOD_TOUCH_MULTITOUCH(d);
+
+    if (s->report_hz > 250) {
+        error_setg(errp, "report-hz must be 250 or less, not %u", s->report_hz);
+        return;
+    }
     qdev_init_gpio_out_named(DEVICE(d), &s->atn, "atn", 1);
     s->profile = &mt_profile_ipod;
     memset(s->hbpp_atn_ack_response, 0, 2);
@@ -1475,6 +1498,10 @@ static const VMStateDescription vmstate_ipod_touch_multitouch = {
     }
 };
 
+static const Property ipod_touch_multitouch_properties[] = {
+    DEFINE_PROP_UINT32("report-hz", IPodTouchMultitouchState, report_hz, 0),
+};
+
 static void ipod_touch_multitouch_class_init(ObjectClass *klass, const void *data)
 {
     SSIPeripheralClass *k = SSI_PERIPHERAL_CLASS(klass);
@@ -1484,6 +1511,7 @@ static void ipod_touch_multitouch_class_init(ObjectClass *klass, const void *dat
     k->transfer = ipod_touch_multitouch_transfer;
     device_class_set_legacy_reset(dc, ipod_touch_multitouch_reset);
     dc->vmsd = &vmstate_ipod_touch_multitouch;
+    device_class_set_props(dc, ipod_touch_multitouch_properties);
 }
 
 #if !defined(__APPLE__)

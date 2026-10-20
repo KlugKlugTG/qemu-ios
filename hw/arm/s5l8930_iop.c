@@ -27,7 +27,6 @@
  * Page I/O uses QEMU BlockBackends; ownership is published after data flush.
  */
 #include "qemu/osdep.h"
-#include "windows-memory.c.inc"
 #include "qemu/timer.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -43,6 +42,7 @@
 #include "system/runstate.h"
 #include "system/block-backend.h"
 #include "block/block.h"
+#include "hw/arm/nand-image.h"
 #include "qemu/error-report.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
@@ -1443,68 +1443,6 @@ static int64_t geometry_get(QDict *g, const char *key, Error **errp)
     return v;
 }
 
-static BlockBackend *nand_open_backend(DeviceState *owner, const char *path,
-                                       size_t size, bool writable, Error **errp)
-{
-    struct stat st;
-    QDict *options;
-    BlockBackend *blk;
-    BlockDriverState *bs;
-    uint64_t perm = BLK_PERM_CONSISTENT_READ | (writable ? BLK_PERM_WRITE : 0);
-    uint64_t shared = BLK_PERM_CONSISTENT_READ | BLK_PERM_WRITE_UNCHANGED;
-    int fd = open(path, (writable ? O_RDWR | O_CREAT : O_RDONLY) | O_BINARY, 0644);
-
-    if (fd < 0 || fstat(fd, &st) < 0 ||
-        (writable && st.st_size == 0 && ftruncate(fd, size) < 0)) {
-        error_setg_errno(errp, errno, "cannot open NAND file %s", path);
-        if (fd >= 0) {
-            close(fd);
-        }
-        return NULL;
-    }
-    if (st.st_size != size && !(writable && st.st_size == 0)) {
-        error_setg(errp, "%s: NAND file size differs from geometry", path);
-        close(fd);
-        return NULL;
-    }
-#ifdef _WIN32
-    /* Windows lacks directory fsync. Flush newly sized data/ownership files
-     * before any ownership bit can be published. */
-    if (writable && fsync(fd) < 0) {
-        error_setg_errno(errp, errno, "cannot sync NAND file %s", path);
-        close(fd);
-        return NULL;
-    }
-#endif
-    close(fd);
-    options = qdict_new();
-    qdict_put_str(options, "driver", "raw");
-    bs = bdrv_open(path, NULL, options, BDRV_O_NO_SHARE |
-                   (runstate_check(RUN_STATE_INMIGRATE) ? BDRV_O_INACTIVE : 0) |
-                   (writable ? BDRV_O_RDWR | BDRV_O_UNMAP : 0), errp);
-    if (!bs) {
-        return NULL;
-    }
-    /* Attach the guest owner before requesting permissions: incoming
-     * migration keeps images inactive until normal block-layer handoff. */
-    blk = blk_new(bdrv_get_aio_context(bs), 0, shared);
-    if (blk_attach_dev(blk, owner) < 0) {
-        error_setg(errp, "%s: NAND backend already has a device owner", path);
-        blk_unref(blk);
-        bdrv_unref(bs);
-        return NULL;
-    }
-    if (blk_set_perm(blk, perm, shared, errp) < 0 ||
-        blk_insert_bs(blk, bs, errp) < 0) {
-        blk_detach_dev(blk, owner);
-        blk_unref(blk);
-        bdrv_unref(bs);
-        return NULL;
-    }
-    bdrv_unref(bs);
-    return blk;
-}
-
 /*
  * Ownership stays in RAM until page data is durable. A stop or snapshot first
  * flushes all page backends, then writes and flushes the old-compatible bitmap.
@@ -1672,9 +1610,7 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
             if (dir) {
                 g_dir_close(dir);
             }
-            if (!empty || !g_file_set_contents_full(marker, expected, -1,
-                    G_FILE_SET_CONTENTS_CONSISTENT | G_FILE_SET_CONTENTS_DURABLE,
-                    0644, NULL)) {
+            if (!empty || !g_file_set_contents(marker, expected, -1, NULL)) {
                 error_setg(errp, "%s: v2 requires an empty or explicitly v2 overlay", marker);
                 return;
             }
@@ -1689,7 +1625,7 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
                 continue;
             }
             f = g_strdup_printf("%s/bus%d-ce%d.pages", s->nand_dir, bus, ce);
-            s->chip[bus][ce] = nand_open_backend(dev, f, size, !s->overlay_dir, errp);
+            s->chip[bus][ce] = nand_image_open_file(dev, f, size, !s->overlay_dir, errp);
             if (!s->chip[bus][ce]) {
                 return;
             }
@@ -1698,14 +1634,14 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
             }
             g_free(f);
             f = g_strdup_printf("%s/bus%d-ce%d.pages", s->overlay_dir, bus, ce);
-            s->ovl[bus][ce] = nand_open_backend(dev, f, size, true, errp);
+            s->ovl[bus][ce] = nand_image_open_file(dev, f, size, true, errp);
             if (!s->ovl[bus][ce]) {
                 return;
             }
             g_free(f);
             f = g_strdup_printf("%s/bus%d-ce%d.dirty", s->overlay_dir, bus, ce);
             size_t bitmap_bytes = ((size_t)s->pages_per_ce + 7) / 8;
-            s->ownership[bus][ce] = nand_open_backend(dev, f, bitmap_bytes, true, errp);
+            s->ownership[bus][ce] = nand_image_open_file(dev, f, bitmap_bytes, true, errp);
             if (!s->ownership[bus][ce]) {
                 return;
             }
@@ -1720,7 +1656,6 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
     }
     /* Make the fixed filenames/format marker durable before any ownership
      * can reference them. Operations never create new entries afterward. */
-#ifndef _WIN32
     const char *write_dir = s->overlay_dir ? s->overlay_dir : s->nand_dir;
     int dirfd = open(write_dir, O_RDONLY | O_DIRECTORY);
     if (dirfd < 0 || fsync(dirfd) < 0) {
@@ -1731,7 +1666,6 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
         return;
     }
     close(dirfd);
-#endif
     s->vm_state_entry = qemu_add_vm_change_state_handler(iop_vm_state, s);
 }
 

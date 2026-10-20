@@ -24,8 +24,11 @@ typedef struct {
     uint32_t packed_num_cs, packed_pages_per_cs, total_blocks;
     size_t packed_record_count;
     const char *nand_path;
+    void *image;
     bool total_blocks_from_gpt;
 } IPodTouchFMSSState;
+/* The image store (nand-image.c) is not under test here: no state has one. */
+static int nand_image_read(void *n, unsigned chip, uint32_t page, uint8_t *record) { return -EIO; }
 static bool physical;
 static unsigned errors;
 static bool fmss_physical(void) { return physical; }

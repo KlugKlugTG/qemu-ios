@@ -1073,6 +1073,14 @@ void qemu_ios_ui_touch(int slot, int phase, double nx, double ny)
     }
 }
 
+/* Upstream's name for the ordered host input queue (qemu-ios-ui.h); the Mac extras use it. */
+void qemu_ios_ui_input_later(void (*fn)(void *), void *opaque)
+{
+    if (!ios_input_enqueue(fn, opaque, g_free)) {
+        g_free(opaque);
+    }
+}
+
 /* --- hardware buttons -------------------------------------------------- */
 
 struct ios_button {

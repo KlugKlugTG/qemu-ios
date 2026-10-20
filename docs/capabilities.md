@@ -62,9 +62,9 @@ synthetic quote/chart verification, not a live-data integration. See the
 
 `-M 'iPod-Touch,...,boot-args=amfi_allow_any_signature=1 cs_enforcement_disable=1 serial=3 debug=0x8'`
 enables XNU serial output on 7E18. The machine property is the only input (no
-`IT_BOOT_ARGS` environment), for the early iBoot handoff as well. An
-empty value disables injection; values longer than 255 bytes and changes after
-startup are rejected. Add `-v` for
+`IT_BOOT_ARGS` environment); iBoot hands it to the kernel (docs/configuration.md,
+Boot arguments). An empty value keeps iBoot's own command line; values longer than
+255 bytes and changes after startup are rejected. Add `-v` for
 verbose text on the panel; serial logging works without it. The earliest kernel
 banner precedes serial initialization, but driver startup and `BSD root:` are
 captured. (The `serial-console` check of the retired `tests/ipod/regress.py` verified those outputs; see git history at 5508b504b8.)
@@ -73,9 +73,6 @@ The local asset launcher `qemu-ios-files/ios3/run-ios3.sh --console` enables bot
 serial and verbose boot.
 
 ## September reliability fixes
-
-The September 5 continuation, frontend changes, verification evidence, and
-remaining master-plan priorities are recorded in [UI reliability](archive/ipod-ui-reliability.md) (archived).
 
 - GLES pixel format/type and alignment validation precedes host calls. PACK
   and UNPACK are independent. Query output cardinalities are explicit; compressed
@@ -178,8 +175,6 @@ machine still needs separate validation.
 - Idle wake, self-reboot, debugger attach and remote-name DNS have historical
   open notes. Those 2.1.1 observations are not a current 3.1.3 failure list;
   reproduce each before changing hardware models.
-- `docs/archive/app-compatibility.md` is an August 5 survey. Its static import/missing-slot
-  lists predate later GLES implementation and do not represent current coverage.
 - The salvage directory under `qemu-ios-files/worktree-salvage-2026-08-03` holds
   old uncommitted experiments. Preserve it as evidence; do not blindly apply
   those diffs over subsequent fixes.

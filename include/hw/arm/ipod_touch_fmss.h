@@ -9,6 +9,7 @@
 #include "hw/core/sysbus.h"
 #include "hw/core/hw-error.h"
 #include "hw/core/irq.h"
+#include "hw/arm/nand-image.h"
 
 bool ipod_touch_fmss_io_failed(void);
 
@@ -26,6 +27,9 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPodTouchFMSSState, IPOD_TOUCH_FMSS)
 #define FMSS__CS_IRQ              0xC0C
 #define FMSS__CS_IRQMASK          0xC10
 #define FMSS__CS_BUF_RST_OK       0xC64
+#define FMSS_CS_STATUS            0xC30
+#define FMSS_STATUS_DONE          0x1         /* what every completed operation reported before */
+#define FMSS_STATUS_CLEAN         (1u << 29)  /* the pages read were erased */
 #define FMSS_CINFO_TARGET_ADDR    0xD08
 #define FMSS_PAGES_IN_ADDR        0xD0C
 #define FMSS_CS_BUF_ADDR          0xD10
@@ -72,8 +76,12 @@ typedef struct IPodTouchFMSSState
     uint32_t reg_script_scratch_d3c; /* Sequencer-initialized result accumulator. */
     uint32_t reg_script_scratch_d7c; /* Saved sequencer auxiliary result. */
     uint32_t reg_script_csgenr15; /* Sequencer-owned chunk-loop state. */
+    uint32_t reg_cs_status;       /* CSSTATUS (0xC30) of the last program run. */
+    bool read_clean;              /* the read moved before the next run found only erased pages */
     char *nand_path;
     char *nand_overlay;   /* writable COW overlay dir, or NULL to discard writes */
+    /* nand_path as a NAND image store (nand-image.h), written in place: no overlay, no packed base. */
+    NANDImage *image;
 
     /*
      * Packed base image (see imgtools/pack_nand.py), mapped once at realize.

@@ -94,6 +94,7 @@ typedef struct A4Board {
     uint64_t dram_size;                  /* also mirrored right above itself (iBoot) */
     uint32_t chipid[2];                  /* ChipID fuse words 0-1 */
     uint8_t board_id;                    /* PMGR POWER_ID[23:16] */
+    const uint8_t *product_id;           /* /product product-id (20 bytes) as iBoot fills it; NULL: left zero */
     /* Panel: scan-out size, the DSI ID read, lanes. */
     uint16_t width, height;
     uint32_t panel_id;
@@ -107,10 +108,9 @@ typedef struct A4Board {
     int pwroff_watch_ms;                 /* request to halt, before the warning; 0 = 25 s */
     /* I2C slaves in creation order (that order is the snapshot's). */
     A4I2CDevice i2c[10];
-    bool accel_flipped;                  /* LIS331 mounted turned 180 degrees about X */
-    const char *accel_mount;             /* else the LIS model's "mount" axes (its DT orientation, inverted) */
+    const char *accel_dt;                /* the DT accelerometer's "orientation" (ios_dt_mount) */
     uint8_t compass_orientation;         /* the AK8973 model's orientation (the DT compass node's encoding) */
-    const char *gyro_mount;              /* the L3G4200D model's "mount" (its DT orientation, inverted) */
+    const char *gyro_dt;                 /* the DT gyro's "orientation" (ios_dt_mount) */
     uint32_t mt_tx_fifo;                 /* multitouch SPI TX FIFO bytes (its firmware is one burst); 0 = default */
     int8_t bt_uart;                      /* BCM4329 HCI, nothing attached */
     int8_t gauge_uart;                   /* bq27545 HDQ gas gauge; -1 = none */
@@ -202,15 +202,11 @@ static const A4Board a4_k48 = {
         { 0, 0x39, TYPE_CD3272MIKEY },
         /* I2C2: LIS331DLH accelerometer and TSL2581 light sensor. */
         { 2, 0x19, TYPE_LIS302DL },
-        { 2, 0x39, TYPE_S5L8930_TSL2581 },
+        { 2, 0x39, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
     },
-    /* On the iPad the LIS331 sits turned 180 degrees about X relative to
-     * the iPod's mounting: the iPod vectors read with Y (and Z) negated.
-     * Without this, "portrait" (1) read as upside down (SpringBoard's
-     * interface orientation 2) and portrait-only iPhone apps drew
-     * upside down; checked against springboardservices: upright reads 1
-     * and a clockwise turn 4, then 2, then 3, as on hardware. */
-    .accel_flipped = true,
+    /* Read without it, "portrait" (1) was upside down (SpringBoard's interface orientation 2); checked against
+     * springboardservices: upright reads 1 and a clockwise turn 4, then 2, then 3, as on hardware. */
+    .accel_dt = "0100000000ff000000000100",
     .bt_uart = 3,                        /* uart3/bluetooth,n88 */
     .gauge_uart = 5,
     .swi_iset = 1,
@@ -253,13 +249,11 @@ static const A4Board a4_n81 = {
         /* CS42L59 (audio0): the same MAP register file the CS42L61 driver saw. */
         { 0, 0x4a, TYPE_CS42L59 },
         { 2, 0x19, TYPE_LIS302DL },
-        { 2, 0x49, TYPE_S5L8930_TSL2581 },
+        { 2, 0x49, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
         { 2, 0x68, TYPE_S5L8930_L3G4200D, 0x21, 0x05 },   /* gyro,ap3gdl: INT1, INT2 */
     },
-    /* DT accelerometer orientation rows (0,-1,0) (-1,0,0) (0,0,1): x reads -y, y reads -x. */
-    .accel_mount = "-2,-1,3",
-    /* DT gyro orientation rows (0,-1,0) (-1,0,0) (0,0,-1): x reads -y, y reads -x, z reads -z. */
-    .gyro_mount = "-2,-1,-3",
+    .accel_dt = "00ff0000ff00000000000100",
+    .gyro_dt = "00ff0000ff0000000000ff00",
     .bt_uart = 1,                            /* uart1/bluetooth,n88 */
     .gauge_uart = -1,
     .swi_iset = 3,
@@ -267,6 +261,12 @@ static const A4Board a4_n81 = {
     /* n81.bin in the 8C148 rootfs: 4.221.38.1, Wed 2010-10-13 15:39:39 */
     .wifi_fw_version = "wl0: Oct 13 2010 15:39:39 version 4.221.38.1",
     .wifi_mac = { 0x02, 0x00, 0x00, 0x81, 0x00, 0x01 },  /* synthetic, locally administered */
+};
+
+/* The iPhone 4's product-id, as iBoot for n90ap carries it (10B329 and 11D257, just ahead of "DEVICEINFOBBT"). */
+static const uint8_t a4_n90_product_id[20] = {
+    0x1e, 0xdd, 0x21, 0x60, 0x59, 0x20, 0x2d, 0x7c, 0xf2, 0x6c,
+    0x0e, 0x50, 0x98, 0x97, 0x7a, 0x6c, 0xf5, 0x44, 0x36, 0xd9,
 };
 
 /*
@@ -281,6 +281,7 @@ static const A4Board a4_n90 = {
     .dram_size = 0x20000000,
     .chipid = { 0x31800387, 0x80758000 },    /* same die as K48 */
     .board_id = 0x00,
+    .product_id = a4_n90_product_id,
     .width = 640, .height = 960,
     .panel_id = 0x0969e5a1,                  /* ponytail: K48's, as N81's */
     .dsi_lanes = 4,
@@ -304,12 +305,8 @@ static const A4Board a4_n90 = {
         { 2, 0x19, TYPE_LIS302DL },
         { 2, 0x68, TYPE_S5L8930_L3G4200D, 0x21, 0x05 },   /* gyro,ap3gdl: INT1, INT2 */
     },
-    /* DT accelerometer orientation rows (0,1,0) (-1,0,0) (0,0,-1): x reads -y, y reads x (its transpose), and
-     * z reads z. The DT's z row would make the mount a mirror image, which no part on a board can be; the
-     * iPad's DT (x, -y, z) is the same mirror, and its LIS331 reads -z (accel_flipped). With -z here the
-     * guest took face up for face down: CoreLocation's heading came out mirrored face up only. */
-    .accel_mount = "-2,1,3",
-    .gyro_mount = "1,2,3",                   /* DT gyro orientation: identity */
+    .accel_dt = "00010000ff0000000000ff00",
+    .gyro_dt = "010000000001000000000100",
     .bt_uart = 3,
     .gauge_uart = 5,
     .swi_iset = 3,
@@ -349,6 +346,7 @@ struct IPad1MachineState {
     DeviceState *pmu;
     DeviceState *cdma;
     DeviceState *ltc;                    /* charger: USB cable level */
+    DeviceState *codec;                  /* audio0 on i2s0: its LRCLK is i2s0's while i2s0 is the slave */
     synopsys_usb_state *usb_otg;
     IPodTouchMultitouchState *mt;
     char *kboot_path;
@@ -469,7 +467,7 @@ static void ipad1_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
     qemu_call_t q;
     int32_t err = 0;
 
-    if (cpu_memory_rw_debug(cs, value, (uint8_t *)&q, sizeof(q), 0)) {
+    if (qemu_call_rw(cs, value, &q, false)) {
         return;
     }
     switch (q.call_number) {
@@ -509,7 +507,7 @@ static void ipad1_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
         }
     }
     q.error = err;
-    cpu_memory_rw_debug(cs, value, (uint8_t *)&q, sizeof(q), 1);
+    qemu_call_rw(cs, value, &q, true);
 }
 
 static const ARMCPRegInfo ipad1_cp_reginfo[] = {
@@ -796,6 +794,40 @@ static void ipad1_cpu_reset(void *opaque)
                    &(A4DTEdit){ "gyro", "gyro-sensitivity-calibration", cal, sizeof(cal) });
         a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
                    &(A4DTEdit){ "accelerometer", "accel-sensitivity-calibration", cal, sizeof(cal) });
+    }
+    /*
+     * iBoot fills /product product-id too (6.0 on reserves it zeroed): the
+     * device type MobileGestalt's MGIsDeviceOfType compares. Left zero, 7.x
+     * CoreMotion places the device on no platform and so gives it no gyro
+     * (isGyroAvailable 0), and CoreLocation's orientation detector, which on a
+     * gyro device needs one, never starts ("No gyro; not detecting
+     * orientation!"): backboardd's device orientation stops following the
+     * accelerometer and apps never turn.
+     */
+    if (s->board->product_id) {
+        a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
+                   &(A4DTEdit){ "product", "product-id", s->board->product_id, 20 });
+    }
+    /*
+     * The USB keyboard's EHCI, up next to device mode (docs/ipad1/usb-keyboard.md).
+     * 4.3-5.1.1 DTs give usb-ehci publish-criteria 0xc: AppleEmbeddedUSBArbitrator's
+     * updatePublishedNubs publishes a child whose criteria meet its mask, and the
+     * mask has 0x8 while usb-complex has hsic-enabled (which kboot adds), so the
+     * EHCI is up from start. 6.0 dropped that bit (0x4: host mode only, as with a
+     * Camera Connection Kit) and gave the root port a usb-ehci-port1 node with
+     * port-type 2, a dock port left unpowered (PORTSC PP cleared in the middle of
+     * the first reset) unless the cable is a host-side one, so 6.x and 7.x never
+     * enumerated the keyboard. The 5.x criteria and port-type 0 (the port's other
+     * valid type, powered as a built-in port) bring them in line; DTs without the
+     * port node or the property walk past.
+     */
+    {
+        static const uint8_t usb_criteria[4] = { 0xc }, usb_port_type[4] = { 0 };
+
+        a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
+                   &(A4DTEdit){ "usb-ehci", "publish-criteria", usb_criteria, 4 });
+        a4_dt_edit((uint8_t *)data, image_len, load_pa, bootargs_pa,
+                   &(A4DTEdit){ "usb-ehci-port1", "port-type", usb_port_type, 4 });
     }
     if (address_space_write(&address_space_memory, load_pa,
                             MEMTXATTRS_UNSPECIFIED, data, image_len) != MEMTX_OK) {
@@ -1137,6 +1169,9 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
             continue;
         }
         slave = i2c_slave_new(d->type, d->addr);
+        if (object_dynamic_cast(OBJECT(slave), TYPE_S5L8930_TSL2581)) {
+            object_property_add_child(OBJECT(s), "lightsensor", OBJECT(slave));   /* qom-set its lux */
+        }
         dev = DEVICE(slave);
         if (!strcmp(d->type, TYPE_LIS302DL)) {
             /*
@@ -1148,16 +1183,13 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
              * driven: nothing before userland waits on them.
              */
             qdev_prop_set_uint8(dev, "whoami", 0x32);
-            qdev_prop_set_bit(dev, "mount-flipped", s->board->accel_flipped);
-            if (s->board->accel_mount) {
-                qdev_prop_set_string(dev, "mount", s->board->accel_mount);
-            }
+            qdev_prop_set_string(dev, "dt-orientation", s->board->accel_dt);
         }
         if (!strcmp(d->type, TYPE_S5L8930_AK8973)) {
             qdev_prop_set_uint8(dev, "orientation", s->board->compass_orientation);
         }
         if (!strcmp(d->type, TYPE_S5L8930_L3G4200D)) {
-            qdev_prop_set_string(dev, "mount", s->board->gyro_mount);
+            qdev_prop_set_string(dev, "dt-orientation", s->board->gyro_dt);
             if (s->accel) {
                 /* the gyro sees each attitude change as a turn (created after the accelerometer) */
                 s->accel->motion = true;
@@ -1166,7 +1198,7 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
         if (!strcmp(d->type, TYPE_S5L8930_D1815)) {
             /* the PMU's clock and the agent's time sync agree on a pinned date */
             qdev_prop_set_uint64(dev, "rtc-epoch", s->rtc_epoch);
-            ipod_agent_set_clock_offset(s->agent, s->rtc_epoch ? (int64_t)s->rtc_epoch - time(NULL) : 0);
+            ipod_agent_set_clock_offset(s->agent, s->rtc_epoch ? (int64_t)s->rtc_epoch - ipod_agent_rtc_now() : 0);
         }
         i2c_slave_realize_and_unref(slave, bus, &error_fatal);
         if (d->irq2_pin) {
@@ -1184,6 +1216,8 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
                 qdev_connect_gpio_out_named(dev, "ap-power", 0,
                                             qemu_allocate_irq(ipad1_ap_power, s, 0));
             }
+        } else if (object_dynamic_cast(OBJECT(dev), TYPE_CS42L58)) {   /* or the CS42L59 */
+            s->codec = dev;
         } else if (!strcmp(d->type, TYPE_S5L8930_LTC4099)) {
             s->ltc = dev;
             s5l8930_ltc4099_set_usb(dev, s->usb_cable);
@@ -1195,7 +1229,7 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
             object_property_add_alias(machine, "compass-heading", OBJECT(dev), "heading");
         } else if (!strcmp(d->type, TYPE_LIS302DL)) {
             s->accel = LIS302DL(dev);
-            lis302dl_apply_orientation(s->accel, 1);   /* init ran before mount-flipped */
+            lis302dl_apply_orientation(s->accel, 1);   /* init ran before the mount was set */
             if (s->compass) {
                 s5l8930_ak8973_set_accel(s->compass, s->accel);
             }
@@ -1754,11 +1788,17 @@ static void ipad1_init(MachineState *machine)
      * I2S0-2. i2s0 carries the CS42L61 codec's PCM from CDMA channel 0x1a to
      * the host audio backend; i2s1 (voice) and i2s2 (baseband) are register
      * files whose FIFO data is dropped. The CDMA model paces all three.
+     * The codec's LRCLK goes to i2s0, which follows it while its own TX
+     * config makes it the slave (the iPod touch 4's CS42L59 masters the
+     * clock, the iPad's and the iPhone 4's port does: hw/arm/s5l8930_i2s.c).
      */
     for (i = 0; i < 3; i++) {
         dev = qdev_new(TYPE_S5L8930_I2S);
         qdev_prop_set_bit(dev, "audio-out", i == 0);
         qdev_prop_set_uint8(dev, "port", i);
+        if (i == 0 && s->codec) {
+            qdev_connect_clock_in(dev, "lrclk", qdev_get_clock_out(s->codec, "lrclk"));
+        }
         sbd = SYS_BUS_DEVICE(dev);
         sysbus_realize_and_unref(sbd, &error_fatal);
         sysbus_mmio_map(sbd, 0, S5L8930_I2S_BASE(i));

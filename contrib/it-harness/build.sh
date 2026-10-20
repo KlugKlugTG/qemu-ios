@@ -14,6 +14,9 @@ command -v ldid >/dev/null || { echo 'ldid is required for an installable IPA' >
 command -v ffmpeg >/dev/null || { echo 'ffmpeg is required for the bundled fixtures' >&2; exit 1; }
 APP="$OUT/Payload/Harness.app"
 mkdir -p "$APP"
+# A legacy link (2.x dyld refuses LC_DYLD_INFO_ONLY; r9 kept for 2.x's thread pointer) and MinimumOSVersion 2.0, so
+# sessions single installs it on iPhone OS 2.x as well; it launches from 2.2 (2.1 has no AVFoundation, which it opens).
+export LEGACY_LINK=1
 cc6 "$HERE/harness.c" "$OUT/harness.o" -idirafter "$(xcrun clang -print-resource-dir)/include" \
     -Wall -Wextra -Wno-unused-function -Wno-unused-parameter -Wno-cast-function-type-mismatch
 link6 -execute "$APP/Harness" "$OUT/harness.o"
@@ -64,7 +67,7 @@ cat > "$APP/Info.plist" <<'PLIST'
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>MinimumOSVersion</key>
-	<string>3.1</string>
+	<string>2.0</string>
 	<key>UIStatusBarHidden</key>
 	<false/>
 </dict>

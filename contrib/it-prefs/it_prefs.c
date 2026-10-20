@@ -431,18 +431,20 @@ static long uptime(void)
  * kCFPreferencesCurrentUser). CommCenter itself sets it false whenever it sees a new SIM (an ICCID other
  * than the com.apple.commcenter ICCID it stored), so this follows the same rule: for each stored ICCID this
  * job has not handled yet (the com.qemu.it-prefs RoamingSetForICCID marker), Data Roaming goes on, and the
- * user's later choice for that SIM stands. CommCenter holds the switch in memory (Settings changes it through
- * CommCenter), so CommCenter is unloaded around the write and loaded again.
+ * user's later choice for that SIM stands. CommCenter holds the switch in memory, so it is set the way
+ * Settings sets it, through CommCenter (CoreTelephony's CTRegistrationSetInternationalDataAccessStatus), which
+ * stores it too; CTRegistrationGetInternationalDataAccessStatus reads it back.
  *
- * That reload switches the modem off (+CPWROFF) and, with no packet data flowing to show it gone, CommCenter
- * takes ~30 s to bring it back: no calls or SMS meanwhile. So it happens only early in the boot, while the
- * device is still coming up: the ICCID is waited for until ROAMING_BY seconds after boot, and if CommCenter
- * has not stored one by then (4.2.1 often stores it only from the second boot with a SIM), nothing is done now
- * and the next boot, whose CommCenter stores it at once, does it. The old version waited 30 s after Wi-Fi came
- * up and then reloaded anyway, ~60 s into a first boot, taking calls and SMS away for half a minute after the
- * device was in use.
+ * A firmware without that call gets the old way: CommCenter unloaded around the file write and loaded again.
+ * That reload costs a baseband reset, as it would on the hardware: the stopping CommCenter switches the modem
+ * off (+CPWROFF, then pings until it stops answering), and the new one assumes the modem the kernel powered at
+ * boot and pings it in bypass at once; with no SRDY the kernel's SRDY timeout is fatal (kASMFatalErrorSPI, a
+ * CSI state dump) and CommCenter recovers by resetting the baseband. So either way it happens only early in
+ * the boot: the ICCID is waited for until ROAMING_BY seconds after boot, and if CommCenter has not stored one
+ * by then (4.2.1 often stores it only from the second boot with a SIM), the next boot does it.
  */
-#define ROAMING_BY 40   /* seconds since boot: later, the reload would take the modem from a device in use */
+#define ROAMING_BY 40   /* seconds since boot: later, a reload would take the modem from a device in use */
+#define CORETELEPHONY "/System/Library/Frameworks/CoreTelephony.framework/CoreTelephony"
 
 static int roaming_step(int write)
 {
@@ -469,8 +471,10 @@ static int roaming_step(int write)
         sleep(5);       /* CommCenter's own new-SIM reset of the switch is written just after the ICCID */
         return 1;
     }
-    set(str(ROAMING), *yes, cc);
-    say(ROAMING, sync(cc) ? " = true (Data Roaming on for this SIM)" : " not saved: CFPreferencesAppSynchronize failed", "");
+    if (write == 1) {           /* 2: CommCenter took it and stored it itself */
+        set(str(ROAMING), *yes, cc);
+        say(ROAMING, sync(cc) ? " = true (Data Roaming on for this SIM)" : " not saved: CFPreferencesAppSynchronize failed", "");
+    }
     set(marker, iccid, mine);
     sync(mine);
     return 0;
@@ -486,10 +490,28 @@ static int as_wireless(int write)
     return (status >> 8) & 0xff;
 }
 
+/* Data Roaming on through CommCenter, as Settings turns it on; 1 if CommCenter then says it is on. */
+static int roaming_through_commcenter(void)
+{
+    void *ct = dlopen(CORETELEPHONY, 1);
+    void (*on)(unsigned char) = ct ? dlsym(ct, "CTRegistrationSetInternationalDataAccessStatus") : 0;
+    unsigned char (*is_on)(void) = ct ? dlsym(ct, "CTRegistrationGetInternationalDataAccessStatus") : 0;
+
+    if (!on || !is_on)
+        return 0;
+    on(1);
+    return is_on() != 0;
+}
+
 static void roaming(void)
 {
     if (!file_has(COMMCENTER, ROAMING) || !as_wireless(0))
         return;
+    if (roaming_through_commcenter()) {
+        say(ROAMING, " = true through CommCenter (Data Roaming on for this SIM)", "");
+        as_wireless(2);
+        return;
+    }
     if (launchctl("unload", COMMCENTER_JOB))
         return;
     as_wireless(1);
@@ -550,7 +572,7 @@ int main(void)
     }
     retire_baked();
     as_mobile(2, jobs, n);          /* first: the seal boot halts 40 s in, and Wi-Fi can take longer */
-    roaming();                      /* early, before Wi-Fi: its CommCenter reload must come before the device is in use */
+    roaming();                      /* early, before Wi-Fi: a fallback CommCenter reload must come before the device is in use */
     for (j = 0; j < n && !streq(jobs[j], LOCATIOND_JOB); j++)
         ;
     if (j < n && wifi_up(120))

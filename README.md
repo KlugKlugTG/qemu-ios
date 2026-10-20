@@ -41,7 +41,6 @@ is the wire contract).
 | `contrib/guest-package` | `mkpkg.c` and `VERSION`: the versioned guest-tools package format the loader installs at boot |
 | `contrib/macos-app` | `make-dylib-macos.sh` (the app's dylib), `entitlements.plist` (the app's helper entitlements), `ipod-helper.c` (the app's `ipa-chmod`) |
 | `imgtools/lldb` | lldb scripting for guest debugging (`xnu.py`). Devices are made by LightTouchMac's Swift FirmwareKit: `firmwarekit create --catalog CATALOG --id BOARD-BUILD --ipsw IPSW --out OUT` (CATALOG: LightTouchMac's `LightTouchMac/Resources/firmware-catalog.json`; k48ap and 4.x n72ap also take `--helper` with the LightTouchDevice executable) |
-| `manifests/` | One declared-inputs manifest per build (`ipad1-7B367/7B500/8C148`, `ipod2g-5F138/7E18/8C148`) |
 | `tests/slice/`, `tests/ipod/`, `tests/ipad1/`, `tests/guest-package/` | The gates below |
 | `scripts/ccninja`, `scripts/configure-patched-ffmpeg` | Build helpers |
 | `docs/` | Ours are the `.md` files; the `.rst`/`.txt` tree is upstream QEMU's. See "Documentation" |
@@ -118,7 +117,7 @@ and `scripts/vendor` checks the staged tree against `manifest.json`; a pin bump 
 | `docs/networking.md`, `docs/stock-service-protocol.md`, `docs/app-ledger.md` | Guest networking and the built-in proxy; the Weather/Stocks gateway; the iPod app ledger |
 | `contrib/*/README.md`, `imgtools/README-appsync.md` | Per-tool notes |
 | `docs/research/` | Research that preceded the code (the A4 gap/reference reports, the 7B500 userland and GL notes, the Bluetooth keyboard scoping, the iPod media investigation, the run-on-an-iPhone study). Each file starts with what superseded it |
-| `docs/archive/` | Superseded plans and dated logs: the iPad milestone plan, the Sept-5 and plan-progress trackers, the packaging assessment, the August app survey, the iPod backport and guest-services plans |
+| `docs/archive/` | Superseded plans still cited from code: the iPad milestone plan and the guest-services plan |
 
 `docs/ipad1/*.tsv` and `docs/ipod/*.tsv` are GL dispatch tables, build inputs `contrib/export-guest-artifacts.sh`
 stages for LightTouchMac (moving them out of `docs/` is on another track). `docs/ipad1/screens/`
