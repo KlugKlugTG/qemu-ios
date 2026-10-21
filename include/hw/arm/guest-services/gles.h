@@ -402,7 +402,7 @@ int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a);
 int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write);
 /* Guest memory through the host pointers in the vCPU's TLB, as its own loads and stores reach it. False, having
  * possibly copied part, when a page needs the full path (not plain RAM in the TLB, unmapped, not permitted). */
-bool guest_rw_ram(CPUState *cpu, vaddr va, uint8_t *buf, size_t len, bool write);
+bool guest_rw_ram(CPUState *cpu, uint64_t va, uint8_t *buf, size_t len, bool write);
 bool gles_guest_fault_pending(void);
 void qc_gles_dump_stats(void);
 int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
