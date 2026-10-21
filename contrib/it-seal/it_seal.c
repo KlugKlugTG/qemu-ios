@@ -16,10 +16,12 @@
  * The seal also waits out the first boot's data migration (DataMigrator, while
  * com.apple.DataMigration.plist exists; 6.x moves the preinstalled assets in, then
  * writes Assets/preinstall-is-complete.plist): a halt during it leaves every boot of
- * the base to start it over, behind the Apple logo's progress bar. 40 s covers it on a fast Mac; a slower host (Linux, a phone) takes
- * minutes. The wait is capped so a release that keeps the plist still seals, and is
- * followed by the settle SpringBoard's first launch would have had: a base sealed
- * before it spends every first boot behind the progress bar for a further 90 s.
+ * the base to start it over, behind the Apple logo's progress bar. Then SpringBoard's
+ * first launch lays out the Home screen (IconState.plist): a base sealed before it
+ * spends every first boot behind the progress bar for a further 90 s. The seal halts
+ * a few seconds after both, instead of after fixed sleeps (40 s, then 60 s past the
+ * migration): n81ap 6.1.6 on Linux had both done 94 s in, and halted at 154 s. Each
+ * wait is capped so a release that keeps the plist, or writes no IconState, still seals.
  */
 
 extern unsigned int sleep(unsigned int);
@@ -38,7 +40,9 @@ extern void _exit(int);
 #define MIGRATION "/private/var/mobile/Library/Preferences/com.apple.DataMigration.plist"
 #define PREINSTALLED "/System/Library/PreinstalledAssets"
 #define PREINSTALL_DONE "/private/var/mobile/Library/Assets/preinstall-is-complete.plist"
-#define MIGRATION_WAIT 600          /* seconds, at most, past the settle */
+#define ICON_STATE "/private/var/mobile/Library/SpringBoard/IconState.plist"
+#define MIGRATION_WAIT 600          /* seconds, at most, for the migration */
+#define HOME_WAIT 60                /* seconds, at most, past it for the Home screen's layout */
 
 /* The migration runs, or is still to come: on a slow host it_seal can get here before DataMigrator has
  * written its plist, so a system with preinstalled assets also waits for their completion marker. */
@@ -52,15 +56,15 @@ int main(void)
 {
     static const char msg[] = "it_seal: halting to seal the NAND store\n";
 
-    sleep(40);                      /* launchd's jobs up, SpringBoard settled */
     if (unlink("/System/Library/LaunchDaemons/com.qemu.it-seal.plist") != 0 &&
         open("/private/var/.it_sealed", O_WRONLY | O_CREAT | O_EXCL, 0644) < 0)
         _exit(0);                   /* read-only root, already sealed */
     int waited = 0;
-    for (; waited < MIGRATION_WAIT && migrating(); waited += 5)
-        sleep(5);
-    if (waited)
-        sleep(60);                  /* SpringBoard's first launch after the migration, settled too */
+    for (; waited < MIGRATION_WAIT && migrating(); waited += 2)
+        sleep(2);
+    for (waited = 0; waited < HOME_WAIT && access(ICON_STATE, 0) != 0; waited += 2)
+        sleep(2);
+    sleep(5);                       /* the writes behind it settled */
     unlink("/usr/local/bin/it_seal");
     sync();
     write(2, msg, sizeof(msg) - 1);
