@@ -75,12 +75,14 @@ int main(void)
         return 1;
     }
 
-    /* The FTL and the effaceable driver come up after the RAM-disk root. */
+    /* The FTL and the effaceable driver come up after the RAM-disk root. On a new flash the FTL first
+     * rebuilds its index from every page ("Performing full NAND R/O restore"): a few seconds on a Mac,
+     * minutes on a phone, so wait up to 10 (firmwarekit's one-shot timeout is 15). */
     io_object_t svc = 0, conn = 0;
-    for (i = 0; i < 120 && (stat(DATA_DEV, &st) || !(svc = GetService(0, Matching("AppleEffaceableStorage")))); i++)
+    for (i = 0; i < 600 && (stat(DATA_DEV, &st) || !(svc = GetService(0, Matching("AppleEffaceableStorage")))); i++)
         sleep(1);
     if (!svc || stat(DATA_DEV, &st)) {
-        halt(svc ? "FAILED: no " DATA_DEV : "FAILED: no AppleEffaceableStorage");
+        halt(stat(DATA_DEV, &st) ? "FAILED: no " DATA_DEV : "FAILED: no AppleEffaceableStorage");
         return 1;
     }
     kern_return_t kr = Open(svc, mach_task_self_, 0, &conn);
