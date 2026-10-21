@@ -46,6 +46,7 @@
 #include "qemu/error-report.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
+#include "windows-memory.c.inc"
 
 OBJECT_DECLARE_SIMPLE_TYPE(S5L8930IOPState, S5L8930_IOP)
 
