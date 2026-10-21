@@ -22,6 +22,10 @@
  * a few seconds after both, instead of after fixed sleeps (40 s, then 60 s past the
  * migration): n81ap 6.1.6 on Linux had both done 94 s in, and halted at 154 s. Each
  * wait is capped so a release that keeps the plist, or writes no IconState, still seals.
+ * A system with a DataMigrator job migrates on this boot, before SpringBoard's first launch:
+ * there the Home screen's layout is the sign the migration is over, and its wait is as long
+ * as the migration's. DataMigrator can finish before it_seal starts, or start after it (and
+ * FirmwareKit now installs the preinstalled assets itself), so its plist alone tells neither.
  */
 
 extern unsigned int sleep(unsigned int);
@@ -41,6 +45,7 @@ extern void _exit(int);
 #define PREINSTALLED "/System/Library/PreinstalledAssets"
 #define PREINSTALL_DONE "/private/var/mobile/Library/Assets/preinstall-is-complete.plist"
 #define ICON_STATE "/private/var/mobile/Library/SpringBoard/IconState.plist"
+#define MIGRATOR_JOB "/System/Library/LaunchDaemons/com.apple.datamigrator.plist"
 #define MIGRATION_WAIT 600          /* seconds, at most, for the migration */
 #define HOME_WAIT 60                /* seconds, at most, past it for the Home screen's layout */
 
@@ -62,7 +67,8 @@ int main(void)
     int waited = 0;
     for (; waited < MIGRATION_WAIT && migrating(); waited += 2)
         sleep(2);
-    for (waited = 0; waited < HOME_WAIT && access(ICON_STATE, 0) != 0; waited += 2)
+    int home = access(MIGRATOR_JOB, 0) == 0 ? MIGRATION_WAIT : HOME_WAIT;
+    for (waited = 0; waited < home && (migrating() || access(ICON_STATE, 0) != 0); waited += 2)
         sleep(2);
     sleep(5);                       /* the writes behind it settled */
     unlink("/usr/local/bin/it_seal");
