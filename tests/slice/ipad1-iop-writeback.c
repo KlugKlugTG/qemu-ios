@@ -40,6 +40,17 @@ static int blk_flush(BlockBackend *p) {
     if (p == page_backend) { ++page_flushes; }
     return 0;
 }
+/* The direct page descriptors (LT_NAND_DIRECT): synced after the BlockBackend flush, before ownership. */
+static int sync_fd = -1, sync_fail;
+static unsigned fd_syncs;
+static int qemu_fdatasync(int fd) {
+    assert(fd == sync_fd && page_flushes == 1 && bitmap_writes == 0);
+    ++fd_syncs;
+    if (sync_fail) { errno = EIO; return -1; }
+    return 0;
+}
+#define MS_SYNC 4
+static int msync(void *p, size_t n, int f) { assert(!"dirty[] is not mapped here"); return 0; }
 static int64_t g_get_monotonic_time(void) { return 0; }
 #define error_report(...) (++errors)
 #define info_report(...) ((void)t0, ++successes)
@@ -56,6 +67,7 @@ int main(void) {
     BlockBackend page, owner; uint8_t bitmap[8];
     page_backend = &page; bitmap_backend = &owner;
     S5L8930IOPState s = {0};
+    for (int b = 0; b < NAND_BUSES; b++) for (int c = 0; c < NAND_CES; c++) s.chip_fd[b][c] = s.ovl_fd[b][c] = -1;
     s.pages_per_ce = 64; s.page_stride = 1;
     s.overlay_dir = "overlay";
     s.ovl[0][0] = &page; s.dirty[0][0] = bitmap; s.ownership[0][0] = &owner; s.ownership_pending[0][0] = true;
@@ -75,5 +87,14 @@ int main(void) {
         iop_vm_state(&s, false, 0);
         assert(qemu_ios_ui_storage_failed());
     }
+    /* A direct descriptor is synced before ownership is published; its failure latches like a flush's. */
+    calls = errors = successes = page_flushes = bitmap_writes = 0; iop_storage_failed = false;
+    sync_fd = s.ovl_fd[0][0] = 7; s.ownership_pending[0][0] = true;
+    iop_vm_state(&s, false, 0);
+    assert(fd_syncs == 1 && bitmap_writes == 1 && successes == 1 && !qemu_ios_ui_storage_failed());
+    calls = errors = successes = page_flushes = bitmap_writes = 0; sync_fail = 1; s.ownership_pending[0][0] = true;
+    iop_vm_state(&s, false, 0);
+    assert(fd_syncs == 2 && bitmap_writes == 0 && successes == 0 && errors == 2 && qemu_ios_ui_storage_failed());
+    assert(s.ownership_pending[0][0]);
     puts("PASS: IOP page/bitmap flush failures reach GUI; failed session remains failed");
 }
