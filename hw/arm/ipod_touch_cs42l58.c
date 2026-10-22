@@ -30,6 +30,26 @@ static bool codec_trace(void)
 #define CS42L59_REG_PWRCTL 0x06
 #define CS42L59_REG_STATUS 0x38
 #define CS42L59_PDN_DONE   0x08
+/*
+ * CS42L59 headphone jack (n81, opt-in LT_HEADPHONES=1). 10B500's
+ * AppleEmbeddedAudio::updateHP reads 0x33 bit 7 as "plugged", then
+ * AppleCSCodecMikey starts headset detection: 0x30 <- 0x9e, and 0x37 <- 0xe7
+ * unmasks the type-detect interrupt (status bits 3-4). When that never comes
+ * the driver gives up and the jack stays unreported. A plain headphone (no mic,
+ * no button) is reported by 0x34 bit 0; the status is 0x3a bits 3-4 (read
+ * clears), and the interrupt handler hands "headphones" to AppleEmbeddedAudio,
+ * which routes to Headphones and runs no speaker-protection DSP.
+ * ponytail: inferred from the driver's handler (0x80bde18c) and from tracing
+ * its path to AppleEmbeddedAudio, not from a datasheet.
+ */
+#define CS42L59_REG_DETECT 0x30
+#define CS42L59_REG_JACK   0x33
+#define CS42L59_JACK_PLUG  0x80
+#define CS42L59_REG_COMP   0x34
+#define CS42L59_COMP_NOMIC 0x01
+#define CS42L59_REG_MASK2  0x37
+#define CS42L59_REG_INT3   0x3a
+#define CS42L59_INT_TYPE   0x18
 
 static unsigned cs42l58_sample_rate(uint8_t control)
 {
@@ -78,6 +98,17 @@ static uint8_t cs42l58_recv(I2CSlave *i2c)
         res |= CS42L59_PDN_DONE;
     }
 
+    if (s->hp) {
+        if (reg == CS42L59_REG_JACK) {
+            res |= CS42L59_JACK_PLUG;
+        } else if (reg == CS42L59_REG_COMP) {
+            res |= CS42L59_COMP_NOMIC;
+        } else if (reg == CS42L59_REG_INT3) {
+            res = s->hp_status;
+            s->hp_status = 0;
+            qemu_set_irq(s->irq, 0);
+        }
+    }
     if (codec_trace()) {
         TRACE_PRINTF(trace_cs42l58_log, "CODEC R %02x -> %02x\n", reg, res);
     }
@@ -103,6 +134,12 @@ static int cs42l58_send(I2CSlave *i2c, uint8_t data)
     }
     if ((s->cmd & 0x7f) != CS42L58_REG_CHIPID) {
         s->regs[s->cmd & 0x7f] = data;
+        /* detection running and the type interrupt unmasked: report it done */
+        if (s->hp && (s->cmd & 0x7f) == CS42L59_REG_MASK2 &&
+            (s->regs[CS42L59_REG_DETECT] & 0x80) && !(data & CS42L59_INT_TYPE)) {
+            s->hp_status |= CS42L59_INT_TYPE;
+            qemu_set_irq(s->irq, 1);
+        }
         if ((s->cmd & 0x7f) == s->rate_reg) {
             unsigned rate = cs42l58_sample_rate(data);
             if (rate) {
@@ -135,6 +172,22 @@ static void cs42l58_init(Object *obj)
     CS42L58(obj)->rate_reg = 0x05;
 }
 
+static bool cs42l59_hp_needed(void *opaque)
+{
+    return CS42L58(opaque)->hp;
+}
+
+static const VMStateDescription vmstate_cs42l59_hp = {
+    .name = "cs42l58/hp",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = cs42l59_hp_needed,
+    .fields = (const VMStateField[]) {
+        VMSTATE_UINT8(hp_status, CS42L58State),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_cs42l58 = {
     .name = TYPE_CS42L58,
     .version_id = 1,
@@ -147,6 +200,10 @@ static const VMStateDescription vmstate_cs42l58 = {
         VMSTATE_UINT8_ARRAY(regs, CS42L58State, 128),
         VMSTATE_CLOCK(lrclk, CS42L58State),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * const []) {
+        &vmstate_cs42l59_hp,
+        NULL
     },
 };
 
@@ -172,6 +229,8 @@ static const TypeInfo cs42l58_info = {
 
 static void cs42l59_init(Object *obj)
 {
+    qdev_init_gpio_out(DEVICE(obj), &CS42L58(obj)->irq, 1);
+    CS42L58(obj)->hp = getenv("LT_HEADPHONES") != NULL;
     CS42L58(obj)->pdn_status = true;
     CS42L58(obj)->rate_reg = 0x0a;
 }

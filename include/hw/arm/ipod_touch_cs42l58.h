@@ -22,6 +22,10 @@ typedef struct CS42L58State {
 	bool pdn_status;     /* CS42L59: 0x38 bit 3 reports power-down done */
 	uint8_t rate_reg;    /* the register whose low five bits select LRCLK */
 	Clock *lrclk;
+	/* CS42L59 headphone jack, LT_HEADPHONES=1 only */
+	bool hp;             /* a plain headphone is plugged in */
+	uint8_t hp_status;   /* pending interrupt status 0x3a (read clears) */
+	qemu_irq irq;        /* the codec's interrupt line, 1 = asserted */
 } CS42L58State;
 
 #endif

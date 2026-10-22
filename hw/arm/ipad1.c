@@ -247,7 +247,7 @@ static const A4Board a4_n81 = {
     .i2c = {
         { 0, 0x74, TYPE_S5L8930_D1815, 0x0d },
         /* CS42L59 (audio0): the same MAP register file the CS42L61 driver saw. */
-        { 0, 0x4a, TYPE_CS42L59 },
+        { 0, 0x4a, TYPE_CS42L59, 0x0b },
         { 2, 0x19, TYPE_LIS302DL },
         { 2, 0x49, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
         { 2, 0x68, TYPE_S5L8930_L3G4200D, 0x21, 0x05 },   /* gyro,ap3gdl: INT1, INT2 */
