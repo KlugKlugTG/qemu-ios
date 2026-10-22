@@ -407,6 +407,15 @@ static void cdma_update_irq(S5L8930CDMAState *s, int ch)
     if (!(c->ctrl & CTRL_IRQ_EN) && (!c->fifo || cdma_is_memory(s, c->fifo))) {
         en = false;
     }
+    {
+        static bool level[CDMA_CHANNELS];
+        bool on = en && (c->ctrl & (ST_DONE | ST_ERROR));
+
+        if (on && !level[ch]) {
+            s5l8930_ioprof_add(IOPROF_CDMA_IRQ, 1);
+        }
+        level[ch] = on;
+    }
     qemu_set_irq(s->irq[ch], en && (c->ctrl & (ST_DONE | ST_ERROR)));
 }
 
@@ -481,6 +490,7 @@ static void cdma_fifo_xfer(S5L8930CDMAState *s, uint32_t fifo, uint32_t width, u
 
 static void cdma_run(S5L8930CDMAState *s, int ch)
 {
+    s5l8930_ioprof_add(IOPROF_CDMA_GO, 1);
     CDMAChannel *c = &s->ch[ch];
     int ctx = CTRL_AES_CTX(c->ctrl);
     uint32_t dev = c->fifo;

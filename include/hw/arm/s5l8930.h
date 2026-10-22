@@ -82,6 +82,21 @@ void s5l8930_iop_core_stop(DeviceState *dev);
 void s5l8930_iop_core_set_iop(DeviceState *dev, DeviceState *iop);
 void s5l8930_iop_trace_rings(DeviceState *iop);
 
+/* LT_NAND_PROF=1: NAND path counters, printed by s5l8930_iop.c to stderr in 5 s blocks. */
+enum {
+    IOPROF_PREAD, IOPROF_PWRITE, IOPROF_ZERO, IOPROF_PREAD_NS, IOPROF_PWRITE_NS, IOPROF_ZERO_NS,
+    IOPROF_PG_READ, IOPROF_PG_PROG, IOPROF_ERASE, IOPROF_FMI_IRQ, IOPROF_CDMA_IRQ,
+    IOPROF_DB_AP2IOP, IOPROF_DB_IOP2AP, IOPROF_CACHECTL, IOPROF_CDMA_GO, IOPROF_N
+};
+extern bool s5l8930_ioprof_on;
+extern uint64_t s5l8930_ioprof[IOPROF_N];
+static inline void s5l8930_ioprof_add(int i, uint64_t v)
+{
+    if (unlikely(s5l8930_ioprof_on)) {
+        qatomic_set(&s5l8930_ioprof[i], qatomic_read(&s5l8930_ioprof[i]) + v);
+    }
+}
+
 static inline hwaddr s5l8930_iop_pa(hwaddr a)
 {
     return (a & 0xf0000000) == 0xc0000000 ? a - 0xc0000000 + S5L8930_DRAM_BASE : a;

@@ -89,6 +89,9 @@ static void ap_vic_tap_write(void *opaque, hwaddr off, uint64_t val, unsigned si
         s->idle_scanned = true;
         iop_core_find_idle_loop(s);
     }
+    if (off == 0x18) {
+        s5l8930_ioprof_add(IOPROF_DB_IOP2AP, 1);
+    }
     if (off == 0x18 && s->iop) {        /* SOFTINT: the firmware has answered something */
         s5l8930_iop_trace_rings(s->iop);
     }
@@ -110,6 +113,9 @@ static void vic0_tap_write(void *opaque, hwaddr off, uint64_t val, unsigned size
 {
     S5L8930IOPCoreState *s = opaque;
 
+    if (off == 0x18) {
+        s5l8930_ioprof_add(IOPROF_DB_AP2IOP, 1);
+    }
     if (off == 0x18 && s->iop) {
         s5l8930_iop_trace_rings(s->iop);
     }

@@ -199,7 +199,14 @@ static uint32_t h2fmi_status(H2FMIBus *b)
 
 static void h2fmi_update_irq(H2FMIBus *b)
 {
-    qemu_set_irq(b->irq, (h2fmi_status(b) & b->fmi[FMI_INTEN / 4]) != 0);
+    static bool level[H2FMI_BUSES];
+    bool on = (h2fmi_status(b) & b->fmi[FMI_INTEN / 4]) != 0;
+
+    if (on && !level[b->n & 1]) {
+        s5l8930_ioprof_add(IOPROF_FMI_IRQ, 1);
+    }
+    level[b->n & 1] = on;
+    qemu_set_irq(b->irq, on);
 }
 
 static int h2fmi_ce(H2FMIBus *b)

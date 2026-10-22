@@ -61,6 +61,55 @@ bool s5l8930_iop_io_failed(void)
     return qatomic_read(&iop_storage_failed);
 }
 
+bool s5l8930_ioprof_on;
+uint64_t s5l8930_ioprof[IOPROF_N];
+
+static void ioprof_tick(void)
+{
+    static const char *names[IOPROF_N] = {
+        "pread", "pwrite", "zero", "pread_us", "pwrite_us", "zero_us", "pg_read", "pg_prog", "erase",
+        "fmi_irq", "cdma_irq", "db_ap2iop", "db_iop2ap", "cachectl", "cdma_go",
+    };
+    static int64_t last;
+    static uint64_t prev[IOPROF_N];
+    int64_t now = g_get_monotonic_time();
+
+    if (!last) {
+        last = now;
+        return;
+    }
+    if (now - last < 5 * G_USEC_PER_SEC) {
+        return;
+    }
+    GString *out = g_string_new(NULL);
+    g_string_append_printf(out, "[nandprof] %.1f s:", (now - last) / 1e6);
+    for (int i = 0; i < IOPROF_N; i++) {
+        uint64_t v = qatomic_read(&s5l8930_ioprof[i]), d = v - prev[i];
+        prev[i] = v;
+        if (i == IOPROF_PREAD_NS || i == IOPROF_PWRITE_NS || i == IOPROF_ZERO_NS) {
+            d /= 1000;
+        }
+        g_string_append_printf(out, " %s %" PRIu64, names[i], d);
+    }
+    fprintf(stderr, "%s\n", out->str);
+    g_string_free(out, true);
+    last = now;
+}
+
+static int64_t ioprof_t0(void)
+{
+    return unlikely(s5l8930_ioprof_on) ? get_clock() : 0;
+}
+
+static void ioprof_done(int n, int ns, int64_t t0)
+{
+    if (unlikely(s5l8930_ioprof_on)) {
+        s5l8930_ioprof_add(n, 1);
+        s5l8930_ioprof_add(ns, get_clock() - t0);
+        ioprof_tick();
+    }
+}
+
 #ifdef DEBUG_S5L8930_IOP
 #define DPRINTF(fmt, ...) fprintf(stderr, "s5l8930_iop[%8.3f]: " fmt, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e9, ## __VA_ARGS__)
 #else
@@ -386,8 +435,11 @@ static uint32_t nand_read_page(S5L8930IOPState *s, int bus, uint32_t ce,
     }
     len = s->page_stride;
     p = g_malloc(len);
+    int64_t t0 = ioprof_t0();
     result = nand_io_error(blk_pread(blk, (int64_t)page * len, len, p, 0),
                            bus, ce, "read");
+    ioprof_done(IOPROF_PREAD, IOPROF_PREAD_NS, t0);
+    s5l8930_ioprof_add(IOPROF_PG_READ, 1);
     if (result != FMI_STATUS_OK) {
         return result;
     }
@@ -476,8 +528,11 @@ static uint32_t nand_program_page(S5L8930IOPState *s, int bus, uint32_t ce,
     }
     p = g_malloc(s->page_stride);
     old = nand_backend(s, bus, ce, page, false);
+    int64_t t0 = ioprof_t0();
     result = nand_io_error(blk_pread(old, (int64_t)page * s->page_stride,
                                     s->page_stride, p, 0), bus, ce, "read before program");
+    ioprof_done(IOPROF_PREAD, IOPROF_PREAD_NS, t0);
+    s5l8930_ioprof_add(IOPROF_PG_PROG, 1);
     if (result != FMI_STATUS_OK) {
         return result;
     }
@@ -504,8 +559,10 @@ static uint32_t nand_program_page(S5L8930IOPState *s, int bus, uint32_t ce,
             memcpy(p + s->store_page_bytes, meta, FMI_META_BYTES);
         }
     }
+    t0 = ioprof_t0();
     result = nand_io_error(blk_pwrite(blk, (int64_t)page * s->page_stride,
                                      s->page_stride, p, 0), bus, ce, "program");
+    ioprof_done(IOPROF_PWRITE, IOPROF_PWRITE_NS, t0);
     if (result == FMI_STATUS_OK && s->overlay_dir && nand_set_dirty(s, bus, ce, page)) {
         nand_publish_owners(s, bus, ce, page, page);
     }
@@ -536,9 +593,12 @@ static uint32_t nand_erase_block(S5L8930IOPState *s, int bus, uint32_t ce,
     }
     /* Both formats encode erased pages as zero; QEMU guarantees zero reads
      * whether the file backend can unmap the extent or writes zeros itself. */
+    int64_t t0 = ioprof_t0();
     result = nand_io_error(blk_pwrite_zeroes(blk, (int64_t)first * s->page_stride,
                               (int64_t)s->store_ppb * s->page_stride,
                               BDRV_REQ_MAY_UNMAP), bus, ce, "erase");
+    ioprof_done(IOPROF_ZERO, IOPROF_ZERO_NS, t0);
+    s5l8930_ioprof_add(IOPROF_ERASE, 1);
     if (result == FMI_STATUS_OK && s->overlay_dir) {
         bool fresh = false;
 
@@ -1342,6 +1402,7 @@ static void iop_ctrl_write(void *opaque, hwaddr offset, uint64_t value,
         s->self_addr = value;
         break;
     case 0x00 ... 0x3c:
+        s5l8930_ioprof_add(IOPROF_CACHECTL, 1);
         s->ctrl_regs[offset / 4] = value;
         qemu_log_mask(LOG_UNIMP, "%s: cache control 0x%04" HWADDR_PRIx " <- 0x%08" PRIx64 "\n",
                       __func__, offset, value);
@@ -1566,6 +1627,7 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
     size_t size;
     int bus, ce;
 
+    s5l8930_ioprof_on = getenv("LT_NAND_PROF") && strcmp(getenv("LT_NAND_PROF"), "0");
     if (!s->nand_dir) {
         if (s->overlay_dir) {
             error_setg(errp, "nand-overlay needs a base nand store");
