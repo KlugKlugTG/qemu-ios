@@ -724,8 +724,9 @@ void HELPER(cpsr_write)(CPUARMState *env, uint32_t val, uint32_t mask)
      * those was ~3% of the vCPU in a game.
      */
     if (!arm_psr_fast() ||
-        (changed & ~(CPSR_NZCV | CPSR_Q | CPSR_GE | CPSR_A | CPSR_I | CPSR_F))) {
-        arm_rebuild_hflags(env);
+        (changed & ~(CPSR_NZCV | CPSR_Q | CPSR_GE | CPSR_A | CPSR_I | CPSR_F |
+                     CPSR_M | CPSR_E | CPSR_IL))) {
+        arm_rebuild_hflags(env);   /* cpsr_write() has seen to M, E and IL */
     }
 }
 

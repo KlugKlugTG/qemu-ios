@@ -8253,6 +8253,7 @@ void cpsr_write(CPUARMState *env, uint32_t val, uint32_t mask,
                 CPSRWriteType write_type)
 {
     uint32_t changed_daif;
+    uint32_t old_cpsr = env->uncached_cpsr;
     bool rebuild_hflags = (write_type != CPSRWriteRaw) &&
         (mask & (CPSR_M | CPSR_E | CPSR_IL));
 
@@ -8382,6 +8383,23 @@ void cpsr_write(CPUARMState *env, uint32_t val, uint32_t mask,
     }
     mask &= ~CACHED_CPSR_BITS;
     env->uncached_cpsr = (env->uncached_cpsr & ~mask) | (val & mask);
+    if (tcg_enabled() && rebuild_hflags && arm_psr_fast()) {
+        /*
+         * Without EL2 and EL3, a mode is only an EL to hflags: switching
+         * between the PL1 modes changes nothing they hold. iOS 6's exception
+         * entry hops between modes (cps) several times to save registers.
+         * An exception return rebuilds them itself, once the PC is masked.
+         */
+        bool same_el = ((old_cpsr & CPSR_M) == ARM_CPU_MODE_USR) ==
+                       ((env->uncached_cpsr & CPSR_M) == ARM_CPU_MODE_USR);
+
+        if (write_type == CPSRWriteExceptionReturn ||
+            (same_el && !((old_cpsr ^ env->uncached_cpsr) & (CPSR_E | CPSR_IL)) &&
+             !arm_feature(env, ARM_FEATURE_EL2) && !arm_feature(env, ARM_FEATURE_EL3) &&
+             !arm_feature(env, ARM_FEATURE_M))) {
+            rebuild_hflags = false;
+        }
+    }
     if (tcg_enabled() && rebuild_hflags) {
         arm_rebuild_hflags(env);
     }
