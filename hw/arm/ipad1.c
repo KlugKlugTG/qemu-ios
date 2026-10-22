@@ -364,6 +364,7 @@ struct IPad1MachineState {
     char *usb_tcp_addr;                  /* host bridge, empty = no link */
     bool usb_cable;                      /* cable present; runtime qom-set */
     bool wifi;                           /* BCM4329 behind the IOP's SDIO ring */
+    bool headphones;                     /* a plain headphone in the jack (boards whose codec models it) */
     uint64_t rtc_epoch;                  /* rtc-epoch: the PMU clock at power-on (Unix seconds), 0 = the host's */
     bool baseband;                       /* leave the kboot DT's baseband node matchable (default off) */
     DeviceState *bb_modem;               /* the ios-baseband behind spi2 (baseband=on, radio boards) */
@@ -1204,6 +1205,12 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
                 /* the gyro sees each attitude change as a turn (created after the accelerometer) */
                 s->accel->motion = true;
             }
+        }
+        if (!strcmp(d->type, TYPE_CS42L59)) {
+            /* LT_HEADPHONES=1/0 overrides the machine option, for A/B runs */
+            const char *e = getenv("LT_HEADPHONES");
+
+            qdev_prop_set_bit(dev, "headphones", e ? strcmp(e, "0") != 0 : s->headphones);
         }
         if (!strcmp(d->type, TYPE_S5L8930_D1815)) {
             /* the PMU's clock and the agent's time sync agree on a pinned date */
@@ -2317,6 +2324,22 @@ static void ipad1_set_ring_switch(Object *obj, bool value, Error **errp)
     ipad1_apply_ring_switch(IPAD1_MACHINE(obj));
 }
 
+static bool ipad1_get_headphones(Object *obj, Error **errp)
+{
+    return IPAD1_MACHINE(obj)->headphones;
+}
+
+static void ipad1_set_headphones(Object *obj, bool value, Error **errp)
+{
+    IPad1MachineState *s = IPAD1_MACHINE(obj);
+
+    if (s->cpu) {
+        error_setg(errp, "headphones must be set before the machine starts");
+        return;
+    }
+    s->headphones = value;
+}
+
 static bool ipad1_get_wifi(Object *obj, Error **errp)
 {
     return IPAD1_MACHINE(obj)->wifi;
@@ -2536,6 +2559,10 @@ static void ipad1_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(klass, "wifi",
         "Host bridge for the soldered BCM4329 (default on). Frames go to "
         "-netdev id=wifi0, or to user networking when none is given; off leaves the card present");
+    object_class_property_add_bool(klass, "headphones", ipad1_get_headphones, ipad1_set_headphones);
+    object_class_property_set_description(klass, "headphones",
+        "Report a plain headphone plugged in, so iOS routes audio to Headphones and skips the speaker "
+        "protection DSP (default off; the n81ap only, other boards ignore it)");
     object_class_property_add_bool(klass, "gles-debug", ipad1_get_gles_debug, ipad1_set_gles_debug);
     object_class_property_set_description(klass, "gles-debug",
         "Paint what the GL bridge refuses magenta instead of black (default off; tests turn it on)");

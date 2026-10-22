@@ -193,6 +193,7 @@ void qemu_ios_snapshot_resume(void);
 #define QEMU_IOS_CAP_GYRO (1ull << 1)
 #define QEMU_IOS_CAP_MULTITOUCH (1ull << 2)
 #define QEMU_IOS_CAP_FRAME_COPY (1ull << 3)
+#define QEMU_IOS_CAP_HEADPHONES (1ull << 4)
 #define QEMU_IOS_TOUCH_CANCEL 3
 #define QEMU_IOS_MOTION_ACCEL 1u
 #define QEMU_IOS_MOTION_GYRO 2u

@@ -1,5 +1,6 @@
 #include "qemu/osdep.h"
 #include "migration/vmstate.h"
+#include "hw/core/qdev-properties.h"
 #include "hw/arm/ipod_touch_cs42l58.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
@@ -31,7 +32,7 @@ static bool codec_trace(void)
 #define CS42L59_REG_STATUS 0x38
 #define CS42L59_PDN_DONE   0x08
 /*
- * CS42L59 headphone jack (n81, opt-in LT_HEADPHONES=1). 10B500's
+ * CS42L59 headphone jack (n81, the "headphones" property, machine option headphones=on). 10B500's
  * AppleEmbeddedAudio::updateHP reads 0x33 bit 7 as "plugged", then
  * AppleCSCodecMikey starts headset detection: 0x30 <- 0x9e, and 0x37 <- 0xe7
  * unmasks the type-detect interrupt (status bits 3-4). When that never comes
@@ -98,7 +99,7 @@ static uint8_t cs42l58_recv(I2CSlave *i2c)
         res |= CS42L59_PDN_DONE;
     }
 
-    if (s->hp) {
+    if (s->hp && s->pdn_status) {
         if (reg == CS42L59_REG_JACK) {
             res |= CS42L59_JACK_PLUG;
         } else if (reg == CS42L59_REG_COMP) {
@@ -135,7 +136,7 @@ static int cs42l58_send(I2CSlave *i2c, uint8_t data)
     if ((s->cmd & 0x7f) != CS42L58_REG_CHIPID) {
         s->regs[s->cmd & 0x7f] = data;
         /* detection running and the type interrupt unmasked: report it done */
-        if (s->hp && (s->cmd & 0x7f) == CS42L59_REG_MASK2 &&
+        if (s->hp && s->pdn_status && (s->cmd & 0x7f) == CS42L59_REG_MASK2 &&
             (s->regs[CS42L59_REG_DETECT] & 0x80) && !(data & CS42L59_INT_TYPE)) {
             s->hp_status |= CS42L59_INT_TYPE;
             qemu_set_irq(s->irq, 1);
@@ -207,11 +208,17 @@ static const VMStateDescription vmstate_cs42l58 = {
     },
 };
 
+static const Property cs42l58_props[] = {
+    /* CS42L59 only: report a plain headphone plugged in (see CS42L59_REG_JACK) */
+    DEFINE_PROP_BOOL("headphones", CS42L58State, hp, false),
+};
+
 static void cs42l58_class_init(ObjectClass *klass, const void *data)
 {
     I2CSlaveClass *k = I2C_SLAVE_CLASS(klass);
     DeviceClass *dc = DEVICE_CLASS(klass);
 
+    device_class_set_props(dc, cs42l58_props);
     dc->vmsd = &vmstate_cs42l58;
     k->event = cs42l58_event;
     k->recv = cs42l58_recv;
@@ -230,7 +237,6 @@ static const TypeInfo cs42l58_info = {
 static void cs42l59_init(Object *obj)
 {
     qdev_init_gpio_out(DEVICE(obj), &CS42L58(obj)->irq, 1);
-    CS42L58(obj)->hp = getenv("LT_HEADPHONES") != NULL;
     CS42L58(obj)->pdn_status = true;
     CS42L58(obj)->rate_reg = 0x0a;
 }
