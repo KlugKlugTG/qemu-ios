@@ -240,23 +240,37 @@ static bool scaler_nv12(IPodScalerState *s)
             return false;
         }
     }
-    /* Destination (x, j) samples source row sh - 1 - x, column j when turned, scaled to the source's size. */
+    /*
+     * Destination (x, j) samples source row sh - 1 - x, column j when turned, scaled to the source's size:
+     * y[xo[x] + yo[j]]. The offsets come from tables, not two 64-bit divides a pixel (every movie frame).
+     */
+    g_autofree size_t *xo = g_new(size_t, dw), *yo = g_new(size_t, dh);
+    for (unsigned x = 0; x < dw; x++) {
+        xo[x] = rot ? (size_t)(sh - 1 - (uint64_t)x * sh / dw) * sw : (uint64_t)x * sw / dw;
+    }
     for (unsigned j = 0; j < dh; j++) {
+        yo[j] = rot ? (uint64_t)j * sw / dh : (size_t)((uint64_t)j * sh / dh) * sw;
+    }
+    for (unsigned j = 0; j < dh; j++) {
+        const uint8_t *line = y + yo[j];
         for (unsigned x = 0; x < dw; x++) {
-            row[x] = rot ? y[(size_t)(sh - 1 - (uint64_t)x * sh / dw) * sw + (uint64_t)j * sw / dh]
-                         : y[(size_t)((uint64_t)j * sh / dh) * sw + (uint64_t)x * sw / dw];
+            row[x] = line[xo[x]];
         }
         if (!scaler_write_bus(s, r[0x34 / 4] + j * dys, row, dw)) {
             return false;
         }
     }
-    for (unsigned j = 0; j < dh / 2; j++) {      /* chroma pairs, the same turn at half size */
+    for (unsigned x = 0; x < dw / 2; x++) {      /* chroma pairs, the same turn at half size */
+        xo[x] = rot ? (size_t)(sh / 2 - 1 - (uint64_t)x * sh / dw) * sw : 2 * ((uint64_t)x * sw / dw);
+    }
+    for (unsigned j = 0; j < dh / 2; j++) {
+        yo[j] = rot ? 2 * ((uint64_t)j * sw / dh) : (size_t)((uint64_t)j * sh / dh) * sw;
+    }
+    for (unsigned j = 0; j < dh / 2; j++) {
+        const uint8_t *line = uv + yo[j];
         for (unsigned x = 0; x < dw / 2; x++) {
-            const uint8_t *c = rot ? uv + (size_t)(sh / 2 - 1 - (uint64_t)x * sh / dw) * sw
-                                         + 2 * ((uint64_t)j * sw / dh)
-                                   : uv + (size_t)((uint64_t)j * sh / dh) * sw + 2 * ((uint64_t)x * sw / dw);
-            row[2 * x] = c[0];
-            row[2 * x + 1] = c[1];
+            row[2 * x] = line[xo[x]];
+            row[2 * x + 1] = line[xo[x] + 1];
         }
         if (!scaler_write_bus(s, r[0x38 / 4] + j * duvs, row, dw)) {
             return false;
