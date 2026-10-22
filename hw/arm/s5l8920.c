@@ -622,9 +622,14 @@ static void s5l8920_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t
     S5L8920MachineState *s = S5L8920_MACHINE(qdev_get_machine());
     qemu_call_t q;
     int32_t err = 0;
+    bool bql;
 
     if (qemu_call_rw(cs, value, &q, false)) {
         return;
+    }
+    bql = qemu_call_needs_bql(&q) && !bql_locked();
+    if (bql) {
+        bql_lock();
     }
     switch (q.call_number) {
     case QC_GLES:
@@ -656,17 +661,22 @@ static void s5l8920_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t
     }
     default:
         if (!guest_pb_call(&s->pb, cs, &q, &err) && !guest_pkg_call(&s->pkg, cs, &q, &err)) {
-            return;
+            goto out;
         }
     }
     q.error = err;
     qemu_call_rw(cs, value, &q, true);
+out:
+    if (bql) {
+        bql_unlock();
+    }
 }
 
 static const ARMCPRegInfo s5l8920_cp_reginfo[] = {
     { .name = "QEMU_CALL", .cp = 15, .opc1 = 3, .crn = 15, .crm = 15,
       .opc2 = 0, .access = PL0_RW, .state = ARM_CP_STATE_AA32,
-      .type = ARM_CP_IO | ARM_CP_NO_RAW | ARM_CP_RAISES_EXC,
+      /* Not ARM_CP_IO: the handler takes the BQL for the calls that need it. */
+      .type = ARM_CP_NO_RAW | ARM_CP_RAISES_EXC,
       .readfn = qemu_call_status,
       .writefn = s5l8920_qemu_call },
 };

@@ -78,6 +78,19 @@ int qemu_call_rw(CPUState *cpu, uint64_t va, qemu_call_t *q, bool write)
     return qcall_rw(cpu, va, q, sizeof(*q), write);
 }
 
+/*
+ * GL calls arrive thousands of times a second and touch only the GL bridge, which the vCPU that
+ * makes them alone drives, so every board's QEMU_CALL runs them without the BQL (a register that is
+ * ARM_CP_IO already holds it). Context setup and teardown change the migration blockers and every
+ * other call reaches machine state the main loop shares, so those take it.
+ */
+bool qemu_call_needs_bql(const qemu_call_t *q)
+{
+    return q->call_number != QC_GLES ||
+           (q->args.gles.slot >= GLES_OP_NEW_SHAREGROUP &&
+            q->args.gles.slot <= GLES_OP_DELETE_CONTEXT);
+}
+
 void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
 {
     CPUState *cpu = qemu_get_cpu(0);
@@ -129,17 +142,7 @@ void qemu_call(CPUARMState *env, const struct ARMCPRegInfo *ri, uint64_t value)
         return;
     }
 
-    /*
-     * GL calls arrive thousands of times a second and touch only the GL
-     * bridge, which the vCPU alone drives, so they skip the BQL (callers
-     * whose register is ARM_CP_IO already hold it). Context setup and
-     * teardown change the migration blockers and every other call reaches
-     * machine state the main loop shares, so those take it.
-     */
-    bool gl = qcall.call_number == QC_GLES &&
-              !(qcall.args.gles.slot >= GLES_OP_NEW_SHAREGROUP &&
-                qcall.args.gles.slot <= GLES_OP_DELETE_CONTEXT);
-    bool bql = !gl && !bql_locked();
+    bool bql = qemu_call_needs_bql(&qcall) && !bql_locked();
 
     if (bql) {
         bql_lock();
