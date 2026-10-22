@@ -93,7 +93,10 @@ static unsigned gles_native_bpp(GLenum format, GLenum type)
     if (type == GL_UNSIGNED_SHORT_5_6_5 || type == GL_UNSIGNED_SHORT_4_4_4_4 ||
         type == GL_UNSIGNED_SHORT_5_5_5_1 || type == GL_UNSIGNED_SHORT_4_4_4_4_REV ||
         type == GL_UNSIGNED_SHORT_1_5_5_5_REV) return 2;
-    if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) return 4;
+    /* Packed depth/stencil (OES_packed_depth_stencil): Epic Citadel's 960x640 depth texture. Counted as one
+     * byte a texel, the copy was a quarter of what the driver reads (Adreno faulted past its end). */
+    if (type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV || type == 0x84FA) return 4;
+    if (type == 0x8DAD) return 8;   /* GL_FLOAT_32_UNSIGNED_INT_24_8_REV */
     unsigned components = format == GL_RGBA || format == GL_BGRA ? 4 :
         format == GL_RGB ? 3 : format == GL_LUMINANCE_ALPHA ? 2 : 1;
     return components * (type == GL_FLOAT || type == GL_UNSIGNED_INT ? 4 :
