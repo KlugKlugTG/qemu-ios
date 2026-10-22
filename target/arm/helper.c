@@ -9651,7 +9651,10 @@ static struct {
      * kernel: SVC r12 + 512, or 1024 + the exception id. */
     bool ep_open;
     int ep_key;
+    int64_t ep_msgid;   /* a mach_msg send's msgh_id (with the CONTEXTIDR ASID << 32), or -1 */
+    uint32_t ep_chain[8];   /* the sender's return addresses: lr, then the r7 frame chain */
     uint64_t ep_t0;
+    GHashTable *msgid;  /* key -> uint64_t[2] { n, cpu ns } */
     struct {
         uint64_t n, ns;
     } ep[1024 + 32];
@@ -9672,9 +9675,35 @@ void arm_exception_prof_user_return(CPUARMState *env)
         (env->uncached_cpsr & CPSR_M) == ARM_CPU_MODE_USR) {
         int k = arm_exception_prof.ep_key;
 
+        uint64_t ns = arm_exception_prof_thread_ns() - arm_exception_prof.ep_t0;
+
         arm_exception_prof.ep_open = false;
         arm_exception_prof.ep[k].n++;
-        arm_exception_prof.ep[k].ns += arm_exception_prof_thread_ns() - arm_exception_prof.ep_t0;
+        arm_exception_prof.ep[k].ns += ns;
+        if (arm_exception_prof.ep_msgid >= 0) {
+            uint64_t *v;
+
+            if (!arm_exception_prof.msgid) {
+                arm_exception_prof.msgid = g_hash_table_new_full(g_int64_hash, g_int64_equal,
+                                                                 g_free, g_free);
+            }
+            v = g_hash_table_lookup(arm_exception_prof.msgid, &arm_exception_prof.ep_msgid);
+            if (!v) {
+                int64_t *kp = g_new(int64_t, 1);
+
+                *kp = arm_exception_prof.ep_msgid;
+                v = g_new0(uint64_t, 2);
+                g_hash_table_insert(arm_exception_prof.msgid, kp, v);
+                fprintf(stderr, "[exception-prof] mach-send-site asid %u id %u chain", (unsigned)(*kp >> 32),
+                        (uint32_t)*kp);
+                for (int i = 0; i < ARRAY_SIZE(arm_exception_prof.ep_chain); i++) {
+                    fprintf(stderr, " %08x", arm_exception_prof.ep_chain[i]);
+                }
+                fprintf(stderr, "\n");
+            }
+            v[0]++;
+            v[1] += ns;
+        }
     }
 }
 
@@ -9706,6 +9735,28 @@ static inline QEMU_ALWAYS_INLINE uint64_t arm_exception_prof_begin(CPUState *cs)
 
             arm_exception_prof.ep_open = true;
             arm_exception_prof.ep_key = exc == EXCP_SWI && nr >= -512 && nr < 512 ? nr + 512 : 1024 + exc;
+            arm_exception_prof.ep_msgid = -1;
+            if (exc == EXCP_SWI && (nr == -31 || nr == -32) && (env->regs[1] & 1)) {
+                /* mach_msg send: msgh_id is the header's sixth word (iOS 3-6 32-bit layout). */
+                uint32_t id;
+
+                if (cpu_memory_rw_debug(cs, env->regs[0] + 20, &id, 4, false) == 0) {
+                    uint32_t sel;
+
+                    /* io_connect_method (2865): the user client's selector follows the NDR record. */
+                    if (id == 2865 && cpu_memory_rw_debug(cs, env->regs[0] + 32, &sel, 4, false) == 0) {
+                        id = 2865000 + MIN(sel, 999);
+                    }
+                    arm_exception_prof.ep_msgid = (int64_t)(env->cp15.contextidr_el[1] & 0xff) << 32 | id;
+                    memset(arm_exception_prof.ep_chain, 0, sizeof(arm_exception_prof.ep_chain));
+                    arm_exception_prof.ep_chain[0] = env->regs[14];
+                    for (uint32_t i = 1, fp = env->regs[7], f[2];
+                         i < ARRAY_SIZE(arm_exception_prof.ep_chain) && fp &&
+                         cpu_memory_rw_debug(cs, fp, f, 8, false) == 0; i++, fp = f[0]) {
+                        arm_exception_prof.ep_chain[i] = f[1];
+                    }
+                }
+            }
             arm_exception_prof.ep_t0 = arm_exception_prof_thread_ns();
         }
     }
@@ -9784,6 +9835,19 @@ static void arm_exception_prof_end(int exc, uint64_t start)
             fprintf(stderr, "[exception-prof] kernel-episode %s %d n %" PRIu64 " cpu-ns %" PRIu64 "\n",
                     i < 1024 ? "svc" : "exception", i < 1024 ? i - 512 : i - 1024,
                     arm_exception_prof.ep[i].n, arm_exception_prof.ep[i].ns);
+        }
+    }
+    if (arm_exception_prof.msgid) {
+        GHashTableIter it;
+        gpointer k, v;
+
+        g_hash_table_iter_init(&it, arm_exception_prof.msgid);
+        while (g_hash_table_iter_next(&it, &k, &v)) {
+            int64_t key = *(int64_t *)k;
+            uint64_t *c = v;
+
+            fprintf(stderr, "[exception-prof] mach-send asid %u id %u n %" PRIu64 " cpu-ns %" PRIu64 "\n",
+                    (unsigned)(key >> 32), (uint32_t)key, c[0], c[1]);
         }
     }
     fprintf(stderr, "[exception-prof] end now-ns %" PRIu64 "\n", now);

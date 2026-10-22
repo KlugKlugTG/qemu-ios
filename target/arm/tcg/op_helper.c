@@ -1496,3 +1496,105 @@ void HELPER(vesb)(CPUARMState *env)
         cpu_reset_interrupt(env_cpu(env), CPU_INTERRUPT_VSERR);
     }
 }
+
+/*
+ * LT_GUEST_PC_HOOK=ADDR[,ADDR...]: count each listed guest PC as it
+ * executes and keep its callers (lr, then the r7 frame chain), printing the
+ * busiest chains every 10 s. A profiling aid for finding who drives a guest
+ * function; the hooked instructions pay a helper call, nothing else does.
+ */
+#define LT_PC_HOOK_DEPTH 6
+#define LT_PC_HOOK_SLOTS 8192
+uint32_t lt_pc_hook_pcs[16];
+int lt_pc_hook_n = -1;
+static struct {
+    uint32_t chain[LT_PC_HOOK_DEPTH + 1];
+    uint64_t n;
+} lt_pc_hook_tab[LT_PC_HOOK_SLOTS];
+static uint64_t lt_pc_hook_total[16];
+static int64_t lt_pc_hook_t0;
+
+void lt_pc_hook_init(void)
+{
+    const char *e = getenv("LT_GUEST_PC_HOOK");
+    char *end;
+
+    lt_pc_hook_n = 0;
+    while (e && *e && lt_pc_hook_n < ARRAY_SIZE(lt_pc_hook_pcs)) {
+        lt_pc_hook_pcs[lt_pc_hook_n++] = strtoul(e, &end, 16) & ~1u;
+        e = *end == ',' ? end + 1 : NULL;
+    }
+}
+
+static void lt_pc_hook_dump(int64_t now)
+{
+    double secs = (now - lt_pc_hook_t0) / 1e9;
+
+    for (int k = 0; k < lt_pc_hook_n; k++) {
+        fprintf(stderr, "[pc-hook] %.1fs pc %08x %.0f/s\n", secs,
+                lt_pc_hook_pcs[k], lt_pc_hook_total[k] / secs);
+        lt_pc_hook_total[k] = 0;
+    }
+    for (int k = 0; k < 20; k++) {
+        int best = -1;
+        for (int i = 0; i < LT_PC_HOOK_SLOTS; i++) {
+            if (lt_pc_hook_tab[i].n &&
+                (best < 0 || lt_pc_hook_tab[i].n > lt_pc_hook_tab[best].n)) {
+                best = i;
+            }
+        }
+        if (best < 0) {
+            break;
+        }
+        GString *g = g_string_new(NULL);
+        for (int d = 0; d <= LT_PC_HOOK_DEPTH; d++) {
+            g_string_append_printf(g, " %08x", lt_pc_hook_tab[best].chain[d]);
+        }
+        fprintf(stderr, "[pc-hook]   %.0f/s%s\n", lt_pc_hook_tab[best].n / secs, g->str);
+        g_string_free(g, true);
+        lt_pc_hook_tab[best].n = 0;
+    }
+    memset(lt_pc_hook_tab, 0, sizeof(lt_pc_hook_tab));
+    lt_pc_hook_t0 = now;
+}
+
+void HELPER(lt_pc_hook)(CPUARMState *env, uint32_t pc)
+{
+    CPUState *cs = env_cpu(env);
+    uint32_t chain[LT_PC_HOOK_DEPTH + 1] = { pc, env->regs[14] };
+    uint32_t fp = env->regs[7], h = pc;
+    int64_t now;
+
+    for (int d = 2; d <= LT_PC_HOOK_DEPTH && fp; d++) {
+        uint32_t frame[2];
+        if (cpu_memory_rw_debug(cs, fp, frame, 8, false) != 0) {
+            break;
+        }
+        chain[d] = frame[1];
+        fp = frame[0];
+    }
+    for (int d = 0; d <= LT_PC_HOOK_DEPTH; d++) {
+        h = h * 2654435761u ^ chain[d];
+    }
+    h %= LT_PC_HOOK_SLOTS;
+    for (int i = 0; i < LT_PC_HOOK_SLOTS; i++, h = (h + 1) % LT_PC_HOOK_SLOTS) {
+        if (!lt_pc_hook_tab[h].n) {
+            memcpy(lt_pc_hook_tab[h].chain, chain, sizeof(chain));
+        }
+        if (!memcmp(lt_pc_hook_tab[h].chain, chain, sizeof(chain))) {
+            lt_pc_hook_tab[h].n++;
+            break;
+        }
+    }
+    for (int k = 0; k < lt_pc_hook_n; k++) {
+        if (lt_pc_hook_pcs[k] == pc) {
+            lt_pc_hook_total[k]++;
+        }
+    }
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (!lt_pc_hook_t0) {
+        lt_pc_hook_t0 = now;
+    } else if (now - lt_pc_hook_t0 > 10 * NANOSECONDS_PER_SECOND) {
+        lt_pc_hook_dump(now);
+    }
+}

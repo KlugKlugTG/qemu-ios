@@ -6537,6 +6537,10 @@ static void arm_tr_tb_start(DisasContextBase *dcbase, CPUState *cpu)
     }
 }
 
+extern uint32_t lt_pc_hook_pcs[16];
+extern int lt_pc_hook_n;
+void lt_pc_hook_init(void);
+
 static void arm_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
@@ -6558,6 +6562,16 @@ static void arm_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     }
     tcg_gen_insn_start(pc_arg, condexec_bits, 0);
     dc->insn_start_updated = false;
+    if (unlikely(lt_pc_hook_n)) {
+        if (lt_pc_hook_n < 0) {
+            lt_pc_hook_init();
+        }
+        for (int i = 0; i < lt_pc_hook_n; i++) {
+            if (lt_pc_hook_pcs[i] == (uint32_t)dc->base.pc_next) {
+                gen_helper_lt_pc_hook(tcg_env, tcg_constant_i32(dc->base.pc_next));
+            }
+        }
+    }
 }
 
 static bool arm_check_kernelpage(DisasContext *dc)
