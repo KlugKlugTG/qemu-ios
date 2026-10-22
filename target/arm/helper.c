@@ -385,6 +385,28 @@ static void fcse_write(CPUARMState *env, const ARMCPRegInfo *ri, uint64_t value)
     }
 }
 
+/* LT_EL0_TLB_DEFER=off flushes the EL0 index on every ASID switch again, for A/B. */
+static bool el0_tlb_defer_enabled(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_EL0_TLB_DEFER");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
+void arm_el0_tlb_sync(CPUARMState *env)
+{
+    ARMCPU *cpu = env_archcpu(env);
+
+    if (cpu->el0_tlb_stale) {
+        cpu->el0_tlb_stale = false;
+        tlb_flush_by_mmuidx_keep_jmp_cache(CPU(cpu), ARMMMUIdxBit_E10_0);
+    }
+}
+
 static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
                              uint64_t value)
 {
@@ -407,10 +429,33 @@ static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
          * drop only the non-global pages that index picked up.
          */
         bool keep = cpu->ng_el1_count <= ARRAY_SIZE(cpu->ng_el1_pages);
+        /*
+         * iOS 6 enters the kernel on every syscall and interrupt from user
+         * mode by loading the kernel's TTBR0 with ASID 0, and goes back the
+         * same way: two switches each, and flushing the user (EL0) index both
+         * times refilled every page the process touched after each one. Only
+         * EL0 code and LDRT/STRT use that index, so its flush waits until one
+         * of them runs under another ASID (arm_el0_tlb_sync); back to the
+         * ASID that owns the entries first, nothing is lost.
+         */
+        bool defer = keep && el0_tlb_defer_enabled();
+        uint8_t asid = extract64(value, 0, 8);
 
-        tlb_flush_switch_context_keep(CPU(cpu), extract64(value, 0, 8),
+        if (defer) {
+            if (!cpu->el0_tlb_stale) {
+                cpu->el0_tlb_stale = true;
+                cpu->el0_tlb_asid = extract64(previous, 0, 8);
+            }
+            if (cpu->el0_tlb_asid == asid) {
+                cpu->el0_tlb_stale = false;
+            }
+        } else {
+            cpu->el0_tlb_stale = false;
+        }
+        tlb_flush_switch_context_keep(CPU(cpu), asid,
                                       keep ? arm_to_core_mmu_idx(ARMMMUIdx_E10_1) : -1,
-                                      cpu->ng_el1_pages, keep ? cpu->ng_el1_count : 0);
+                                      cpu->ng_el1_pages, keep ? cpu->ng_el1_count : 0,
+                                      defer ? ARMMMUIdxBit_E10_0 : 0);
         cpu->ng_el1_count = 0;
     }
     raw_write(env, ri, value);

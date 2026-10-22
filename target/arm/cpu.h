@@ -954,6 +954,13 @@ struct ArchCPU {
      */
     vaddr ng_el1_pages[32];
     unsigned ng_el1_count;
+    /*
+     * The EL0 TLB index still holds ASID el0_tlb_asid's pages after a switch
+     * away from it; flushed before anything uses that index under another
+     * ASID (see arm_el0_tlb_sync).
+     */
+    bool el0_tlb_stale;
+    uint8_t el0_tlb_asid;
     uint32_t irqs_taken, idle_irqs_seen;
 
     /* Coprocessor information */

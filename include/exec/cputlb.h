@@ -147,10 +147,19 @@ void tlb_flush_switch_context(CPUState *cpu, uint64_t key);
  * tlb_flush_switch_context_keep:
  * Like tlb_flush_switch_context(), but the TLB index @keep_idx keeps its
  * entries except the @n pages listed: for a guest whose global mappings
- * outlive the switch. A negative @keep_idx flushes everything.
+ * outlive the switch. A negative @keep_idx flushes everything. The indexes
+ * in @defer are left alone: the caller flushes them before they are used
+ * in the new context.
  */
 void tlb_flush_switch_context_keep(CPUState *cpu, uint64_t key, int keep_idx,
-                                   const vaddr *pages, unsigned n);
+                                   const vaddr *pages, unsigned n, MMUIdxMap defer);
+
+/**
+ * tlb_flush_by_mmuidx_keep_jmp_cache:
+ * Flush the @idxmap TLB indexes of the current CPU, keeping the TB jump
+ * cache: for translations that change no code mapping of this context.
+ */
+void tlb_flush_by_mmuidx_keep_jmp_cache(CPUState *cpu, MMUIdxMap idxmap);
 
 /**
  * tlb_flush_context:
@@ -278,7 +287,10 @@ static inline void tlb_flush_switch_context(CPUState *cpu, uint64_t key)
 {
 }
 static inline void tlb_flush_switch_context_keep(CPUState *cpu, uint64_t key, int keep_idx,
-                                                 const vaddr *pages, unsigned n)
+                                                 const vaddr *pages, unsigned n, MMUIdxMap defer)
+{
+}
+static inline void tlb_flush_by_mmuidx_keep_jmp_cache(CPUState *cpu, MMUIdxMap idxmap)
 {
 }
 static inline void tlb_flush_context(CPUState *cpu, uint64_t key)

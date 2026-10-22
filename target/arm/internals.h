@@ -1217,6 +1217,8 @@ static inline const char *aarch32_mode_name(uint32_t psr)
  * arm_cpu_exec_interrupt(): Implementation of the cpu_exec_inrerrupt hook.
  */
 bool arm_cpu_exec_interrupt(CPUState *cs, int interrupt_request);
+/* Flush the EL0 TLB index if it still holds another ASID's pages. */
+void arm_el0_tlb_sync(CPUARMState *env);
 bool arm_cpu_interrupts_masked(CPUState *cs, int interrupt_request);
 
 /**

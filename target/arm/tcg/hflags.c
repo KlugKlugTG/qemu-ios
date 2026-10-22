@@ -171,6 +171,11 @@ static CPUARMTBFlags rebuild_hflags_a32(CPUARMState *env, int fp_el,
     int el = arm_current_el(env);
     uint64_t sctlr = arm_sctlr(env, el);
 
+    /* Entering EL0: its TLB index must be this ASID's (see contextidr_write). */
+    if (unlikely(env_archcpu(env)->el0_tlb_stale) && mmu_idx == ARMMMUIdx_E10_0) {
+        arm_el0_tlb_sync(env);
+    }
+
     if (aprofile_require_alignment(env, el, sctlr)) {
         DP_TBFLAG_ANY(flags, ALIGN_MEM, 1);
     }
@@ -562,6 +567,12 @@ void HELPER(rebuild_hflags_a32)(CPUARMState *env, int el)
     ARMMMUIdx mmu_idx = arm_mmu_idx_el(env, el);
 
     env->hflags = rebuild_hflags_a32(env, fp_el, mmu_idx);
+}
+
+/* Before LDRT/STRT at PL1 (see contextidr_write). */
+void HELPER(el0_tlb_sync)(CPUARMState *env)
+{
+    arm_el0_tlb_sync(env);
 }
 
 void HELPER(rebuild_hflags_a64)(CPUARMState *env, int el)

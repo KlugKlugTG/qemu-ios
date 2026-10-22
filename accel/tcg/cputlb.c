@@ -611,8 +611,14 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
     tb_jmp_cache_clear_page(cpu, addr);
 }
 
+void tlb_flush_by_mmuidx_keep_jmp_cache(CPUState *cpu, MMUIdxMap idxmap)
+{
+    assert_cpu_is_self(cpu);
+    tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT(idxmap | TLB_FLUSH_KEEP_JMP_CACHE));
+}
+
 void tlb_flush_switch_context_keep(CPUState *cpu, uint64_t key, int keep_idx,
-                                   const vaddr *pages, unsigned n)
+                                   const vaddr *pages, unsigned n, MMUIdxMap defer)
 {
     if (keep_idx < 0) {
         tlb_flush_switch_context(cpu, key);
@@ -623,8 +629,8 @@ void tlb_flush_switch_context_keep(CPUState *cpu, uint64_t key, int keep_idx,
         it_acct_ctxsw++;
     }
     tcg_switch_jmp_cache(cpu, key);
-    tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT((ALL_MMUIDX_BITS & ~(1 << keep_idx)) |
-                                                        TLB_FLUSH_KEEP_JMP_CACHE));
+    tlb_flush_by_mmuidx_async_work(cpu, RUN_ON_CPU_HOST_INT((ALL_MMUIDX_BITS & ~(1 << keep_idx) &
+                                                         ~defer) | TLB_FLUSH_KEEP_JMP_CACHE));
     /* TLB entries only: the jump cache is already the new context's. */
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
     for (unsigned i = 0; i < n; i++) {

@@ -233,9 +233,12 @@ static inline int get_a32_user_mem_index(DisasContext *s)
     case ARMMMUIdx_E30_3_PAN:
         return arm_to_core_mmu_idx(ARMMMUIdx_E30_0);
     case ARMMMUIdx_E2:        /* this one is UNPREDICTABLE */
-    case ARMMMUIdx_E10_0:
     case ARMMMUIdx_E10_1:
     case ARMMMUIdx_E10_1_PAN:
+        /* The EL0 index may still hold another ASID's pages here. */
+        gen_helper_el0_tlb_sync(tcg_env);
+        /* fall through */
+    case ARMMMUIdx_E10_0:
         return arm_to_core_mmu_idx(ARMMMUIdx_E10_0);
     case ARMMMUIdx_MUser:
     case ARMMMUIdx_MPriv:
