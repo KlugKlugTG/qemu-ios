@@ -1161,6 +1161,38 @@ static inline bool icount_exit_request(CPUState *cpu)
     return cpu->neg.icount_decr.u16.low + cpu->icount_extra == 0;
 }
 
+#ifndef CONFIG_USER_ONLY
+extern bool tcg_masked_irq_fast;
+
+/*
+ * An IRQ or FIQ the guest has masked stays pending, often for a whole kernel critical section,
+ * and every exit to this loop in that time took the BQL only to find it could not be delivered:
+ * ~12K times a second at the iPod touch 4G's (iOS 6.1.6) Doodle Jump title, 2% of the vCPU's wall
+ * time waiting for the lock. The mask is vCPU state, so check it first. The level stays pending,
+ * and an unmasking write ends its TB, so the next pass here takes the locked path. Only an EXITTB
+ * in this snapshot is acknowledged, as above.
+ */
+static inline bool cpu_interrupts_masked_unlocked(CPUState *cpu, TranslationBlock **last_tb)
+{
+    const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
+    int req;
+
+    if (!tcg_masked_irq_fast || !tcg_ops->cpu_interrupts_masked ||
+        replay_mode != REPLAY_MODE_NONE || cpu->singlestep_enabled) {
+        return false;
+    }
+    req = qatomic_load_acquire(&cpu->interrupt_request);
+    if (!tcg_ops->cpu_interrupts_masked(cpu, req)) {
+        return false;
+    }
+    if (req & CPU_INTERRUPT_EXITTB) {
+        cpu_reset_interrupt(cpu, CPU_INTERRUPT_EXITTB);
+        *last_tb = NULL;
+    }
+    return true;
+}
+#endif
+
 static inline bool cpu_handle_interrupt(CPUState *cpu,
                                         TranslationBlock **last_tb)
 {
@@ -1194,7 +1226,8 @@ static inline bool cpu_handle_interrupt(CPUState *cpu,
         cpu_reset_interrupt(cpu, CPU_INTERRUPT_EXITTB);
         *last_tb = NULL;
     }
-    if (unlikely(cpu_test_interrupt(cpu, ~0))) {
+    if (unlikely(cpu_test_interrupt(cpu, ~0)) &&
+        !cpu_interrupts_masked_unlocked(cpu, last_tb)) {
         bql_lock();
         if (cpu_test_interrupt(cpu, CPU_INTERRUPT_DEBUG)) {
             cpu_reset_interrupt(cpu, CPU_INTERRUPT_DEBUG);

@@ -88,6 +88,7 @@ bool one_insn_per_tb;
 bool tcg_cross_page_chain;
 bool tcg_indirect_cache;
 bool tcg_inline_tb_lookup;
+bool tcg_masked_irq_fast;
 
 #ifndef CONFIG_USER_ONLY
 static void tcg_vm_change_state(void *opaque, bool running, RunState state)
@@ -114,6 +115,9 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
     const char *inline_lookup = getenv("LT_TB_LOOKUP_INLINE");
     tcg_inline_tb_lookup = inline_lookup && strcmp(inline_lookup, "off") &&
                            strcmp(inline_lookup, "0");
+    /* LT_MASKED_IRQ_FAST=off: take the BQL for every pending-interrupt check (A/B). */
+    const char *masked_irq = getenv("LT_MASKED_IRQ_FAST");
+    tcg_masked_irq_fast = !(masked_irq && (!strcmp(masked_irq, "off") || !strcmp(masked_irq, "0")));
     if (tcg_inline_tb_lookup) {
         fprintf(stderr, "[tcg] inline-tb-lookup=on (accounting uses legacy path)\n");
     }
