@@ -23,6 +23,7 @@
 #include "system/runstate.h"
 #include "ui/input.h"
 #include "qemu/cutils.h"
+#include "qemu/main-loop.h"
 #include "system/address-spaces.h"
 #include "migration/vmstate.h"
 #include "ui/console.h"
@@ -151,6 +152,7 @@ struct S5L8930DisplayState {
      */
     uint8_t *src, *src_next;
     size_t src_size, src_len;
+    GArray *fetch;           /* FbSeg: the reads layers_fetch planned, run by fetch_run */
     UILayer src_layers[2];
     uint64_t front_gen;
     uint64_t shown_gen;
@@ -283,7 +285,7 @@ static const MemoryRegionOps pipe_ops = {
     .impl.max_access_size = 4,
 };
 
-static void front_latch(S5L8930DisplayState *s);
+static void front_latch(S5L8930DisplayState *s, bool vbl);
 static void clcd_update_irq(S5L8930DisplayState *s);
 
 /*
@@ -374,7 +376,7 @@ static void vbl_tick(void *opaque)
         s->pipe[0].swap_pending = false;
         s->quiet_vbls = 0;
         s->swaps++;
-        front_latch(s);
+        front_latch(s, true);
     } else if (++s->quiet_vbls >= QUIET_RELATCH_VBLS) {
         /*
          * No swap for a quarter second, yet the buffer can still change:
@@ -383,7 +385,7 @@ static void vbl_tick(void *opaque)
          * Real scanout reads memory live, so follow it: re-latch every VBL
          * while no swaps come. Swapping clients are latched on their swaps.
          */
-        front_latch(s);
+        front_latch(s, true);
     }
     s->pipe[1].swap_pending = false;
     pipe_frame_end(&s->pipe[0]);
@@ -537,6 +539,52 @@ hwaddr s5l8930_dart2_xlate(void *display, uint32_t va, unsigned sid)
     return s5l8930_dart_xlate(&S5L8930_DISPLAY(display)->dart, sid < S5L8930_DART_SIDS ? sid : 0, va);
 }
 
+/*
+ * One planned framebuffer read: `len` bytes from guest PA `pa` (or zeros, pa -1) to byte `off` of the
+ * destination. Translating through the DART reads its registers and tables, which the vCPU writes, so
+ * a latch plans its reads under the BQL and runs them without it (front_latch).
+ */
+typedef struct FbSeg {
+    hwaddr pa;
+    size_t off, len;
+} FbSeg;
+
+static void fb_plan(S5L8930DisplayState *s, uint32_t va, size_t off, size_t len)
+{
+    while (len) {
+        size_t n = MIN(len, 0x1000 - (va & 0xfff));
+        hwaddr pa = dart_xlate(s, va);
+        FbSeg *last = s->fetch->len ? &g_array_index(s->fetch, FbSeg, s->fetch->len - 1) : NULL;
+
+        /* Pages contiguous in both: one read (an IOSurface is mostly physically contiguous). */
+        if (last && last->off + last->len == off &&
+            (pa == (hwaddr)-1 ? last->pa == (hwaddr)-1 : last->pa != (hwaddr)-1 && last->pa + last->len == pa)) {
+            last->len += n;
+        } else {
+            FbSeg g = { pa, off, n };
+            g_array_append_val(s->fetch, g);
+        }
+        va += n;
+        off += n;
+        len -= n;
+    }
+}
+
+/* Run the planned reads into `dst`. RAM reads need no BQL; MMIO takes it in the dispatch. */
+static void fetch_run(S5L8930DisplayState *s, uint8_t *dst)
+{
+    for (guint i = 0; i < s->fetch->len; i++) {
+        FbSeg *g = &g_array_index(s->fetch, FbSeg, i);
+
+        if (g->pa == (hwaddr)-1) {
+            memset(dst + g->off, 0, g->len);
+        } else {
+            address_space_read(&address_space_memory, g->pa, MEMTXATTRS_UNSPECIFIED, dst + g->off, g->len);
+        }
+    }
+    g_array_set_size(s->fetch, 0);
+}
+
 /* Read `len` bytes of framebuffer at IOVA `va`, page by page. */
 static void fb_read(S5L8930DisplayState *s, uint32_t va, uint8_t *dst, unsigned len)
 {
@@ -639,23 +687,26 @@ static size_t layer_row_bytes(const UILayer *u)
  * Read the source row of layer `u` that each of its destination rows shows, packed into `dst`; the
  * bytes read. A layer neither scaled vertically nor padded is one read.
  */
-static size_t layer_fetch(S5L8930DisplayState *s, const UILayer *u, uint8_t *dst)
+static size_t layer_fetch(S5L8930DisplayState *s, const UILayer *u, size_t off)
 {
     size_t row = layer_row_bytes(u);
     unsigned rows = u->y1 - u->y0;
 
     if (u->sh == rows && u->stride == row) {
-        fb_read(s, u->base, dst, row * rows);
+        fb_plan(s, u->base, off, row * rows);
         return row * rows;
     }
     for (unsigned y = u->y0; y < u->y1; y++) {
         unsigned sy = (unsigned)((uint64_t)(y - u->y0) * u->sh / rows);
-        fb_read(s, u->base + sy * u->stride, dst + (y - u->y0) * row, row);
+        fb_plan(s, u->base + sy * u->stride, off + (y - u->y0) * row, row);
     }
     return row * rows;
 }
 
-/* Fetch every shown layer into s->src_next, layer 0 first; the bytes. */
+/*
+ * Plan the reads of every shown layer into s->src_next, layer 0 first (fetch_run reads them); the
+ * bytes.
+ */
 static size_t layers_fetch(S5L8930DisplayState *s, const UILayer u[2], const bool on[2])
 {
     size_t need = 0, len = 0;
@@ -670,7 +721,7 @@ static size_t layers_fetch(S5L8930DisplayState *s, const UILayer u[2], const boo
     }
     for (int l = 0; l < 2; l++) {
         if (on[l]) {
-            len += layer_fetch(s, &u[l], s->src_next + len);
+            len += layer_fetch(s, &u[l], len);
         }
     }
     return len;
@@ -818,7 +869,9 @@ static void blend(const UILayer u[2], const bool on[2], const uint8_t *src, unsi
                 } else if (a) {
                     uint32_t b = d[x], ia = 255 - a, o = 0xff000000u;
                     for (int sh = 0; sh < 24; sh += 8) {
-                        uint32_t c = ((t >> sh) & 0xff) + (((b >> sh) & 0xff) * ia + 127) / 255;
+                        /* (v + 127) / 255 for v up to 255 * 255, without the division */
+                        uint32_t v = ((b >> sh) & 0xff) * ia + 127;
+                        uint32_t c = ((t >> sh) & 0xff) + ((v + (v >> 8) + 1) >> 8);
                         o |= MIN(c, 255u) << sh;
                     }
                     d[x] = o;
@@ -841,11 +894,13 @@ static bool compose(S5L8930DisplayState *s, unsigned w, unsigned h, uint32_t *ou
         g_autofree uint32_t *base = g_new(uint32_t, (size_t)w * h);
         bool video = video_compose(s, w, h, base);
         layers_fetch(s, u, on);
+        fetch_run(s, s->src_next);
         blend(u, on, s->src_next, w, h, out, video ? base : NULL);
     }
     return true;
 }
-static void front_latch(S5L8930DisplayState *s)
+/* vbl: called from the VBL tick, which may drop the BQL for the pixel work. */
+static void front_latch(S5L8930DisplayState *s, bool vbl)
 {
     unsigned w, h;
     size_t need;
@@ -873,13 +928,30 @@ static void front_latch(S5L8930DisplayState *s)
     bool on[2];
     bool valid = layers(s, w, h, u, on, key);
     size_t len = valid ? layers_fetch(s, u, on) : 0;
-    g_autofree uint32_t *base = g_new(uint32_t, (size_t)w * h);
-    bool video = valid && video_compose(s, w, h, base);
+    bool movie = valid && (s->pipe[0].regs[DP_LAYERS / 4] & 0x400);
+    g_autofree uint32_t *base = movie ? g_new(uint32_t, (size_t)w * h) : NULL;
+    bool video = movie && video_compose(s, w, h, base);
+    bool changed;
 
+    /*
+     * The pixel work runs without the BQL: reading ~5 MiB of layers, comparing and blending a
+     * 640x960 panel took the main loop milliseconds every swap, and the vCPU, which takes the BQL
+     * thousands of times a second, waited behind it. The reads were planned (translated) above,
+     * under the lock; the buffers are touched only by the main loop, which is running this, and the
+     * swap below is locked again. A movie frame (video_compose) still reads under the lock.
+     */
+    bool unlocked = vbl && bql_locked() && !movie;
+    if (unlocked) {
+        bql_unlock();
+    }
+    fetch_run(s, s->src_next);
     /* The front was composed from these very layers and bytes. */
     if (valid && !video && valid == s->front_valid && !memcmp(key, s->front_key, sizeof(key)) &&
         len == s->src_len && !memcmp(u, s->src_layers, sizeof(u)) &&
         !memcmp(s->src_next, s->src, len)) {
+        if (unlocked) {
+            bql_lock();
+        }
         return;
     }
     if (valid) {
@@ -890,9 +962,13 @@ static void front_latch(S5L8930DisplayState *s)
         memcpy(s->src_layers, u, sizeof(u));
         blend(u, on, s->src, w, h, (uint32_t *)s->front_next, video ? base : NULL);
     }
+    changed = valid != s->front_valid || memcmp(key, s->front_key, sizeof(key)) ||
+              (valid && memcmp(s->front_next, s->front, need));
+    if (unlocked) {
+        bql_lock();
+    }
     /* Swap in the new picture only when it differs: an unchanged relatch leaves front_gen alone. */
-    if (valid != s->front_valid || memcmp(key, s->front_key, sizeof(key)) ||
-        (valid && memcmp(s->front_next, s->front, need))) {
+    if (changed) {
         uint8_t *t = s->front;
         s->front = s->front_next;
         s->front_next = t;
@@ -1053,6 +1129,7 @@ static void s5l8930_display_realize(DeviceState *dev, Error **errp)
         return;
     }
     s->vbl = timer_new_ns(QEMU_CLOCK_VIRTUAL, vbl_tick, s);
+    s->fetch = g_array_new(false, false, sizeof(FbSeg));
     s->con = graphic_console_init(dev, 0, &display_gfx_ops, s);
     s->pipe[0].native = s->width << 16 | s->height;
     if (s->pw || s->ph) {
@@ -1123,7 +1200,7 @@ static int s5l8930_display_post_load(void *opaque, int version_id)
 {
     /* The latched frame is host memory and was not saved: take it again
      * from the restored guest RAM so the panel resumes on a whole frame. */
-    front_latch(opaque);
+    front_latch(opaque, false);
     pipes_update_irq(opaque);
     gamma_update(opaque);
     clcd_update_irq(opaque);
