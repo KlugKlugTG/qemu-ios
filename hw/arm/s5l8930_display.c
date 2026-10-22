@@ -347,6 +347,17 @@ static void vbl_rearm(S5L8930DisplayState *s)
     timer_mod(s->vbl, s->next_vbl);
 }
 
+static bool vbl_irq_first(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_VBL_IRQ_FIRST");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 /* One frame: the queued swaps complete and the VBLs fire. */
 static void vbl_tick(void *opaque)
 {
@@ -410,11 +421,12 @@ static void vbl_tick(void *opaque)
      * so this under-counts only that one path -- key it off front-hash if a zoom
      * animation ever needs measuring. */
     frame_timeline_record(&s->ftl, s->pipe[0].swap_id, new_frame);
+    bool latch = false;
     if (s->pipe[0].swap_pending) {
         s->pipe[0].swap_pending = false;
         s->quiet_vbls = 0;
         s->swaps++;
-        front_latch(s, true);
+        latch = true;
     } else if (++s->quiet_vbls >= QUIET_RELATCH_VBLS) {
         /*
          * No swap for a quarter second, yet the buffer can still change:
@@ -423,11 +435,26 @@ static void vbl_tick(void *opaque)
          * Real scanout reads memory live, so follow it: re-latch every VBL
          * while no swaps come. Swapping clients are latched on their swaps.
          */
+        latch = true;
+    }
+    /*
+     * Frame end first, then the latch (LT_VBL_IRQ_FIRST=off latches first). The latch copies and
+     * blends the new layers, 2-3 ms a frame at 640x960 (up to 7), and the guest heard of the swap's
+     * completion only after it: backboardd's next frame started that much later every vsync. The
+     * latch reads only the layers this swap brought in, which the guest leaves alone until the next
+     * swap completes, and it plans them from the registers before it drops the BQL, which a guest
+     * MMIO write needs, so the order does not change what it reads.
+     */
+    bool irq_first = vbl_irq_first();
+    if (latch && !irq_first) {
         front_latch(s, true);
     }
     s->pipe[1].swap_pending = false;
     pipe_frame_end(&s->pipe[0]);
     pipe_frame_end(&s->pipe[1]);
+    if (latch && irq_first) {
+        front_latch(s, true);
+    }
     /*
      * Paint the latched frame now, at the vsync, when something shows the
      * console, as ipod_touch_lcd's refresh_timer_tick does. Left to QEMU's
