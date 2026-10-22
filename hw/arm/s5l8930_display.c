@@ -138,6 +138,7 @@ struct S5L8930DisplayState {
     size_t front_size;
     uint32_t front_key[4];   /* w, h, fmt, stride of the latched frame */
     bool front_valid;
+    bool front_video;        /* the front was blended over a movie frame */
     /*
      * What the console surface holds, so a refresh that has nothing new skips the 3 MiB copy and the
      * update (the panel's front buffer is redrawn only by a latch, and a quiet panel relatches every
@@ -155,6 +156,17 @@ struct S5L8930DisplayState {
     size_t src_size, src_len;
     GArray *fetch;           /* FbSeg: the reads layers_fetch planned, run by fetch_run */
     GArray *vfetch;          /* FbSeg: the video layer's planes, planned by video_plan */
+    /*
+     * The last movie frame: its planes as read, the plan they were read with, and the panel-sized
+     * image video_render made of them. A movie decodes at ~30 fps and the VBL is 60 Hz, so every
+     * other latch finds the same planes and reuses the image (and skips the blend if nothing else
+     * changed either).
+     */
+    uint8_t *vprev;
+    size_t vprev_len;
+    struct VideoPlan *vprev_plan;
+    uint32_t *vbase;
+    unsigned vbase_w, vbase_h;
     UILayer src_layers[2];
     uint64_t front_gen;
     uint64_t shown_gen;
@@ -861,34 +873,53 @@ static bool video_plan(S5L8930DisplayState *s, VideoPlan *v)
 /*
  * The video layer onto a w x h panel (no BQL needed): nearest sampling through per-frame column and
  * row tables, then the pipe's YCbCr matrix. A divide per pixel was most of the 8 ms the VBL tick held
- * the BQL for every vsync of a movie.
+ * the BQL for every vsync of a movie. A source smaller than the panel (a 480x320 movie on 960x640) is
+ * converted once per source pixel, then scaled as RGB.
  */
+static inline uint32_t video_px(const VideoPlan *v, int Y, int cb, int cr)
+{
+    uint32_t px = 0xff000000u;
+
+    for (int k = 0; k < 3; k++) {
+        int t = (v->m[k * 3] * (Y - 16) + v->m[k * 3 + 1] * (cb - 128) + v->m[k * 3 + 2] * (cr - 128) +
+                 2048) >> 12;
+        px |= (uint32_t)MIN(255, MAX(0, t)) << (16 - 8 * k);    /* BGRA: R in bits 16-23 */
+    }
+    return px;
+}
+
 static void video_render(const VideoPlan *v, unsigned w, unsigned h, uint32_t *out)
 {
     const uint8_t *yp = v->planes, *uvp = v->planes + (size_t)v->sw * v->sh;
     unsigned x1 = MIN(v->x0 + v->dw, w), y1 = MIN(v->y0 + v->dh, h);
     g_autofree unsigned *xs = g_new(unsigned, MAX(x1, 1));
+    /* Converted once per source pixel when the picture is scaled up (a movie on the panel). */
+    g_autofree uint32_t *rgb = (size_t)v->sw * v->sh < (size_t)v->dw * v->dh ?
+                               g_new(uint32_t, (size_t)v->sw * v->sh) : NULL;
 
     memset(out, 0, (size_t)w * h * 4);
     for (unsigned x = v->x0; x < x1; x++) {
         xs[x] = (unsigned)((uint64_t)(x - v->x0) * v->sw / v->dw);
     }
+    if (rgb) {
+        for (unsigned y = 0; y < v->sh; y++) {
+            const uint8_t *yrow = yp + (size_t)y * v->sw, *crow = uvp + (size_t)(y / 2) * v->sw;
+            uint32_t *d = rgb + (size_t)y * v->sw;
+
+            for (unsigned x = 0; x < v->sw; x++) {
+                d[x] = video_px(v, yrow[x], crow[x & ~1u], crow[(x & ~1u) + 1]);
+            }
+        }
+    }
     for (unsigned y = v->y0; y < y1; y++) {
         unsigned sy = (unsigned)((uint64_t)(y - v->y0) * v->sh / v->dh);
         const uint8_t *yrow = yp + (size_t)sy * v->sw, *crow = uvp + (size_t)(sy / 2) * v->sw;
+        const uint32_t *srow = rgb ? rgb + (size_t)sy * v->sw : NULL;
         uint32_t *d = out + (size_t)y * w;
 
         for (unsigned x = v->x0; x < x1; x++) {
             unsigned sx = xs[x];
-            const uint8_t *c = crow + (sx & ~1u);
-            int Y = yrow[sx] - 16, cb = c[0] - 128, cr = c[1] - 128;
-            uint32_t px = 0xff000000u;
-
-            for (int k = 0; k < 3; k++) {
-                int t = (v->m[k * 3] * Y + v->m[k * 3 + 1] * cb + v->m[k * 3 + 2] * cr + 2048) >> 12;
-                px |= (uint32_t)MIN(255, MAX(0, t)) << (16 - 8 * k);    /* BGRA: R in bits 16-23 */
-            }
-            d[x] = px;
+            d[x] = srow ? srow[sx] : video_px(v, yrow[sx], crow[sx & ~1u], crow[(sx & ~1u) + 1]);
         }
     }
 }
@@ -1007,9 +1038,9 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
     bool valid = layers(s, w, h, u, on, key);
     size_t len = valid ? layers_fetch(s, u, on) : 0;
     bool movie = valid && (s->pipe[0].regs[DP_LAYERS / 4] & 0x400);
-    g_autofree uint32_t *base = movie ? g_new(uint32_t, (size_t)w * h) : NULL;
     VideoPlan vp;
     bool video = movie && video_plan(s, &vp);
+    bool video_same = false;
     bool changed;
 
     /*
@@ -1025,14 +1056,34 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
         bql_unlock();
     }
     if (video) {
+        size_t vlen = (size_t)vp.sw * vp.sh * 3 / 2;
+
         plan_run(s->vfetch, vp.planes);
-        video_render(&vp, w, h, base);
-        g_free(vp.planes);
+        video_same = s->vbase && s->vbase_w == w && s->vbase_h == h && s->vprev_len == vlen &&
+                     !memcmp(&vp.sw, &s->vprev_plan->sw, offsetof(VideoPlan, m) + sizeof(vp.m)) &&
+                     !memcmp(vp.planes, s->vprev, vlen);
+        if (!video_same) {
+            if (s->vbase_w != w || s->vbase_h != h || !s->vbase) {
+                g_free(s->vbase);
+                s->vbase = g_new(uint32_t, (size_t)w * h);
+                s->vbase_w = w, s->vbase_h = h;
+            }
+            video_render(&vp, w, h, s->vbase);
+            g_free(s->vprev);
+            s->vprev = vp.planes;
+            s->vprev_len = vlen;
+            if (!s->vprev_plan) {
+                s->vprev_plan = g_new(VideoPlan, 1);
+            }
+            *s->vprev_plan = vp;
+        } else {
+            g_free(vp.planes);
+        }
     }
     fetch_run(s, s->src_next);
-    /* The front was composed from these very layers and bytes. */
-    if (valid && !video && valid == s->front_valid && !memcmp(key, s->front_key, sizeof(key)) &&
-        len == s->src_len && !memcmp(u, s->src_layers, sizeof(u)) &&
+    /* The front was composed from these very layers and bytes (and the same movie frame). */
+    if (valid && (!video || video_same) && video == s->front_video && valid == s->front_valid &&
+        !memcmp(key, s->front_key, sizeof(key)) && len == s->src_len && !memcmp(u, s->src_layers, sizeof(u)) &&
         !memcmp(s->src_next, s->src, len)) {
         if (unlocked) {
             bql_lock();
@@ -1045,7 +1096,7 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
         s->src_next = t;
         s->src_len = len;
         memcpy(s->src_layers, u, sizeof(u));
-        blend(u, on, s->src, w, h, (uint32_t *)s->front_next, video ? base : NULL);
+        blend(u, on, s->src, w, h, (uint32_t *)s->front_next, video ? s->vbase : NULL);
     }
     changed = valid != s->front_valid || memcmp(key, s->front_key, sizeof(key)) ||
               (valid && memcmp(s->front_next, s->front, need));
@@ -1061,6 +1112,7 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
         s->front_valid = valid;
         s->front_gen++;
     }
+    s->front_video = video;
 }
 
 /* One row of the panel through the output gamma (BGRA: B in bits 0-7, R in 16-23). */
