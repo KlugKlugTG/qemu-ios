@@ -264,6 +264,50 @@ static void wdog_check(S5L8930PMGRState *s)
     }
 }
 
+/*
+ * An event timer whose deadline the timebase has already passed, but whose
+ * QEMU timer the main loop has not run yet, fires now (LT_PMGR_SYNC_EXPIRY=off
+ * leaves it to the main loop). The hardware raises the line when the counter
+ * gets there; waiting for the main loop instead left iOS 6's idle loop
+ * polling: SetIdlePop sees the decrementer's deadline already behind it and
+ * returns to the idle thread without a WFI, ~10K times a second, each pass
+ * three timebase reads, until the FIQ finally arrived.
+ */
+static bool pmgr_sync_expiry(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_PMGR_SYNC_EXPIRY");
+        on = !(v && !strcmp(v, "off"));
+    }
+    return on;
+}
+
+static void pmgr_expire_due(S5L8930PMGRState *s)
+{
+    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    bool due = false;
+    int i;
+
+    for (i = 0; i < ARRAY_SIZE(s->evt); i++) {
+        int64_t at = timer_expire_time_ns(s->evt[i].timer);
+        due |= at >= 0 && at <= now;
+    }
+    if (!due) {
+        return;
+    }
+    BQL_LOCK_GUARD();
+    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    for (i = 0; i < ARRAY_SIZE(s->evt); i++) {
+        int64_t at = timer_expire_time_ns(s->evt[i].timer);
+        if (at >= 0 && at <= now) {
+            timer_del(s->evt[i].timer);
+            evt_expire(&s->evt[i]);
+        }
+    }
+}
+
 static uint64_t s5l8930_pmgr_read(void *opaque, hwaddr off, unsigned size)
 {
     S5L8930PMGRState *s = opaque;
@@ -276,6 +320,9 @@ static uint64_t s5l8930_pmgr_read(void *opaque, hwaddr off, unsigned size)
      * can be sampled live.
      */
     if (off == PMGR_TICKS_LO) {
+        if (pmgr_sync_expiry()) {
+            pmgr_expire_due(s);
+        }
         return (uint32_t)pmgr_ticks(s);
     }
     if (off == PMGR_TICKS_HI) {
