@@ -569,6 +569,12 @@ struct CPUState {
     /* TODO Move common fields from CPUArchState here. */
     int cpu_index;
     int cluster_index;
+    /*
+     * Set by a board before realize: no other vCPU runs this CPU's translated code or shares
+     * atomics or ordering-sensitive memory with it outside the BQL, so MTTCG can translate it as
+     * if it were the only CPU (no CF_PARALLEL). See mttcg_start_vcpu_thread.
+     */
+    bool tcg_unshared;
     uint32_t tcg_cflags;
     uint32_t halted;
     int32_t exception_index;

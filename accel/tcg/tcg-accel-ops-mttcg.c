@@ -441,7 +441,21 @@ void mttcg_start_vcpu_thread(CPUState *cpu)
     char thread_name[VCPU_THREAD_NAME_SIZE];
 
     g_assert(tcg_enabled());
-    tcg_cpu_init_cflags(cpu, current_machine->smp.max_cpus > 1);
+    /*
+     * CF_PARALLEL makes guest atomics host atomics and guest barriers host fences, and it turns
+     * off the per-site indirect branch cache, whose slots the executing vCPU writes. A CPU its
+     * board marks tcg_unshared needs none of that even beside another vCPU: the A4 and S5L8920
+     * boards' application processor runs alongside an IOP core with its own code and no
+     * exclusives (an arm946), the two talking through mailbox MMIO under the BQL.
+     * LT_TCG_PARALLEL=on translates every CPU parallel again (A/B).
+     */
+    static int force_parallel = -1;
+    if (force_parallel < 0) {
+        const char *v = getenv("LT_TCG_PARALLEL");
+        force_parallel = v && !strcmp(v, "on");
+    }
+    tcg_cpu_init_cflags(cpu, current_machine->smp.max_cpus > 1 &&
+                             (force_parallel || !cpu->tcg_unshared));
 
     /* create a thread per vCPU with TCG (MTTCG) */
     snprintf(thread_name, VCPU_THREAD_NAME_SIZE, "CPU %d/TCG",

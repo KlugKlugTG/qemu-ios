@@ -269,6 +269,11 @@ static void s5l8930_iop_core_realize(DeviceState *dev, Error **errp)
     memory_region_add_subregion_overlap(&s->mem, S5L8930_VIC_BASE(0), &s->ap_vic_tap, 1);
 
     cpuobj = object_new(ARM_CPU_TYPE_NAME("arm946"));
+    /*
+     * Its firmware runs only here, and an arm946 has no exclusives: it reaches the AP through the
+     * mailbox and VIC registers, which take the BQL, so neither CPU needs parallel TCG.
+     */
+    CPU(cpuobj)->tcg_unshared = true;
     object_property_set_link(cpuobj, "memory", OBJECT(&s->mem), &error_abort);
     object_property_set_bool(cpuobj, "start-powered-off", true, &error_abort);
     object_property_set_bool(cpuobj, "realized", true, &error_fatal);

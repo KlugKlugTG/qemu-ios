@@ -1276,6 +1276,8 @@ static void ipad1_init(MachineState *machine)
     }
 
     cpuobj = object_new(machine->cpu_type);
+    /* The only CPU that runs the AP's code; the IOP core shares no atomics with it (tcg_unshared). */
+    CPU(cpuobj)->tcg_unshared = true;
     s->cpu = ARM_CPU(cpuobj);
     object_property_set_link(cpuobj, "memory", OBJECT(sysmem), &error_abort);
     object_property_set_bool(cpuobj, "has_el3", false, NULL);
