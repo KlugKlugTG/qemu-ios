@@ -27,6 +27,9 @@
  * Page I/O uses QEMU BlockBackends; ownership is published after data flush.
  */
 #include "qemu/osdep.h"
+#ifndef _WIN32
+#include <sys/mman.h>
+#endif
 #include "qemu/timer.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
@@ -210,7 +213,8 @@ struct S5L8930IOPState {
     VMChangeStateEntry *vm_state_entry;
     BlockBackend *ownership[NAND_BUSES][NAND_CES];
     bool ownership_pending[NAND_BUSES][NAND_CES];
-    uint8_t *dirty[NAND_BUSES][NAND_CES];   /* RAM ownership; publish after page flush */
+    uint8_t *dirty[NAND_BUSES][NAND_CES];   /* ownership, written as it grows; flushed at stop */
+    bool dirty_mapped[NAND_BUSES][NAND_CES];   /* dirty[] maps the .dirty file (POSIX hosts) */
     uint32_t page_stride;       /* store geometry: page + spare bytes */
     uint32_t store_page_bytes;
     uint32_t store_ppb;
@@ -301,12 +305,38 @@ static inline bool nand_dirty(S5L8930IOPState *s, int bus, uint32_t ce, uint32_t
     return s->overlay_dir && (s->dirty[bus][ce][page >> 3] & (1u << (page & 7)));
 }
 
-static inline void nand_set_dirty(S5L8930IOPState *s, int bus, uint32_t ce,
+/* True when this makes the overlay own the page (it read the base until now). */
+static inline bool nand_set_dirty(S5L8930IOPState *s, int bus, uint32_t ce,
                                   uint32_t page)
 {
     uint8_t bit = 1u << (page & 7);
-    s->ownership_pending[bus][ce] |= !(s->dirty[bus][ce][page >> 3] & bit);
+    bool fresh = !(s->dirty[bus][ce][page >> 3] & bit);
+
+    s->ownership_pending[bus][ce] |= fresh;
     s->dirty[bus][ce][page >> 3] |= bit;
+    return fresh;
+}
+
+/*
+ * Ownership reaches the .dirty file as soon as the overlay takes a page (not flushed: the stop flushes). Held in
+ * RAM until a clean stop, a killed engine (Android ends a process at will) left every page first written that
+ * session reading the base again while pages owned earlier kept their newest data: a mix no power loss makes,
+ * and yaFTL asserted on it at the next boot ("0 != yaFTL.blockArray[oldBlock].validPagesDNo"). Now a kill leaves
+ * what the guest last wrote; a host crash before the page data reaches the disk reads that page as a hole,
+ * blank, like an interrupted program. On POSIX hosts dirty[] is the file, mapped shared, so a bit set is in the
+ * page cache at once at no cost (a write per page first owned slowed an install's unpack); elsewhere the bytes
+ * are written here.
+ */
+static void nand_publish_owners(S5L8930IOPState *s, int bus, uint32_t ce, uint32_t first, uint32_t last)
+{
+    uint32_t a = first >> 3, n = (last >> 3) - a + 1;
+
+    if (s->dirty_mapped[bus][ce]) {
+        return;
+    }
+    if (blk_pwrite(s->ownership[bus][ce], a, n, s->dirty[bus][ce] + a, 0) < 0) {
+        error_report("s5l8930-iop: ownership write bus%d-ce%u; publishing at stop", bus, ce);
+    }
 }
 
 /* The dirty bitmap selects an overlay page; untouched pages read the base.
@@ -476,8 +506,8 @@ static uint32_t nand_program_page(S5L8930IOPState *s, int bus, uint32_t ce,
     }
     result = nand_io_error(blk_pwrite(blk, (int64_t)page * s->page_stride,
                                      s->page_stride, p, 0), bus, ce, "program");
-    if (result == FMI_STATUS_OK && s->overlay_dir) {
-        nand_set_dirty(s, bus, ce, page);
+    if (result == FMI_STATUS_OK && s->overlay_dir && nand_set_dirty(s, bus, ce, page)) {
+        nand_publish_owners(s, bus, ce, page, page);
     }
     return result;
 }
@@ -510,8 +540,13 @@ static uint32_t nand_erase_block(S5L8930IOPState *s, int bus, uint32_t ce,
                               (int64_t)s->store_ppb * s->page_stride,
                               BDRV_REQ_MAY_UNMAP), bus, ce, "erase");
     if (result == FMI_STATUS_OK && s->overlay_dir) {
+        bool fresh = false;
+
         for (uint32_t i = 0; i < s->store_ppb; i++) {
-            nand_set_dirty(s, bus, ce, first + i);
+            fresh |= nand_set_dirty(s, bus, ce, first + i);
+        }
+        if (fresh) {
+            nand_publish_owners(s, bus, ce, first, first + s->store_ppb - 1);
         }
     }
     return result;
@@ -1479,8 +1514,16 @@ static void iop_vm_state(void *opaque, bool running, RunState state)
                 if (!bitmap || !s->ownership_pending[bus][ce]) {
                     continue;
                 }
-                int result = blk_pwrite(bitmap, 0, ((size_t)s->pages_per_ce + 7) / 8,
-                                        s->dirty[bus][ce], 0);
+                size_t bytes = ((size_t)s->pages_per_ce + 7) / 8;
+                int result = 0;
+#ifndef _WIN32
+                if (s->dirty_mapped[bus][ce]) {
+                    result = msync(s->dirty[bus][ce], bytes, MS_SYNC) < 0 ? -errno : 0;
+                } else
+#endif
+                {
+                    result = blk_pwrite(bitmap, 0, bytes, s->dirty[bus][ce], 0);
+                }
                 if (result >= 0) {
                     result = blk_flush(bitmap);
                 }
@@ -1646,9 +1689,24 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
             if (!s->ownership[bus][ce]) {
                 return;
             }
-            s->dirty[bus][ce] = g_malloc0(bitmap_bytes);
-            int result = blk_pread(s->ownership[bus][ce], 0, bitmap_bytes,
-                                   s->dirty[bus][ce], 0);
+            int result = 0;
+#ifndef _WIN32
+            int mfd = open(f, O_RDWR);
+            void *map = mfd < 0 ? MAP_FAILED :
+                        mmap(NULL, bitmap_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, mfd, 0);
+
+            if (mfd >= 0) {
+                close(mfd);
+            }
+            if (map != MAP_FAILED) {
+                s->dirty[bus][ce] = map;
+                s->dirty_mapped[bus][ce] = true;
+            } else
+#endif
+            {
+                s->dirty[bus][ce] = g_malloc0(bitmap_bytes);
+                result = blk_pread(s->ownership[bus][ce], 0, bitmap_bytes, s->dirty[bus][ce], 0);
+            }
             if (result < 0) {
                 error_setg(errp, "cannot read NAND ownership %s: %s", f, strerror(-result));
                 return;
@@ -1797,7 +1855,14 @@ static void s5l8930_iop_finalize(Object *obj)
                 blk_detach_dev(s->ownership[bus][ce], DEVICE(obj));
                 blk_unref(s->ownership[bus][ce]);
             }
-            g_free(s->dirty[bus][ce]);
+#ifndef _WIN32
+            if (s->dirty_mapped[bus][ce]) {
+                munmap(s->dirty[bus][ce], ((size_t)s->pages_per_ce + 7) / 8);
+            } else
+#endif
+            {
+                g_free(s->dirty[bus][ce]);
+            }
         }
     }
     timer_free(s->irq_timer);
