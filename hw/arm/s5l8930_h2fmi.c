@@ -803,6 +803,60 @@ static uint32_t h2fmi_fifo_avail(void *opaque, hwaddr addr, bool to_device)
     return reg == FMI_DATA ? b->data_len : reg == FMI_META ? b->meta_len : ~0u;
 }
 
+/*
+ * A CDMA run on a FIFO window in one call (s5l8930_cdma_set_bulk), as the same bytes through
+ * h2fmi_read/h2fmi_write would leave it: reads pop what is queued, refilling between chunks as
+ * each pop does; writes append while there is room, then check for a whole page. Returns the
+ * bytes moved; a write that finds no room leaves the rest to the per-access path (which drops it).
+ */
+static uint32_t h2fmi_fifo_bulk(void *opaque, hwaddr addr, uint8_t *buf, uint32_t len,
+                                bool to_device)
+{
+    S5L8930H2FMIState *s = opaque;
+    H2FMIBus *b = &s->bus[(addr - S5L8930_H2FMI_BASE) / H2FMI_WINDOW % H2FMI_BUSES];
+    hwaddr reg = (addr - S5L8930_H2FMI_BASE) % H2FMI_WINDOW;
+    bool data = reg == FMI_DATA;
+    uint32_t done = 0;
+
+    if (!data && reg != FMI_META) {
+        return 0;
+    }
+    while (done < len) {
+        uint32_t n;
+
+        if (to_device) {
+            uint8_t *w = data ? b->wdata : b->wmeta;
+            uint32_t *wl = data ? &b->wdata_len : &b->wmeta_len;
+
+            n = MIN(len - done, (uint32_t)(data ? sizeof(b->wdata) : sizeof(b->wmeta)) - *wl);
+            if (!n) {
+                break;
+            }
+            memcpy(w + *wl, buf + done, n);
+            *wl += n;
+            h2fmi_write_check(b);
+        } else {
+            uint8_t *q = data ? b->data : b->meta;
+            uint32_t *off = data ? &b->data_off : &b->meta_off;
+            uint32_t *ql = data ? &b->data_len : &b->meta_len;
+
+            n = MIN(len - done, *ql);
+            if (!n) {
+                break;
+            }
+            memcpy(buf + done, q + *off, n);
+            *off += n;
+            *ql -= n;
+            if (!*ql) {
+                *off = 0;
+            }
+            h2fmi_drain(b);
+        }
+        done += n;
+    }
+    return done;
+}
+
 static void s5l8930_h2fmi_reset(DeviceState *dev)
 {
     S5L8930H2FMIState *s = S5L8930_H2FMI(dev);
@@ -830,6 +884,7 @@ static void s5l8930_h2fmi_realize(DeviceState *dev, Error **errp)
     if (s->cdma) {
         s5l8930_cdma_set_source(s->cdma, S5L8930_H2FMI_BASE,
                                 H2FMI_BUSES * H2FMI_WINDOW, h2fmi_fifo_avail, s);
+        s5l8930_cdma_set_bulk(s->cdma, S5L8930_H2FMI_BASE, h2fmi_fifo_bulk);
     }
 }
 

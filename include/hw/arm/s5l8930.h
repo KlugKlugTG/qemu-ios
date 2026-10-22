@@ -277,6 +277,13 @@ void ipod_scaler_set_version(DeviceState *scaler, uint32_t version);
 void s5l8930_cdma_set_source(DeviceState *dev, hwaddr base, hwaddr size,
                              uint32_t (*avail)(void *opaque, hwaddr addr, bool to_device),
                              void *opaque);
+/*
+ * Optional, for a source registered above: move len bytes between a FIFO window at addr and buf in
+ * one call, with the same effect as len / width register accesses in order. Returns the bytes moved.
+ */
+void s5l8930_cdma_set_bulk(DeviceState *dev, hwaddr base,
+                           uint32_t (*xfer)(void *opaque, hwaddr addr, uint8_t *buf, uint32_t len,
+                                            bool to_device));
 void s5l8930_cdma_kick(DeviceState *dev);
 void s5l8930_cdma_sink_done(DeviceState *dev, uint32_t fifo_base, uint32_t size);
 

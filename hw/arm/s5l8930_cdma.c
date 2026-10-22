@@ -139,6 +139,8 @@ typedef struct AESContext {
 typedef struct CDMASource {
     hwaddr base, size;
     uint32_t (*avail)(void *opaque, hwaddr addr, bool to_device);
+    /* optional: the whole run at once (s5l8930_cdma_set_bulk) */
+    uint32_t (*xfer)(void *opaque, hwaddr addr, uint8_t *buf, uint32_t len, bool to_device);
     void *opaque;
 } CDMASource;
 
@@ -346,6 +348,19 @@ static bool aes_apply(S5L8930CDMAState *s, AESContext *c, uint8_t *buf,
 
 /* ---- channel engine ---- */
 
+/* LT_CDMA_BULK=off: every FIFO run as register accesses (A/B). */
+static bool cdma_bulk_enabled(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_CDMA_BULK");
+
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 static bool cdma_is_memory(S5L8930CDMAState *s, uint32_t addr);
 
 /* The pacing source whose window holds addr, or NULL. */
@@ -439,10 +454,20 @@ static bool cdma_is_memory(S5L8930CDMAState *s, uint32_t addr)
            addr < S5L8930_DRAM_BASE + s->dram_size;
 }
 
-static void cdma_fifo_xfer(uint32_t fifo, uint32_t width, uint8_t *buf,
+/*
+ * A FIFO window with a bulk hook takes the run in one call: the NAND FIFOs, where a page went
+ * through ~2K register dispatches (~1.5M a second on the IOP while an app installs).
+ */
+static void cdma_fifo_xfer(S5L8930CDMAState *s, uint32_t fifo, uint32_t width, uint8_t *buf,
                            uint32_t len, bool to_device)
 {
-    for (uint32_t off = 0; off < len; off += width) {
+    CDMASource *src = cdma_src(s, fifo);
+    uint32_t done = 0;
+
+    if (src && src->xfer && cdma_bulk_enabled()) {
+        done = src->xfer(src->opaque, fifo, buf, len, to_device);
+    }
+    for (uint32_t off = done; off < len; off += width) {
         uint32_t n = MIN(width, len - off);
         if (to_device) {
             address_space_write(&address_space_memory, fifo,
@@ -553,7 +578,7 @@ static void cdma_run(S5L8930CDMAState *s, int ch)
                      * before this run gets to wait for that. */
                     s->sink_early[ch] = false;
                     s->in_run[ch] = true;
-                    cdma_fifo_xfer(dev, width, buf, len, true);
+                    cdma_fifo_xfer(s, dev, width, buf, len, true);
                     s->in_run[ch] = false;
                 }
             } else {
@@ -567,7 +592,7 @@ static void cdma_run(S5L8930CDMAState *s, int ch)
                                     MEMTXATTRS_UNSPECIFIED);
                     dev += len;
                 } else {
-                    cdma_fifo_xfer(dev, width, buf, len, false);
+                    cdma_fifo_xfer(s, dev, width, buf, len, false);
                 }
                 if (crypt) {
                     ok = aes_apply(s, aes, buf, len,
@@ -680,14 +705,14 @@ static bool cdma_paced_advance(S5L8930CDMAState *s, int ch, uint64_t upto)
 
             dma_memory_read(&address_space_memory, addr + from, buf, to - from,
                             MEMTXATTRS_UNSPECIFIED);
-            cdma_fifo_xfer(c->fifo, width, buf, to - from, true);
+            cdma_fifo_xfer(s, c->fifo, width, buf, to - from, true);
         } else if (!to_device && s->paced_sent[ch] < base + len && upto > base) {
             /* Capture (i2s RX FIFO -> memory), same pacing. */
             uint32_t from = MAX(s->paced_sent[ch], base) - base;
             uint32_t to = MIN(upto, base + len) - base;
             g_autofree uint8_t *buf = g_malloc(to - from);
 
-            cdma_fifo_xfer(c->fifo, width, buf, to - from, false);
+            cdma_fifo_xfer(s, c->fifo, width, buf, to - from, false);
             dma_memory_write(&address_space_memory, addr + from, buf, to - from,
                              MEMTXATTRS_UNSPECIFIED);
         }
@@ -974,6 +999,21 @@ void s5l8930_cdma_set_source(DeviceState *dev, hwaddr base, hwaddr size,
         }
     }
     g_assert_not_reached();                     /* more sources than src[] */
+}
+
+void s5l8930_cdma_set_bulk(DeviceState *dev, hwaddr base,
+                           uint32_t (*xfer)(void *opaque, hwaddr addr, uint8_t *buf, uint32_t len,
+                                            bool to_device))
+{
+    S5L8930CDMAState *s = S5L8930_CDMA(dev);
+
+    for (int i = 0; i < ARRAY_SIZE(s->src); i++) {
+        if (s->src[i].avail && s->src[i].base == base) {
+            s->src[i].xfer = xfer;
+            return;
+        }
+    }
+    g_assert_not_reached();                     /* set_source first */
 }
 
 /* The FIFO-fed device has more data: resume every channel stalled on it. */
