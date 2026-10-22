@@ -7,6 +7,7 @@
 #include "qemu/error-report.h"
 #include "qemu/bswap.h"
 #include "qemu/timer.h"
+#include "qemu/main-loop.h"
 
 /* 7E18 AppleM2ScalerCSCDriver: 0xc0732388 programs formats, 0xc07323f0
  * source geometry, 0xc073246c destination geometry, 0xc0730288 acknowledges
@@ -158,30 +159,51 @@ static bool scaler_rgb(IPodScalerState *s)
     bool cw = rot && (r[0x58 / 4] & 3) == 3;
     sx = sx ? sx : ((uint64_t)sw << 16) / dw;
     sy = sy ? sy : ((uint64_t)sh << 16) / dh;
-    g_autofree uint8_t *src = g_malloc((size_t)pitch * sh * 4);
+    g_autofree uint32_t *src = g_new(uint32_t, (size_t)pitch * sh);
     for (unsigned y = 0; y < sh; y++) {
         if (!scaler_read_bus(s, scaler_row(r[0x14 / 4], y, ss, ROUND_UP(sw * 4, 256), stiled),
-                             src + (size_t)y * pitch * 4, sw * 4)) {
+                             src + (size_t)y * pitch, sw * 4)) {
             return false;
         }
     }
-    g_autofree uint32_t *row = g_new(uint32_t, dw);
+    /*
+     * Destination (x, y) is src[xo[x] + yo[y]]. Turned, a destination row walks a source column, so the
+     * pixels go in 32x32 blocks: the whole frame turned a pixel at a time missed the cache on every read,
+     * and CoreAnimation turns every frame of a landscape game this way (Jetpack Joyride on the iPod touch 4G).
+     */
+    g_autofree size_t *xo = g_new(size_t, dw), *yo = g_new(size_t, dh);
+    for (unsigned x = 0; x < dw; x++) {
+        unsigned i = MIN(((uint64_t)x * sx) >> 16, (rot ? sh : sw) - 1);
+        xo[x] = cw ? (size_t)(sh - 1 - i) * pitch : rot ? (size_t)i * pitch : i;
+    }
     for (unsigned y = 0; y < dh; y++) {
-        const uint32_t *line = (const uint32_t *)src +
-            (size_t)MIN(((uint64_t)y * sy) >> 16, sh - 1) * pitch;
-
-        for (unsigned x = 0; x < dw; x++) {
-            if (cw) {       /* destination (x, y) is source column y, row sh - 1 - x */
-                unsigned v = sh - 1 - MIN(((uint64_t)x * sx) >> 16, sh - 1);
-                row[x] = ((const uint32_t *)src)[(size_t)v * pitch + MIN(((uint64_t)y * sy) >> 16, sw - 1)];
-            } else if (rot) {   /* destination (x, y) is source column sw - 1 - y, row x */
-                unsigned u = sw - 1 - MIN(((uint64_t)y * sy) >> 16, sw - 1);
-                row[x] = ((const uint32_t *)src)[(size_t)MIN(((uint64_t)x * sx) >> 16, sh - 1) * pitch + u];
-            } else {
-                row[x] = line[MIN(((uint64_t)x * sx) >> 16, sw - 1)];
+        unsigned i = MIN(((uint64_t)y * sy) >> 16, (rot ? sw : sh) - 1);
+        yo[y] = cw ? i : rot ? sw - 1 - i : (size_t)i * pitch;
+    }
+    g_autofree uint32_t *dst = g_new(uint32_t, (size_t)dw * dh);
+    if (rot) {
+        for (unsigned by = 0; by < dh; by += 32) {
+            for (unsigned bx = 0; bx < dw; bx += 32) {
+                for (unsigned x = bx; x < MIN(bx + 32, dw); x++) {
+                    const uint32_t *col = src + xo[x];
+                    for (unsigned y = by; y < MIN(by + 32, dh); y++) {
+                        dst[(size_t)y * dw + x] = col[yo[y]];
+                    }
+                }
             }
         }
-        if (!scaler_write_bus(s, scaler_row(r[0x34 / 4], y, ds, ROUND_UP(dw * 4, 256), dtiled), row, dw * 4)) {
+    } else {
+        for (unsigned y = 0; y < dh; y++) {
+            const uint32_t *line = src + yo[y];
+            uint32_t *row = dst + (size_t)y * dw;
+            for (unsigned x = 0; x < dw; x++) {
+                row[x] = line[xo[x]];
+            }
+        }
+    }
+    for (unsigned y = 0; y < dh; y++) {
+        if (!scaler_write_bus(s, scaler_row(r[0x34 / 4], y, ds, ROUND_UP(dw * 4, 256), dtiled),
+                              dst + (size_t)y * dw, dw * 4)) {
             return false;
         }
     }
@@ -352,7 +374,21 @@ static void scaler_write(void *opaque, hwaddr off, uint64_t value, unsigned size
             timer_del(s->done);
             s->regs[3] |= 1;
         }
-        if (!scaler_convert(s) && !scaler_rgb(s) && !scaler_nv12(s)) error_report("scaler: unsupported or invalid transfer %08x -> %08x geometry %08x -> %08x",
+        /*
+         * The pixel work only touches guest RAM and these registers, which nothing else writes during it:
+         * release the BQL, as the display's latch does, so the main loop is not held up for the frame.
+         */
+        bool unlock = bql_locked();
+        bool ok;
+
+        if (unlock) {
+            bql_unlock();
+        }
+        ok = scaler_convert(s) || scaler_rgb(s) || scaler_nv12(s);
+        if (unlock) {
+            bql_lock();
+        }
+        if (!ok) error_report("scaler: unsupported or invalid transfer %08x -> %08x geometry %08x -> %08x",
             s->regs[4], s->regs[12], s->regs[9], s->regs[16]);
         timer_mod(s->done, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MAX(20000, pixels * 5));
     }
