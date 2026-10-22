@@ -154,6 +154,7 @@ struct S5L8930DisplayState {
     uint8_t *src, *src_next;
     size_t src_size, src_len;
     GArray *fetch;           /* FbSeg: the reads layers_fetch planned, run by fetch_run */
+    GArray *vfetch;          /* FbSeg: the video layer's planes, planned by video_plan */
     UILayer src_layers[2];
     uint64_t front_gen;
     uint64_t shown_gen;
@@ -574,12 +575,12 @@ typedef struct FbSeg {
     size_t off, len;
 } FbSeg;
 
-static void fb_plan(S5L8930DisplayState *s, uint32_t va, size_t off, size_t len)
+static void fb_plan_into(S5L8930DisplayState *s, GArray *plan, uint32_t va, size_t off, size_t len)
 {
     while (len) {
         size_t n = MIN(len, 0x1000 - (va & 0xfff));
         hwaddr pa = dart_xlate(s, va);
-        FbSeg *last = s->fetch->len ? &g_array_index(s->fetch, FbSeg, s->fetch->len - 1) : NULL;
+        FbSeg *last = plan->len ? &g_array_index(plan, FbSeg, plan->len - 1) : NULL;
 
         /* Pages contiguous in both: one read (an IOSurface is mostly physically contiguous). */
         if (last && last->off + last->len == off &&
@@ -587,7 +588,7 @@ static void fb_plan(S5L8930DisplayState *s, uint32_t va, size_t off, size_t len)
             last->len += n;
         } else {
             FbSeg g = { pa, off, n };
-            g_array_append_val(s->fetch, g);
+            g_array_append_val(plan, g);
         }
         va += n;
         off += n;
@@ -595,11 +596,16 @@ static void fb_plan(S5L8930DisplayState *s, uint32_t va, size_t off, size_t len)
     }
 }
 
-/* Run the planned reads into `dst`. RAM reads need no BQL; MMIO takes it in the dispatch. */
-static void fetch_run(S5L8930DisplayState *s, uint8_t *dst)
+static void fb_plan(S5L8930DisplayState *s, uint32_t va, size_t off, size_t len)
 {
-    for (guint i = 0; i < s->fetch->len; i++) {
-        FbSeg *g = &g_array_index(s->fetch, FbSeg, i);
+    fb_plan_into(s, s->fetch, va, off, len);
+}
+
+/* Run the planned reads into `dst`. RAM reads need no BQL; MMIO takes it in the dispatch. */
+static void plan_run(GArray *plan, uint8_t *dst)
+{
+    for (guint i = 0; i < plan->len; i++) {
+        FbSeg *g = &g_array_index(plan, FbSeg, i);
 
         if (g->pa == (hwaddr)-1) {
             memset(dst + g->off, 0, g->len);
@@ -607,7 +613,12 @@ static void fetch_run(S5L8930DisplayState *s, uint8_t *dst)
             address_space_read(&address_space_memory, g->pa, MEMTXATTRS_UNSPECIFIED, dst + g->off, g->len);
         }
     }
-    g_array_set_size(s->fetch, 0);
+    g_array_set_size(plan, 0);
+}
+
+static void fetch_run(S5L8930DisplayState *s, uint8_t *dst)
+{
+    plan_run(s->fetch, dst);
 }
 
 /* Read `len` bytes of framebuffer at IOVA `va`, page by page. */
@@ -813,44 +824,86 @@ static bool layers(S5L8930DisplayState *s, unsigned w, unsigned h, UILayer u[2],
  * ponytail: nearest sampling where the pipe has polyphase taps (+0x3120 on); the blend order taken as
  * video under UI1 (+0x2044/+0x2048); low stride bits (+0x3088 = 0x142) dropped as flags.
  */
-static bool video_compose(S5L8930DisplayState *s, unsigned w, unsigned h, uint32_t *out)
+typedef struct VideoPlan {
+    unsigned sw, sh, dw, dh, x0, y0;
+    int m[9];
+    uint8_t *planes;         /* Y (sw x sh) then CbCr (sw x sh / 2), filled by plan_run(s->vfetch) */
+} VideoPlan;
+
+/* Validate the video layer and plan its planes' reads (DART translation needs the BQL). */
+static bool video_plan(S5L8930DisplayState *s, VideoPlan *v)
 {
     uint32_t *r = s->pipe[0].regs;
-    unsigned sw = (r[0x3094 / 4] >> 16) & 0xfff, sh = r[0x3094 / 4] & 0xfff;
-    unsigned dw = (r[0x309c / 4] >> 16) & 0xfff, dh = r[0x309c / 4] & 0xfff;
-    unsigned x0 = r[0x30a0 / 4] >> 16, y0 = r[0x30a0 / 4] & 0xffff;
     unsigned ys = r[0x3088 / 4] & ~0xfu, uvs = r[0x308c / 4] & ~0xfu;
-    int m[9];
 
-    if (!(r[DP_LAYERS / 4] & 0x400) || !sw || !sh || !dw || !dh || sw > 4096 || sh > 4096 ||
-        ys < sw || uvs < sw || (sw | sh) & 1) {
+    v->sw = (r[0x3094 / 4] >> 16) & 0xfff, v->sh = r[0x3094 / 4] & 0xfff;
+    v->dw = (r[0x309c / 4] >> 16) & 0xfff, v->dh = r[0x309c / 4] & 0xfff;
+    v->x0 = r[0x30a0 / 4] >> 16, v->y0 = r[0x30a0 / 4] & 0xffff;
+    v->planes = NULL;
+    if (!(r[DP_LAYERS / 4] & 0x400) || !v->sw || !v->sh || !v->dw || !v->dh || v->sw > 4096 ||
+        v->sh > 4096 || ys < v->sw || uvs < v->sw || (v->sw | v->sh) & 1) {
         return false;
     }
     for (int i = 0; i < 9; i++) {
-        m[i] = (int16_t)r[0x3024 / 4 + i];
+        v->m[i] = (int16_t)r[0x3024 / 4 + i];
     }
-    g_autofree uint8_t *yp = g_malloc((size_t)sw * sh), *uvp = g_malloc((size_t)sw * sh / 2);
-    for (unsigned y = 0; y < sh; y++) {
-        fb_read(s, r[0x307c / 4] + y * ys, yp + (size_t)y * sw, sw);
+    v->planes = g_malloc((size_t)v->sw * v->sh * 3 / 2);
+    for (unsigned y = 0; y < v->sh; y++) {
+        fb_plan_into(s, s->vfetch, r[0x307c / 4] + y * ys, (size_t)y * v->sw, v->sw);
         if (!(y & 1)) {
-            fb_read(s, r[0x3080 / 4] + y / 2 * uvs, uvp + (size_t)y / 2 * sw, sw);
+            fb_plan_into(s, s->vfetch, r[0x3080 / 4] + y / 2 * uvs,
+                         (size_t)v->sw * v->sh + (size_t)y / 2 * v->sw, v->sw);
         }
     }
+    return true;
+}
+
+/*
+ * The video layer onto a w x h panel (no BQL needed): nearest sampling through per-frame column and
+ * row tables, then the pipe's YCbCr matrix. A divide per pixel was most of the 8 ms the VBL tick held
+ * the BQL for every vsync of a movie.
+ */
+static void video_render(const VideoPlan *v, unsigned w, unsigned h, uint32_t *out)
+{
+    const uint8_t *yp = v->planes, *uvp = v->planes + (size_t)v->sw * v->sh;
+    unsigned x1 = MIN(v->x0 + v->dw, w), y1 = MIN(v->y0 + v->dh, h);
+    g_autofree unsigned *xs = g_new(unsigned, MAX(x1, 1));
+
     memset(out, 0, (size_t)w * h * 4);
-    for (unsigned y = y0; y < MIN(y0 + dh, h); y++) {
-        unsigned sy = (unsigned)((uint64_t)(y - y0) * sh / dh);
-        for (unsigned x = x0; x < MIN(x0 + dw, w); x++) {
-            unsigned sx = (unsigned)((uint64_t)(x - x0) * sw / dw);
-            const uint8_t *c = uvp + (size_t)(sy / 2) * sw + (sx & ~1u);
-            int in[3] = { yp[(size_t)sy * sw + sx] - 16, c[0] - 128, c[1] - 128 };
+    for (unsigned x = v->x0; x < x1; x++) {
+        xs[x] = (unsigned)((uint64_t)(x - v->x0) * v->sw / v->dw);
+    }
+    for (unsigned y = v->y0; y < y1; y++) {
+        unsigned sy = (unsigned)((uint64_t)(y - v->y0) * v->sh / v->dh);
+        const uint8_t *yrow = yp + (size_t)sy * v->sw, *crow = uvp + (size_t)(sy / 2) * v->sw;
+        uint32_t *d = out + (size_t)y * w;
+
+        for (unsigned x = v->x0; x < x1; x++) {
+            unsigned sx = xs[x];
+            const uint8_t *c = crow + (sx & ~1u);
+            int Y = yrow[sx] - 16, cb = c[0] - 128, cr = c[1] - 128;
             uint32_t px = 0xff000000u;
+
             for (int k = 0; k < 3; k++) {
-                int v = (m[k * 3] * in[0] + m[k * 3 + 1] * in[1] + m[k * 3 + 2] * in[2] + 2048) >> 12;
-                px |= (uint32_t)MIN(255, MAX(0, v)) << (16 - 8 * k);    /* BGRA: R in bits 16-23 */
+                int t = (v->m[k * 3] * Y + v->m[k * 3 + 1] * cb + v->m[k * 3 + 2] * cr + 2048) >> 12;
+                px |= (uint32_t)MIN(255, MAX(0, t)) << (16 - 8 * k);    /* BGRA: R in bits 16-23 */
             }
-            out[(size_t)y * w + x] = px;
+            d[x] = px;
         }
     }
+}
+
+/* The video layer composed under the BQL (the live display path). */
+static bool video_compose(S5L8930DisplayState *s, unsigned w, unsigned h, uint32_t *out)
+{
+    VideoPlan v;
+
+    if (!video_plan(s, &v)) {
+        return false;
+    }
+    plan_run(s->vfetch, v.planes);
+    video_render(&v, w, h, out);
+    g_free(v.planes);
     return true;
 }
 
@@ -955,7 +1008,8 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
     size_t len = valid ? layers_fetch(s, u, on) : 0;
     bool movie = valid && (s->pipe[0].regs[DP_LAYERS / 4] & 0x400);
     g_autofree uint32_t *base = movie ? g_new(uint32_t, (size_t)w * h) : NULL;
-    bool video = movie && video_compose(s, w, h, base);
+    VideoPlan vp;
+    bool video = movie && video_plan(s, &vp);
     bool changed;
 
     /*
@@ -963,11 +1017,17 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
      * 640x960 panel took the main loop milliseconds every swap, and the vCPU, which takes the BQL
      * thousands of times a second, waited behind it. The reads were planned (translated) above,
      * under the lock; the buffers are touched only by the main loop, which is running this, and the
-     * swap below is locked again. A movie frame (video_compose) still reads under the lock.
+     * swap below is locked again. A movie frame too: composed under the lock it held the BQL ~8 ms
+     * every vsync (Asphalt 5's intro on the iPod touch 4G).
      */
-    bool unlocked = vbl && bql_locked() && !movie;
+    bool unlocked = vbl && bql_locked();
     if (unlocked) {
         bql_unlock();
+    }
+    if (video) {
+        plan_run(s->vfetch, vp.planes);
+        video_render(&vp, w, h, base);
+        g_free(vp.planes);
     }
     fetch_run(s, s->src_next);
     /* The front was composed from these very layers and bytes. */
@@ -1162,6 +1222,7 @@ static void s5l8930_display_realize(DeviceState *dev, Error **errp)
     }
     s->vbl = timer_new_ns(QEMU_CLOCK_VIRTUAL, vbl_tick, s);
     s->fetch = g_array_new(false, false, sizeof(FbSeg));
+    s->vfetch = g_array_new(false, false, sizeof(FbSeg));
     s->con = graphic_console_init(dev, 0, &display_gfx_ops, s);
     s->pipe[0].native = s->width << 16 | s->height;
     if (s->pw || s->ph) {
