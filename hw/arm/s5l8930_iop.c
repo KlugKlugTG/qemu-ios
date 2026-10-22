@@ -259,6 +259,8 @@ struct S5L8930IOPState {
     char *overlay_dir;      /* copy-on-write overlay; base is then read-only */
     BlockBackend *chip[NAND_BUSES][NAND_CES];
     BlockBackend *ovl[NAND_BUSES][NAND_CES];
+    int chip_fd[NAND_BUSES][NAND_CES];      /* the same files for direct page I/O; -1 = none */
+    int ovl_fd[NAND_BUSES][NAND_CES];
     VMChangeStateEntry *vm_state_entry;
     BlockBackend *ownership[NAND_BUSES][NAND_CES];
     bool ownership_pending[NAND_BUSES][NAND_CES];
@@ -400,6 +402,73 @@ static BlockBackend *nand_backend(S5L8930IOPState *s, int bus, uint32_t ce,
            s->ovl[bus][ce] : s->chip[bus][ce];
 }
 
+/*
+ * Page reads and programs go to the page files with pread/pwrite (POSIX hosts). Through the block layer
+ * each was a coroutine plus a thread-pool round trip (submit, a worker's syscall, its completion back
+ * through an eventfd and aio_poll), ~45 us on the desktop for a 4 KiB page from the page cache, taken
+ * with the BQL held: an app install programs ~2.3K pages a second, each with a read before the program,
+ * so ~28% of the IOP's wall time went there and the AP waited for it. Erases (rare) and the flush at stop
+ * stay on the block layer; the stop fdatasyncs these descriptors too, since writes that bypass the
+ * BlockBackend leave its flush a no-op. LT_NAND_DIRECT=off keeps every page on the block layer (A/B).
+ */
+static bool nand_direct_enabled(void)
+{
+#ifdef _WIN32
+    return false;
+#else
+    const char *v = getenv("LT_NAND_DIRECT");
+
+    return !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+#endif
+}
+
+static int nand_fd(S5L8930IOPState *s, int bus, uint32_t ce, uint32_t page, bool for_write)
+{
+    return s->overlay_dir && (for_write || nand_dirty(s, bus, ce, page)) ?
+           s->ovl_fd[bus][ce] : s->chip_fd[bus][ce];
+}
+
+/* len bytes at off, through fd when there is one, else the BlockBackend: 0 or -errno. */
+static int nand_page_io(int fd, BlockBackend *blk, int64_t off, uint32_t len, void *buf, bool write)
+{
+#ifndef _WIN32
+    if (fd >= 0) {
+        uint8_t *p = buf;
+
+        while (len) {
+            ssize_t n = write ? pwrite(fd, p, len, off) : pread(fd, p, len, off);
+
+            if (n < 0 && errno == EINTR) {
+                continue;
+            }
+            if (n <= 0) {
+                return n < 0 ? -errno : -EIO;
+            }
+            p += n;
+            off += n;
+            len -= n;
+        }
+        return 0;
+    }
+#endif
+    return write ? blk_pwrite(blk, off, len, buf, 0) : blk_pread(blk, off, len, buf, 0);
+}
+
+static int nand_open_fd(const char *path, bool writable)
+{
+#ifndef _WIN32
+    if (nand_direct_enabled()) {
+        int fd = open(path, (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC);
+
+        if (fd < 0) {
+            warn_report("s5l8930-iop: %s: %s; its pages go through the block layer", path, strerror(errno));
+        }
+        return fd;
+    }
+#endif
+    return -1;
+}
+
 static uint32_t nand_io_error(int result, int bus, uint32_t ce,
                               const char *operation)
 {
@@ -436,7 +505,7 @@ static uint32_t nand_read_page(S5L8930IOPState *s, int bus, uint32_t ce,
     len = s->page_stride;
     p = g_malloc(len);
     int64_t t0 = ioprof_t0();
-    result = nand_io_error(blk_pread(blk, (int64_t)page * len, len, p, 0),
+    result = nand_io_error(nand_page_io(nand_fd(s, bus, ce, page, false), blk, (int64_t)page * len, len, p, false),
                            bus, ce, "read");
     ioprof_done(IOPROF_PREAD, IOPROF_PREAD_NS, t0);
     s5l8930_ioprof_add(IOPROF_PG_READ, 1);
@@ -529,8 +598,8 @@ static uint32_t nand_program_page(S5L8930IOPState *s, int bus, uint32_t ce,
     p = g_malloc(s->page_stride);
     old = nand_backend(s, bus, ce, page, false);
     int64_t t0 = ioprof_t0();
-    result = nand_io_error(blk_pread(old, (int64_t)page * s->page_stride,
-                                    s->page_stride, p, 0), bus, ce, "read before program");
+    result = nand_io_error(nand_page_io(nand_fd(s, bus, ce, page, false), old, (int64_t)page * s->page_stride,
+                                        s->page_stride, p, false), bus, ce, "read before program");
     ioprof_done(IOPROF_PREAD, IOPROF_PREAD_NS, t0);
     s5l8930_ioprof_add(IOPROF_PG_PROG, 1);
     if (result != FMI_STATUS_OK) {
@@ -560,8 +629,8 @@ static uint32_t nand_program_page(S5L8930IOPState *s, int bus, uint32_t ce,
         }
     }
     t0 = ioprof_t0();
-    result = nand_io_error(blk_pwrite(blk, (int64_t)page * s->page_stride,
-                                     s->page_stride, p, 0), bus, ce, "program");
+    result = nand_io_error(nand_page_io(nand_fd(s, bus, ce, page, true), blk, (int64_t)page * s->page_stride,
+                                        s->page_stride, p, true), bus, ce, "program");
     ioprof_done(IOPROF_PWRITE, IOPROF_PWRITE_NS, t0);
     if (result == FMI_STATUS_OK && s->overlay_dir && nand_set_dirty(s, bus, ce, page)) {
         nand_publish_owners(s, bus, ce, page, page);
@@ -1560,7 +1629,12 @@ static void iop_vm_state(void *opaque, bool running, RunState state)
     for (int bus = 0; bus < NAND_BUSES; bus++) {
         for (int ce = 0; ce < NAND_CES; ce++) {
             BlockBackend *pages = s->overlay_dir ? s->ovl[bus][ce] : s->chip[bus][ce];
+            int fd = s->overlay_dir ? s->ovl_fd[bus][ce] : s->chip_fd[bus][ce];
             int result = pages ? blk_flush(pages) : 0;
+
+            if (result >= 0 && fd >= 0 && qemu_fdatasync(fd) < 0) {
+                result = -errno;
+            }
             if (result < 0) {
                 failed = true;
                 error_report("s5l8930-iop: NAND flush bus%d-ce%d: %s", bus, ce, strerror(-result));
@@ -1735,6 +1809,7 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
             if (!s->chip[bus][ce]) {
                 return;
             }
+            s->chip_fd[bus][ce] = nand_open_fd(f, !s->overlay_dir);
             if (!s->overlay_dir) {
                 continue;
             }
@@ -1744,6 +1819,7 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
             if (!s->ovl[bus][ce]) {
                 return;
             }
+            s->ovl_fd[bus][ce] = nand_open_fd(f, true);
             g_free(f);
             f = g_strdup_printf("%s/bus%d-ce%d.dirty", s->overlay_dir, bus, ce);
             size_t bitmap_bytes = ((size_t)s->pages_per_ce + 7) / 8;
@@ -1799,6 +1875,11 @@ static void s5l8930_iop_init(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
     int i;
 
+    for (i = 0; i < NAND_BUSES; i++) {
+        for (int ce = 0; ce < NAND_CES; ce++) {
+            s->chip_fd[i][ce] = s->ovl_fd[i][ce] = -1;
+        }
+    }
     /* K48 part; realize validates the page store against these. */
     for (i = 0; i < NAND_BUSES; i++) {
         s->bytes_per_page[i] = 8192;
@@ -1912,6 +1993,12 @@ static void s5l8930_iop_finalize(Object *obj)
             if (s->chip[bus][ce]) {
                 blk_detach_dev(s->chip[bus][ce], DEVICE(obj));
                 blk_unref(s->chip[bus][ce]);
+            }
+            if (s->ovl_fd[bus][ce] >= 0) {
+                close(s->ovl_fd[bus][ce]);
+            }
+            if (s->chip_fd[bus][ce] >= 0) {
+                close(s->chip_fd[bus][ce]);
             }
             if (s->ownership[bus][ce]) {
                 blk_detach_dev(s->ownership[bus][ce], DEVICE(obj));
