@@ -358,6 +358,18 @@ static bool vbl_irq_first(void)
     return on;
 }
 
+/* LT_FRAME_COPY_UNLOCKED=off copies the latched frame to the console with the BQL held. */
+static bool frame_copy_unlocked(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_FRAME_COPY_UNLOCKED");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 /* One frame: the queued swaps complete and the VBLs fire. */
 static void vbl_tick(void *opaque)
 {
@@ -1208,6 +1220,15 @@ static void display_update(void *opaque)
         s->shown = 0;   /* live layers: drawn every refresh, as they may change without a swap */
     }
     s->shown_surface = surface;
+    /*
+     * The latched frame goes to the console without the BQL (2.4 MiB at 640x960, half a
+     * millisecond of a phone's main loop): both buffers belong to the main loop, which is running
+     * this. The live layers are guest memory, read under the lock.
+     */
+    bool unlocked = img && img != live && bql_locked() && frame_copy_unlocked();
+    if (unlocked) {
+        bql_unlock();
+    }
     for (unsigned y = 0; y < h; y++) {
         uint8_t *d = surface_data(surface) + y * surface_stride(surface);
 
@@ -1218,6 +1239,9 @@ static void display_update(void *opaque)
         } else {
             gamma_row(s, img + (size_t)y * w, (uint32_t *)d, w);
         }
+    }
+    if (unlocked) {
+        bql_lock();
     }
     dpy_gfx_update(s->con, 0, 0, w, h);
 }

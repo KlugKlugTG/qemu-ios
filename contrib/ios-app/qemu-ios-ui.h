@@ -94,6 +94,7 @@ uint64_t qemu_ios_profile_begin(void);
 void qemu_ios_profile_gl(uint64_t start, uint32_t slot, uint32_t context);
 void qemu_ios_profile_lock(uint64_t start, uint64_t end, bool wait,
                            const char *file, int line);
+void qemu_ios_profile_callback(void *fn, const char *name, int64_t ns);
 /* Session-latched host NAND I/O failure; thread-safe to poll from the UI. */
 bool qemu_ios_ui_storage_failed(void);
 

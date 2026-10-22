@@ -23,6 +23,7 @@
 #include "qemu/rcu_queue.h"
 #include "qemu/sockets.h"
 #include "qemu/cutils.h"
+#include "qemu/timer.h"
 #include "system/iothread.h"
 #include "trace.h"
 #include "aio-posix.h"
@@ -341,7 +342,13 @@ static bool aio_dispatch_handler(AioContext *ctx, AioHandler *node)
     if (!QLIST_IS_INSERTED(node, node_deleted) &&
         (revents & (G_IO_IN | G_IO_HUP | G_IO_ERR)) &&
         node->io_read) {
-        node->io_read(node->opaque);
+        if (unlikely(it_acct_cb_hook)) {
+            int64_t t0 = get_clock();
+            node->io_read(node->opaque);
+            it_acct_cb_hook((void *)node->io_read, NULL, get_clock() - t0);
+        } else {
+            node->io_read(node->opaque);
+        }
 
         /* aio_notify() does not count as progress */
         if (node->opaque != &ctx->notifier) {
@@ -351,7 +358,13 @@ static bool aio_dispatch_handler(AioContext *ctx, AioHandler *node)
     if (!QLIST_IS_INSERTED(node, node_deleted) &&
         (revents & (G_IO_OUT | G_IO_ERR)) &&
         node->io_write) {
-        node->io_write(node->opaque);
+        if (unlikely(it_acct_cb_hook)) {
+            int64_t t0 = get_clock();
+            node->io_write(node->opaque);
+            it_acct_cb_hook((void *)node->io_write, NULL, get_clock() - t0);
+        } else {
+            node->io_write(node->opaque);
+        }
         progress = true;
     }
 

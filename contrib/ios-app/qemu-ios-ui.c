@@ -75,6 +75,7 @@ static void ios_sequence_reset(void *opaque)
 
 #ifndef _WIN32
 #include <sys/resource.h>
+#include <dlfcn.h>
 #endif
 
 #include "qapi/qapi-commands-migration.h"
@@ -288,6 +289,7 @@ void it_acct_frame_snapshot(int64_t v[6]);
  * Completed GL calls are grouped by publication interval; S rows retain slow
  * call intervals, including calls spanning a publication boundary. */
 extern bool it_profile_on;
+void it_profile_cb_enable(void);
 static GMutex profile_mutex;
 static FILE *profile_file;
 static int profile_error;
@@ -449,7 +451,9 @@ int qemu_ios_profile_start(const char *path)
                 "# G end-ns slot count total-ns max-ns name (completed calls since preceding F)\n"
                 "# S start-ns end-ns slot context (GL calls >=500us)\n"
                 "# W/H start-ns end-ns file line (BQL wait/hold >=500us)\n"
+                "# C start-ns end-ns callback (main-loop timer, bottom half or fd handler >=500us)\n"
                 "# begin %" PRIu64 "; instruction counters require IT_VCPU_ACCT\n", profile_started);
+        it_profile_cb_enable();
         qatomic_set(&it_profile_on, true);
     }
     g_mutex_unlock(&profile_mutex);
@@ -544,6 +548,35 @@ void qemu_ios_profile_lock(uint64_t start, uint64_t end, bool wait,
     g_mutex_unlock(&profile_mutex);
 }
 
+/* Bottom halves by name; timers and fd handlers by symbol, or library offset in a stripped build. */
+void qemu_ios_profile_callback(void *fn, const char *name, int64_t ns)
+{
+    uint64_t end = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    char buf[96];
+#ifndef _WIN32
+    Dl_info info = { 0 };
+
+    if (!name && dladdr(fn, &info) && info.dli_sname) {
+        name = info.dli_sname;
+    } else if (!name && info.dli_fname) {
+        const char *base = strrchr(info.dli_fname, '/');
+        snprintf(buf, sizeof(buf), "%s+0x%" PRIxPTR, base ? base + 1 : info.dli_fname,
+                 (uintptr_t)fn - (uintptr_t)info.dli_fbase);
+        name = buf;
+    }
+#endif
+    if (!name) {
+        snprintf(buf, sizeof(buf), "%p", fn);
+        name = buf;
+    }
+    g_mutex_lock(&profile_mutex);
+    if (qatomic_read(&it_profile_on) && end - ns >= profile_started) {
+        profile_printf_locked("C %" PRIu64 " %" PRIu64 " %s\n", end - ns, end, name);
+        profile_check_locked();
+    }
+    g_mutex_unlock(&profile_mutex);
+}
+
 static void ios_profile_frame(uint64_t due, uint64_t serial)
 {
     int64_t v[6];
@@ -633,8 +666,23 @@ static void ios_capture(DisplaySurface *surface)
     int next, y;
     uint8_t *dst;
 
+    /*
+     * The compare and copy run without the BQL (two passes over 2.4 MiB at 640x960): the surface
+     * belongs to the main loop, which is running this, and the buffers to frame_lock.
+     * LT_FRAME_COPY_UNLOCKED=off keeps the BQL.
+     */
+    static int unlocked_copy = -1;
+    if (unlocked_copy < 0) {
+        const char *v = getenv("LT_FRAME_COPY_UNLOCKED");
+        unlocked_copy = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    bool unlocked = unlocked_copy && bql_locked();
+
     ios_init_frame_lock();
     ios_frame_path(IOS_FP_CAPTURE_BEGIN, ios.serial, 0, 0);
+    if (unlocked) {
+        bql_unlock();
+    }
     qemu_mutex_lock(&ios.frame_lock);
     ios_frame_count(&ios_frame_counters.capture_attempts);
 
@@ -672,6 +720,9 @@ static void ios_capture(DisplaySurface *surface)
         if (y == h) {
             ios_frame_count(&ios_frame_counters.identical_suppressed);
             qemu_mutex_unlock(&ios.frame_lock);
+            if (unlocked) {
+                bql_lock();
+            }
             ios_frame_path(IOS_FP_CAPTURE_SAME, ios.serial, 0, 0);
             return;
         }
@@ -693,8 +744,20 @@ static void ios_capture(DisplaySurface *surface)
      * A later marker can be descheduled and appear after its frontend copy. */
     ios_frame_path(IOS_FP_PUBLISH, ios.serial, ios.timestamp_ns, 0);
     qemu_mutex_unlock(&ios.frame_lock);
+    if (unlocked) {
+        bql_lock();
+    }
 
     ios_frame_trace(ios.timestamp_ns, ios.serial);
+    /* LT_PROFILE_PATH: a headless run records what a phone's frame inspector does, from its first frame. */
+    static bool profile_env_done;
+    if (!profile_env_done) {
+        const char *path = getenv("LT_PROFILE_PATH");
+        profile_env_done = true;
+        if (path && *path) {
+            qemu_ios_profile_start(path);
+        }
+    }
     ios_profile_frame(ios.timestamp_ns, ios.serial);
     ios_report_first_lit_frame(dst, w, h);
 

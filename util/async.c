@@ -173,7 +173,7 @@ void aio_bh_call(QEMUBH *bh)
     if (unlikely(it_acct_cb_hook)) {
         int64_t t0 = get_clock();
         bh->cb(bh->opaque);
-        it_acct_cb_hook((void *)bh->cb, get_clock() - t0);
+        it_acct_cb_hook((void *)bh->cb, bh->name, get_clock() - t0);
     } else {
         bh->cb(bh->opaque);
     }

@@ -582,6 +582,7 @@ bool it_bql_acct_on;
 bool it_profile_on;
 /* The standalone QEMU executable has no embedded UI bridge. */
 void qemu_ios_profile_lock(uint64_t, uint64_t, bool, const char *, int) __attribute__((weak));
+void qemu_ios_profile_callback(void *, const char *, int64_t) __attribute__((weak));
 uint64_t it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow;
 extern void *it_acct_mmio_mr;
 struct it_acct_mr { void *mr; uint64_t n, ns; char *name; } it_acct_mrs[256];
@@ -595,12 +596,17 @@ static __thread int it_acct_held_line;
 /* Timer and BH callbacks run with the BQL held, by function (it_acct_cb_hook). */
 struct it_acct_cb { void *fn; uint64_t n, ns, long_n, long_ns, max; } it_acct_cbs[64];
 
-static void it_acct_cb_note(void *fn, int64_t ns)
+static bool it_acct_cb_tables;
+
+static void it_acct_cb_note(void *fn, const char *name, int64_t ns)
 {
     if (!bql_locked() || current_cpu) {
         return;
     }
-    for (int i = 0; i < 64; i++) {
+    if (ns >= 500000 && qemu_ios_profile_callback && qatomic_read(&it_profile_on)) {
+        qemu_ios_profile_callback(fn, name, ns);
+    }
+    for (int i = 0; it_acct_cb_tables && i < 64; i++) {
         struct it_acct_cb *c = &it_acct_cbs[i];
         if (!c->fn || c->fn == fn) {
             c->fn = fn;
@@ -615,6 +621,13 @@ static void it_acct_cb_note(void *fn, int64_t ns)
 }
 
 void it_acct_cb_enable(void)
+{
+    it_acct_cb_tables = true;
+    it_acct_cb_hook = it_acct_cb_note;
+}
+
+/* A frame profile names the main-loop callbacks behind long BQL holds. */
+void it_profile_cb_enable(void)
 {
     it_acct_cb_hook = it_acct_cb_note;
 }
@@ -676,6 +689,13 @@ void bql_lock_impl(const char *file, int line)
         it_acct_held_file = file;
         it_acct_held_line = line;
     }
+}
+
+/* Take the BQL only if it is free (a vCPU that can as well leave the work to the main loop). */
+bool bql_trylock(void)
+{
+    g_assert(!bql_locked());
+    return !qemu_mutex_trylock_impl(&bql, __FILE__, __LINE__);
 }
 
 void bql_unlock(void)

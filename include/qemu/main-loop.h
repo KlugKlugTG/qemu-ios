@@ -368,6 +368,9 @@ bool qemu_in_main_thread(void);
 #define bql_lock() bql_lock_impl(__FILE__, __LINE__)
 void bql_lock_impl(const char *file, int line);
 
+/* bql_trylock: take the BQL if no thread holds it; true when taken. */
+bool bql_trylock(void);
+
 /**
  * bql_unlock: Unlock the Big QEMU Lock (BQL).
  *
