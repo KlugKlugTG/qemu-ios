@@ -1455,21 +1455,198 @@ static float32 float32_rsqrts_nf(float32 op1, float32 op2, float_status *stat)
     return float32_div(op1, float32_two, stat);
 }
 
+/*
+ * Neon float32 vectors on the host's FPU, all lanes at once. iOS 6's AudioToolbox (speaker protection,
+ * mixing) runs ~1M vector float ops a second in a game, and the lane-by-lane softfloat calls were ~10% of
+ * the vCPU on the iPod touch 4G. Taken only where the host gives softfloat's results and flags: round to
+ * nearest even and inexact already raised (the only flag a finite lane raises); operands, products and
+ * finite results normal or zero, not at FLT_MIN (tininess is detected before rounding); a product of
+ * non-zero operands not zero; an infinite result only from an infinite operand. In default-NaN mode (Neon's
+ * standard FPSCR) NaN and infinite operands are kept: speaker protection feeds them through ~40% of its
+ * vectors. Then a NaN result is the default NaN, and Invalid is raised for a signaling NaN operand or a NaN
+ * made from numbers (inf - inf, 0 * inf), per step: a multiply-accumulate rounds its product first. The
+ * lanes and their checks are host vector operations, without a branch per lane: done lane by lane, the
+ * checks cost as much as softfloat's own host-FPU path. Anything else goes lane by lane through softfloat.
+ * LT_NEON_HOST_FLOAT=off for A/B.
+ */
+enum { F32V_ADD, F32V_SUB, F32V_MUL, F32V_MLA, F32V_MLS };
+
+/* Four lanes as one host vector (SSE2 on x86, Neon on arm64); comparisons give all-ones lanes. */
+typedef uint32_t f32v_u __attribute__((vector_size(16)));
+typedef float f32v_f __attribute__((vector_size(16)));
+
+typedef struct {
+    f32v_u bad, snan, isi, imz, nan;
+} F32VState;
+
+static int f32v_enabled = -1;
+
+/* One step on the host, a op b; a NaN result comes back as the quiet default NaN (Arm's 0x7fc00000). */
+static inline QEMU_ALWAYS_INLINE f32v_u f32v_step(int op, f32v_u a, f32v_u b, f32v_u dn, F32VState *f)
+{
+    f32v_u aa = a & 0x7fffffff, ba = b & 0x7fffffff;
+    f32v_u an = (f32v_u)(aa > 0x7f800000), bn = (f32v_u)(ba > 0x7f800000);
+    f32v_u special = (f32v_u)(aa >= 0x7f800000) | (f32v_u)(ba >= 0x7f800000);
+    f32v_f rf = op == F32V_ADD ? (f32v_f)a + (f32v_f)b : op == F32V_SUB ? (f32v_f)a - (f32v_f)b
+                                                                        : (f32v_f)a * (f32v_f)b;
+    f32v_u r = (f32v_u)rf, ra = r & 0x7fffffff;
+    f32v_u made = (f32v_u)(ra > 0x7f800000) & ~(an | bn);
+    f32v_u nan = an | bn | made;
+
+    /* Denormal or FLT_MIN operands, specials outside default-NaN mode, overflow, tiny results. */
+    f->bad |= (f32v_u)(aa - 1 < 0x00800000) | (f32v_u)(ba - 1 < 0x00800000) | (special & ~dn) |
+              ((f32v_u)(ra == 0x7f800000) & ~special) | (f32v_u)(ra - 1 < 0x00800000);
+    if (op == F32V_MUL) {               /* underflow to zero */
+        f->bad |= (f32v_u)(ra == 0) & (f32v_u)(aa != 0) & (f32v_u)(ba != 0);
+        f->imz |= made;
+    } else {
+        f->isi |= made;
+    }
+    f->snan |= (an & (f32v_u)((a & 0x00400000) == 0)) | (bn & (f32v_u)((b & 0x00400000) == 0));
+    f->nan = nan;
+    return (r & ~nan) | (nan & 0x7fc00000);
+}
+
+static inline bool f32v_any(f32v_u v)
+{
+    uint64_t w[2];
+
+    memcpy(w, &v, sizeof(w));
+    return (w[0] | w[1]) != 0;
+}
+
+static inline QEMU_ALWAYS_INLINE bool f32v_fast(int op, float32 *d, const float32 *n, const float32 *m,
+                                                intptr_t oprsz, intptr_t idx, float_status *s)
+{
+    f32v_u vn = { 0 }, vm = { 0 }, vd = { 0 }, dn, r;
+    F32VState f = { { 0 } };
+    int flags = 0;
+
+    if (unlikely(f32v_enabled < 0)) {
+        const char *v = getenv("LT_NEON_HOST_FLOAT");
+        f32v_enabled = !v || strcmp(v, "off");
+    }
+    if (!f32v_enabled || (oprsz != 8 && oprsz != 16) ||
+        s->float_rounding_mode != float_round_nearest_even || !(s->float_exception_flags & float_flag_inexact)) {
+        return false;
+    }
+    /* Constant sizes, so the copies are loads. A D register's lanes 2-3 stay 0: 0 op 0 raises nothing. */
+    if (oprsz == 16) {
+        memcpy(&vn, n, 16);
+        if (idx >= 0) {
+            vm = (f32v_u){ 0 } + m[H4(idx)];
+        } else {
+            memcpy(&vm, m, 16);
+        }
+        if (op > F32V_MUL) {
+            memcpy(&vd, d, 16);
+        }
+    } else {                            /* lane by lane: an 8-byte copy into a vector stalls its load */
+        vn = (f32v_u){ n[0], n[1] };
+        vm = idx >= 0 ? (f32v_u){ m[H4(idx)], m[H4(idx)] } : (f32v_u){ m[0], m[1] };
+        if (op > F32V_MUL) {
+            vd = (f32v_u){ d[0], d[1] };
+        }
+    }
+    dn = (f32v_u){ 0 } - (uint32_t)!!s->default_nan_mode;
+    if (op <= F32V_MUL) {
+        r = f32v_step(op, vn, vm, dn, &f);
+    } else {
+        r = f32v_step(F32V_MUL, vn, vm, dn, &f);
+        r = f32v_step(op == F32V_MLA ? F32V_ADD : F32V_SUB, vd, r, dn, &f);
+    }
+    if (f32v_any(f.bad)) {
+        return false;
+    }
+    if (f32v_any(f.nan)) {
+        uint32_t dnan = float32_default_nan(s);
+
+        r = (r & ~f.nan) | (f.nan & dnan);
+    }
+    if (f32v_any(f.snan)) {
+        flags |= float_flag_invalid | float_flag_invalid_snan;
+    }
+    if (f32v_any(f.isi)) {
+        flags |= float_flag_invalid | float_flag_invalid_isi;
+    }
+    if (f32v_any(f.imz)) {
+        flags |= float_flag_invalid | float_flag_invalid_imz;
+    }
+    if (flags) {
+        float_raise(flags, s);
+    }
+    if (oprsz == 16) {
+        memcpy(d, &r, 16);
+    } else {
+        d[0] = r[0];
+        d[1] = r[1];
+    }
+    return true;
+}
+
+#define DO_3OP_F32V(NAME, FUNC, OP)                                         \
+void HELPER(NAME)(void *vd, void *vn, void *vm,                            \
+                  float_status *stat, uint32_t desc)                       \
+{                                                                          \
+    intptr_t i, oprsz = simd_oprsz(desc);                                  \
+    float32 *d = vd, *n = vn, *m = vm;                                     \
+    if (!f32v_fast(OP, d, n, m, oprsz, -1, stat)) {                        \
+        for (i = 0; i < oprsz / 4; i++) {                                  \
+            d[i] = FUNC(n[i], m[i], stat);                                 \
+        }                                                                  \
+    }                                                                      \
+    clear_tail(d, oprsz, simd_maxsz(desc));                                \
+}
+
+#define DO_MULADD_F32V(NAME, FUNC, OP)                                      \
+void HELPER(NAME)(void *vd, void *vn, void *vm,                            \
+                  float_status *stat, uint32_t desc)                       \
+{                                                                          \
+    intptr_t i, oprsz = simd_oprsz(desc);                                  \
+    float32 *d = vd, *n = vn, *m = vm;                                     \
+    if (!f32v_fast(OP, d, n, m, oprsz, -1, stat)) {                        \
+        for (i = 0; i < oprsz / 4; i++) {                                  \
+            d[i] = FUNC(d[i], n[i], m[i], stat);                           \
+        }                                                                  \
+    }                                                                      \
+    clear_tail(d, oprsz, simd_maxsz(desc));                                \
+}
+
+/* By element, within a 128-bit segment: one segment when the fast path takes it (oprsz <= 16). */
+#define DO_FMUL_IDX_F32V(NAME, ADD, MUL, OP)                                \
+void HELPER(NAME)(void *vd, void *vn, void *vm,                            \
+                  float_status *stat, uint32_t desc)                       \
+{                                                                          \
+    intptr_t i, j, oprsz = simd_oprsz(desc);                               \
+    intptr_t segment = MIN(16, oprsz) / 4;                                 \
+    intptr_t idx = simd_data(desc);                                        \
+    float32 *d = vd, *n = vn, *m = vm;                                     \
+    if (!f32v_fast(OP, d, n, m, oprsz, idx, stat)) {                       \
+        for (i = 0; i < oprsz / 4; i += segment) {                         \
+            float32 mm = m[H4(i + idx)];                                   \
+            for (j = 0; j < segment; j++) {                                \
+                d[i + j] = ADD(d[i + j], MUL(n[i + j], mm, stat), stat);   \
+            }                                                              \
+        }                                                                  \
+    }                                                                      \
+    clear_tail(d, oprsz, simd_maxsz(desc));                                \
+}
+
 DO_3OP(gvec_fadd_b16, bfloat16_add, float16)
 DO_3OP(gvec_fadd_h, float16_add, float16)
-DO_3OP(gvec_fadd_s, float32_add, float32)
+DO_3OP_F32V(gvec_fadd_s, float32_add, F32V_ADD)
 DO_3OP(gvec_fadd_d, float64_add, float64)
 DO_3OP(gvec_bfadd, bfloat16_add, bfloat16)
 
 DO_3OP(gvec_fsub_b16, bfloat16_sub, float16)
 DO_3OP(gvec_fsub_h, float16_sub, float16)
-DO_3OP(gvec_fsub_s, float32_sub, float32)
+DO_3OP_F32V(gvec_fsub_s, float32_sub, F32V_SUB)
 DO_3OP(gvec_fsub_d, float64_sub, float64)
 DO_3OP(gvec_bfsub, bfloat16_sub, bfloat16)
 
 DO_3OP(gvec_fmul_b16, bfloat16_mul, float16)
 DO_3OP(gvec_fmul_h, float16_mul, float16)
-DO_3OP(gvec_fmul_s, float32_mul, float32)
+DO_3OP_F32V(gvec_fmul_s, float32_mul, F32V_MUL)
 DO_3OP(gvec_fmul_d, float64_mul, float64)
 
 DO_3OP(gvec_ftsmul_h, float16_ftsmul, float16)
@@ -1637,10 +1814,10 @@ void HELPER(NAME)(void *vd, void *vn, void *vm,                            \
 }
 
 DO_MULADD(gvec_fmla_nf_h, float16_muladd_nf, float16)
-DO_MULADD(gvec_fmla_nf_s, float32_muladd_nf, float32)
+DO_MULADD_F32V(gvec_fmla_nf_s, float32_muladd_nf, F32V_MLA)
 
 DO_MULADD(gvec_fmls_nf_h, float16_mulsub_nf, float16)
-DO_MULADD(gvec_fmls_nf_s, float32_mulsub_nf, float32)
+DO_MULADD_F32V(gvec_fmls_nf_s, float32_mulsub_nf, F32V_MLS)
 
 DO_MULADD(gvec_vfma_h, float16_muladd_f, float16)
 DO_MULADD(gvec_vfma_s, float32_muladd_f, float32)
@@ -1715,7 +1892,7 @@ DO_MLA_IDX(gvec_mls_idx_d, uint64_t, -, H8)
 
 DO_FMUL_IDX(gvec_fmul_idx_b16, nop, bfloat16_mul, float16, H2)
 DO_FMUL_IDX(gvec_fmul_idx_h, nop, float16_mul, float16, H2)
-DO_FMUL_IDX(gvec_fmul_idx_s, nop, float32_mul, float32, H4)
+DO_FMUL_IDX_F32V(gvec_fmul_idx_s, nop, float32_mul, F32V_MUL)
 DO_FMUL_IDX(gvec_fmul_idx_d, nop, float64_mul, float64, H8)
 
 #undef nop
@@ -1725,9 +1902,9 @@ DO_FMUL_IDX(gvec_fmul_idx_d, nop, float64_mul, float64, H8)
  * the fused ops below they assume accumulate both from and into Vd.
  */
 DO_FMUL_IDX(gvec_fmla_nf_idx_h, float16_add, float16_mul, float16, H2)
-DO_FMUL_IDX(gvec_fmla_nf_idx_s, float32_add, float32_mul, float32, H4)
+DO_FMUL_IDX_F32V(gvec_fmla_nf_idx_s, float32_add, float32_mul, F32V_MLA)
 DO_FMUL_IDX(gvec_fmls_nf_idx_h, float16_sub, float16_mul, float16, H2)
-DO_FMUL_IDX(gvec_fmls_nf_idx_s, float32_sub, float32_mul, float32, H4)
+DO_FMUL_IDX_F32V(gvec_fmls_nf_idx_s, float32_sub, float32_mul, F32V_MLS)
 
 #define DO_FMLA_IDX(NAME, TYPE, H, NEGX, NEGF)                             \
 void HELPER(NAME)(void *vd, void *vn, void *vm, void *va,                  \
