@@ -9646,7 +9646,37 @@ static struct {
     uint64_t svc[1024], svc_other;
     uint64_t abort_status[32];
     uint64_t mach_send, mach_receive;
+    /* Kernel episodes: from an exception taken from user mode to the exception return to user mode, in
+     * the vCPU thread's CPU time (so idle WFI and host preemption drop out), keyed by what entered the
+     * kernel: SVC r12 + 512, or 1024 + the exception id. */
+    bool ep_open;
+    int ep_key;
+    uint64_t ep_t0;
+    struct {
+        uint64_t n, ns;
+    } ep[1024 + 32];
 } arm_exception_prof;
+
+static uint64_t arm_exception_prof_thread_ns(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+}
+
+/* The exception return helper: the vCPU is back in user mode, so the kernel episode ends. */
+void arm_exception_prof_user_return(CPUARMState *env)
+{
+    if (arm_exception_prof_enabled > 0 && arm_exception_prof.ep_open &&
+        (env->uncached_cpsr & CPSR_M) == ARM_CPU_MODE_USR) {
+        int k = arm_exception_prof.ep_key;
+
+        arm_exception_prof.ep_open = false;
+        arm_exception_prof.ep[k].n++;
+        arm_exception_prof.ep[k].ns += arm_exception_prof_thread_ns() - arm_exception_prof.ep_t0;
+    }
+}
 
 static inline QEMU_ALWAYS_INLINE uint64_t arm_exception_prof_begin(CPUState *cs)
 {
@@ -9671,6 +9701,13 @@ static inline QEMU_ALWAYS_INLINE uint64_t arm_exception_prof_begin(CPUState *cs)
     }
     if (exc >= 0 && exc < ARRAY_SIZE(arm_exception_prof.exception)) {
         arm_exception_prof.exception[exc].n++;
+        if ((env->uncached_cpsr & CPSR_M) == ARM_CPU_MODE_USR) {
+            int32_t nr = env->regs[12];
+
+            arm_exception_prof.ep_open = true;
+            arm_exception_prof.ep_key = exc == EXCP_SWI && nr >= -512 && nr < 512 ? nr + 512 : 1024 + exc;
+            arm_exception_prof.ep_t0 = arm_exception_prof_thread_ns();
+        }
     }
     if (exc == EXCP_SWI) {
         int32_t nr = env->regs[12];
@@ -9739,6 +9776,14 @@ static void arm_exception_prof_end(int exc, uint64_t start)
         if (arm_exception_prof.abort_status[i]) {
             fprintf(stderr, "[exception-prof] data-abort status %d n %" PRIu64
                     "\n", i, arm_exception_prof.abort_status[i]);
+        }
+    }
+    fprintf(stderr, "[exception-prof] thread-cpu-ns %" PRIu64 "\n", arm_exception_prof_thread_ns());
+    for (int i = 0; i < ARRAY_SIZE(arm_exception_prof.ep); i++) {
+        if (arm_exception_prof.ep[i].n) {
+            fprintf(stderr, "[exception-prof] kernel-episode %s %d n %" PRIu64 " cpu-ns %" PRIu64 "\n",
+                    i < 1024 ? "svc" : "exception", i < 1024 ? i - 512 : i - 1024,
+                    arm_exception_prof.ep[i].n, arm_exception_prof.ep[i].ns);
         }
     }
     fprintf(stderr, "[exception-prof] end now-ns %" PRIu64 "\n", now);

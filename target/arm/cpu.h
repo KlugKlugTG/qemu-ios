@@ -1271,6 +1271,8 @@ extern const VMStateDescription vmstate_arm_cpu;
 
 void arm_cpu_do_interrupt(CPUState *cpu);
 bool arm_cpu_do_interrupt_needs_bql(CPUState *cpu);
+/* LT_EXCEPTION_PROF: the exception return helper calls this after returning to user mode. */
+void arm_exception_prof_user_return(CPUARMState *env);
 void arm_v7m_cpu_do_interrupt(CPUState *cpu);
 
 hwaddr arm_cpu_get_phys_page_attrs_debug(CPUState *cpu, vaddr addr,
