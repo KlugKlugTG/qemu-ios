@@ -28,6 +28,7 @@
  */
 #include <assert.h>
 #define trace_event_get_state_backends(id) 0
+#define s5l8930_ioprof_add(...) ((void)0)   /* LT_NAND_PROF counters */
 #define TRACE_PRINTF(fn, ...) do { if (0) printf(__VA_ARGS__); } while (0)
 #include <stdbool.h>
 #include <stdint.h>
