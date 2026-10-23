@@ -1767,6 +1767,17 @@ static bool aa32_cpreg_encoding_in_impdef_space(uint8_t crn, uint8_t crm)
     return false;
 }
 
+static bool arm_cp_hflags_skip(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_CP_HFLAGS_SKIP");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
                            int opc1, int crn, int crm, int opc2,
                            bool isread, int rt, int rt2)
@@ -2012,9 +2023,17 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
     if (!isread && !(ri->type & ARM_CP_SUPPRESS_TB_END)) {
         /*
          * A write to any coprocessor register that ends a TB
-         * must rebuild the hflags for the next TB.
+         * must rebuild the hflags for the next TB -- except the CP15
+         * groups no A32 hflag reads: translation table bases and control
+         * (c2), cache and address-translation operations (c7), TLB
+         * maintenance (c8), process and thread IDs (c13). The iOS kernel
+         * writes those on every context switch and pmap change, and the
+         * rebuild was ~1% of the Poco's vCPU. LT_CP_HFLAGS_SKIP=off for A/B.
          */
-        gen_rebuild_hflags(s, ri->type & ARM_CP_NEWEL);
+        if (!(cpnum == 15 && !is64 && !(ri->type & ARM_CP_NEWEL) &&
+              (crn == 2 || crn == 7 || crn == 8 || crn == 13) && arm_cp_hflags_skip())) {
+            gen_rebuild_hflags(s, ri->type & ARM_CP_NEWEL);
+        }
         /*
          * We default to ending the TB on a coprocessor register write,
          * but allow this to be suppressed by the register definition
