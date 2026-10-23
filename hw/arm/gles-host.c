@@ -441,6 +441,8 @@ typedef struct {
     GLESBuffer *element_buffer;
 
     uint8_t *readback;  /* drawable_width * drawable_height * 4 */
+    uint8_t *wb_scratch;  /* surface writebacks' read, kept (LT_WRITEBACK_SCRATCH) */
+    size_t wb_scratch_len;
 
     /*
      * Framebuffer objects, wired to real host FBOs -- with ONE exception.
@@ -5187,13 +5189,53 @@ static void gles_report_surface_flush(uint32_t base, unsigned surfaces,
             attempted, copied, result);
 }
 
+/*
+ * LT_WRITEBACK_SCRATCH=off: a fresh buffer per writeback again. CoreAnimation's compositor
+ * flushes its full-screen surface every frame, and an allocation that size comes back from
+ * the system as new pages each time, faulted in one by one as the read fills them.
+ */
+static bool gles_writeback_scratch(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_WRITEBACK_SCRATCH");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
+static bool gles_finish_flush(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_FINISH_FLUSH");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 /* Texture `texture`'s pixels into its surface's guest memory. */
 static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
 {
     GLint pack = 4, framebuffer = 0;
     bool rgb555 = s->format == GLES_SURFACE_RGB555;
     unsigned bpp = (s->format == GLES_SURFACE_RGB565 || rgb555) ? 2 : 4;
-    g_autofree uint8_t *pixels = g_malloc((size_t)s->width * s->height * 4);
+    size_t need = (size_t)s->width * s->height * 4;
+    g_autofree uint8_t *fresh = NULL;
+    uint8_t *pixels;
+
+    if (gles_writeback_scratch()) {
+        if (gh.wb_scratch_len < need) {
+            g_free(gh.wb_scratch);
+            gh.wb_scratch = g_malloc(need);
+            gh.wb_scratch_len = need;
+        }
+        pixels = gh.wb_scratch;
+    } else {
+        pixels = fresh = g_malloc(need);
+    }
 
     /* Read through a scratch framebuffer: the texture is no longer the bound
      * target by the time its frame is flushed. */
@@ -7559,7 +7601,16 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
     }
 
     case GLES_SLOT_FINISH:
-        glFinish();
+        /*
+         * What the guest can see of a finish is its surfaces' pixels, and reading those back
+         * waits for the work that wrote them; a host glFinish first was a second full wait for
+         * the GPU. CoreAnimation's compositor finishes every frame. LT_FINISH_FLUSH=off waits.
+         */
+        if (gles_finish_flush()) {
+            glFlush();
+        } else {
+            glFinish();
+        }
         return gles_sync_surface(cpu) ? -1 : gles_surface_flush(cpu, 0);
 
     case GLES_SLOT_FLUSH:
