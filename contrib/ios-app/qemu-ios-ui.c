@@ -128,7 +128,7 @@ static struct {
     bool pending;
 #ifndef __APPLE__
     /* Main AioContext/BQL only; never retains a DisplaySurface pointer. */
-    QEMUBH *publish_bh;
+    QEMUTimer *publish_timer;
 #endif
 } ios;
 
@@ -781,8 +781,8 @@ static void ios_gfx_update(DisplayChangeListener *dcl,
 {
     ios.pending = true;
 #ifndef __APPLE__
-    if (ios.publish_bh) {
-        qemu_bh_schedule(ios.publish_bh);
+    if (ios.publish_timer && !timer_pending(ios.publish_timer)) {
+        timer_mod(ios.publish_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
     }
 #endif
 }
@@ -822,18 +822,23 @@ static void ios_publish(QemuConsole *con)
     }
 }
 
-static void ios_publish_bh(void *opaque)
+/*
+ * A main-loop timer, not a bottom half: ios_capture drops the BQL, and a bottom half runs inside
+ * qemu_aio_context dispatch, where a vCPU taking the BQL could poll the same context and resume
+ * a block coroutine twice.
+ */
+static void ios_publish_timer(void *opaque)
 {
     ios_publish(ios.con);
 }
 
 static void ios_cancel_publish(bool stopping)
 {
-    if (ios.publish_bh) {
-        qemu_bh_cancel(ios.publish_bh);
+    if (ios.publish_timer) {
+        timer_del(ios.publish_timer);
         if (stopping) {
-            qemu_bh_delete(ios.publish_bh);
-            ios.publish_bh = NULL;
+            timer_free(ios.publish_timer);
+            ios.publish_timer = NULL;
         }
     }
     ios.pending = false;
@@ -962,7 +967,7 @@ void qemu_ios_ui_vm_started(void)
         ios.dcl.ops = &ios_dcl_ops;
         ios.dcl.con = ios.con;
 #ifndef __APPLE__
-        ios.publish_bh = qemu_bh_new(ios_publish_bh, NULL);
+        ios.publish_timer = timer_new_ns(QEMU_CLOCK_REALTIME, ios_publish_timer, NULL);
 #endif
         register_displaychangelistener(&ios.dcl);
         ipod_lcd_vsync_due = ios_note_vsync_due;
