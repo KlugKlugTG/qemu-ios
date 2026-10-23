@@ -332,11 +332,16 @@ static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
  */
 #define TLB_BANKS 8
 
+#define TLB_BANK_RESETS 4
+
 typedef struct TLBBank {
     CPUTLBDesc d;
     CPUTLBDescFast f;
     uint64_t key;
     uint64_t used;          /* LRU stamp; 0 = holds nothing usable */
+    /* tlb_reset_dirty ranges (host addresses) not applied yet: done on the way back in */
+    uintptr_t reset_start[TLB_BANK_RESETS], reset_len[TLB_BANK_RESETS];
+    unsigned nreset;
 } TLBBank;
 
 struct TLBBankSet {
@@ -401,6 +406,26 @@ static void tlb_banks_flush_page_locked(CPUState *cpu, vaddr page)
 }
 
 static inline int64_t tlb_clock_ns(void);
+static void tlb_reset_dirty_range_locked(CPUTLBEntryFull *full, CPUTLBEntry *ent,
+                                         uintptr_t start, uintptr_t length);
+
+/* Apply the dirty-tracking resets the live table missed while it was parked. */
+static void tlb_bank_catch_up_locked(CPUState *cpu, int mmu_idx, TLBBank *b)
+{
+    CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
+    CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
+    unsigned int n = tlb_n_entries(fast);
+
+    for (unsigned r = 0; r < b->nreset; r++) {
+        for (unsigned int i = 0; i < n; i++) {
+            tlb_reset_dirty_range_locked(&desc->fulltlb[i], &fast->table[i], b->reset_start[r], b->reset_len[r]);
+        }
+        for (unsigned int i = 0; i < CPU_VTLB_SIZE; i++) {
+            tlb_reset_dirty_range_locked(&desc->vfulltlb[i], &desc->vtable[i], b->reset_start[r], b->reset_len[r]);
+        }
+    }
+    b->nreset = 0;
+}
 
 void tlb_bank_switch(CPUState *cpu, int mmu_idx, uint64_t old_key, uint64_t new_key)
 {
@@ -449,11 +474,13 @@ void tlb_bank_switch(CPUState *cpu, int mmu_idx, uint64_t old_key, uint64_t new_
     tlb_bank_swap(cpu, mmu_idx, out);
     out->key = old_key;
     out->used = live ? ++set->clock : 0;
+    out->nreset = 0;
     if (in) {
         CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
         size_t size;
 
         tlb_bank_swap(cpu, mmu_idx, in);
+        tlb_bank_catch_up_locked(cpu, mmu_idx, in);
         in->used = 0;
         cpu->neg.tlb.c.dirty |= 1 << mmu_idx;
         /* A table that is never flushed is never resized either: grow (or shrink) it here, at the price of its entries. */
@@ -635,7 +662,7 @@ void tlb_flush(CPUState *cpu)
 
 extern bool it_acct_on;
 uint64_t it_acct_ctxsw, it_acct_fills[32][2];
-uint64_t it_acct_el0_sync, it_acct_el0_used, it_acct_tlbiasid, it_acct_pflush, it_acct_rflush;
+uint64_t it_acct_el0_sync, it_acct_el0_used, it_acct_tlbiasid, it_acct_pflush, it_acct_rflush, it_acct_reset_dirty;
 
 void tlb_flush_switch_context(CPUState *cpu, uint64_t key)
 {
@@ -1234,11 +1261,19 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
     int mmu_idx;
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    if (unlikely(it_acct_on)) {
+        it_acct_reset_dirty++;
+    }
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         CPUTLBDesc *desc = &cpu->neg.tlb.d[mmu_idx];
         CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
         unsigned int n = tlb_n_entries(fast);
         unsigned int i;
+
+        /* A clean index holds nothing (see tlb_flush_clean_skip): GL clears a texture's dirty bits at draws. */
+        if (!((cpu->neg.tlb.c.dirty >> mmu_idx) & 1)) {
+            continue;
+        }
 
         for (i = 0; i < n; i++) {
             tlb_reset_dirty_range_locked(&desc->fulltlb[i], &fast->table[i],
@@ -1250,19 +1285,31 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
                                          start, length);
         }
     }
+    /*
+     * Parked tables take the range when they come back (tlb_bank_catch_up_locked): walking them all here, from the
+     * main loop or a draw, under the lock the vCPU needs, is what cost the first banks attempt. Too many: drop it.
+     */
     for (int b = 0; cpu->neg.tlb.c.banks && b < TLB_BANKS; b++) {
         TLBBank *bank = &cpu->neg.tlb.c.banks->b[b];
-        unsigned int n = tlb_n_entries(&bank->f);
+        unsigned r;
 
         if (!bank->used) {
             continue;
         }
-        for (unsigned int i = 0; i < n; i++) {
-            tlb_reset_dirty_range_locked(&bank->d.fulltlb[i], &bank->f.table[i], start, length);
+        for (r = 0; r < bank->nreset; r++) {
+            if (start >= bank->reset_start[r] && start + length <= bank->reset_start[r] + bank->reset_len[r]) {
+                break;
+            }
         }
-        for (unsigned int i = 0; i < CPU_VTLB_SIZE; i++) {
-            tlb_reset_dirty_range_locked(&bank->d.vfulltlb[i], &bank->d.vtable[i], start, length);
+        if (r < bank->nreset) {
+            continue;
         }
+        if (bank->nreset == TLB_BANK_RESETS) {
+            bank->used = 0;
+            continue;
+        }
+        bank->reset_start[bank->nreset] = start;
+        bank->reset_len[bank->nreset++] = length;
     }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 }
