@@ -8,6 +8,7 @@
 #include "qemu/bswap.h"
 #include "qemu/timer.h"
 #include "qemu/main-loop.h"
+#include "qemu/thread.h"
 
 /* 7E18 AppleM2ScalerCSCDriver: 0xc0732388 programs formats, 0xc07323f0
  * source geometry, 0xc073246c destination geometry, 0xc0730288 acknowledges
@@ -29,6 +30,11 @@ typedef struct {
      */
     void *scratch[2];
     size_t scratch_size[2];
+    QemuThread worker;
+    QemuMutex lock;
+    QemuCond cond;
+    bool worker_up, queued, busy;
+    uint32_t job[0x1000 / 4];
 } IPodScalerState;
 
 void ipod_scaler_set_iommu(DeviceState *dev,
@@ -152,7 +158,7 @@ static bool scaler_read_bus(IPodScalerState *s, uint32_t va, void *buf, unsigned
  */
 static bool scaler_rgb(IPodScalerState *s)
 {
-    uint32_t *r = s->regs;
+    uint32_t *r = s->job;
     unsigned sw = (r[0x24 / 4] >> 16) & 0x1fff, sh = r[0x24 / 4] & 0x1fff;
     unsigned dw = (r[0x40 / 4] >> 16) & 0x1fff, dh = r[0x40 / 4] & 0x1fff;
     unsigned ss = (r[0x1c / 4] & 0xffff) * 4, ds = (r[0x3c / 4] & 0xffff) * 4, pitch = sw;
@@ -237,7 +243,7 @@ static bool scaler_rgb(IPodScalerState *s)
  */
 static bool scaler_nv12(IPodScalerState *s)
 {
-    uint32_t *r = s->regs;
+    uint32_t *r = s->job;
     unsigned sw = (r[0x24 / 4] >> 16) & 0x1fff, sh = r[0x24 / 4] & 0x1fff;
     unsigned dw = (r[0x40 / 4] >> 16) & 0x1fff, dh = r[0x40 / 4] & 0x1fff;
     unsigned sys = r[0x1c / 4] & 0xffff, suvs = r[0x1c / 4] >> 16;
@@ -304,7 +310,7 @@ static bool scaler_range(uint64_t base, unsigned stride, unsigned rows,
 
 static bool scaler_convert(IPodScalerState *s)
 {
-    uint32_t *r = s->regs;
+    uint32_t *r = s->job;
     unsigned w = (r[0x24 / 4] >> 16) & 0x1fff, h = r[0x24 / 4] & 0x1fff;
     unsigned ys = r[0x1c / 4] & 0xffff, uvs = r[0x1c / 4] >> 16;
     unsigned fmt = r[0x30 / 4] & 7, bpp = fmt == 4 ? 2 : 4;
@@ -359,6 +365,57 @@ static bool scaler_convert(IPodScalerState *s)
     return true;
 }
 
+static bool scaler_run(IPodScalerState *s)
+{
+    return scaler_convert(s) || scaler_rgb(s) || scaler_nv12(s);
+}
+
+static void scaler_unsupported(IPodScalerState *s)
+{
+    error_report("scaler: unsupported or invalid transfer %08x -> %08x geometry %08x -> %08x",
+                 s->job[4], s->job[12], s->job[9], s->job[16]);
+}
+
+static void *scaler_worker(void *opaque)
+{
+    IPodScalerState *s = opaque;
+
+    qemu_mutex_lock(&s->lock);
+    for (;;) {
+        while (!s->queued) {
+            qemu_cond_wait(&s->cond, &s->lock);
+        }
+        s->queued = false;
+        s->busy = true;
+        qemu_mutex_unlock(&s->lock);
+        if (!scaler_run(s)) {
+            scaler_unsupported(s);
+        }
+        qemu_mutex_lock(&s->lock);
+        s->busy = false;
+        qemu_cond_broadcast(&s->cond);
+    }
+    return NULL;
+}
+
+static bool scaler_in_flight(IPodScalerState *s)
+{
+    return qatomic_read(&s->queued) || qatomic_read(&s->busy);
+}
+
+/* Until the worker has written the last transfer's pixels (a reset, a new start, a snapshot). */
+static void scaler_wait(IPodScalerState *s)
+{
+    if (!s->worker_up) {
+        return;
+    }
+    qemu_mutex_lock(&s->lock);
+    while (s->queued || s->busy) {
+        qemu_cond_wait(&s->cond, &s->lock);
+    }
+    qemu_mutex_unlock(&s->lock);
+}
+
 static void scaler_irq(IPodScalerState *s)
 {
     qemu_set_irq(s->irq, (s->regs[2] & s->regs[3] & 1) != 0);
@@ -383,6 +440,11 @@ static void scaler_complete(void *opaque)
 {
     IPodScalerState *s = opaque;
 
+    if (scaler_in_flight(s)) {          /* the worker is behind the modelled end: look again shortly */
+        timer_mod(s->done, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + 100000);
+        return;
+    }
+
     s->regs[1] &= ~1u;
     s->regs[3] |= 1;
     scaler_irq(s);
@@ -394,32 +456,51 @@ static void scaler_write(void *opaque, hwaddr off, uint64_t value, unsigned size
     if (off == 0xc) s->regs[3] &= ~value;
     else s->regs[off / 4] = value;
     if (off == 4 && (value & 2)) {
+        scaler_wait(s);
         timer_del(s->done);
         memset(s->regs, 0, sizeof(s->regs));
         s->regs[0x260 / 4] = s->version;
     } else if (off == 4 && (value & 1)) {
         uint64_t pixels = (uint64_t)((s->regs[0x40 / 4] >> 16) & 0x1fff) * (s->regs[0x40 / 4] & 0x1fff);
 
+        scaler_wait(s);
         if (timer_pending(s->done)) {   /* started again before the last one ended: that one ends now */
             timer_del(s->done);
             s->regs[3] |= 1;
         }
         /*
-         * The pixel work only touches guest RAM and these registers, which nothing else writes during it:
-         * release the BQL, as the display's latch does, so the main loop is not held up for the frame.
+         * The pixel work only touches guest RAM, so it runs beside the vCPU: turning CoreAnimation's every
+         * landscape frame was ~10% of the vCPU's time in Jetpack Joyride on the iPod touch 4G.
          */
-        bool unlock = bql_locked();
-        bool ok;
+        static int async = -1;
+        if (async < 0) {
+            const char *v = getenv("LT_SCALER_ASYNC");
+            async = !v || strcmp(v, "off");
+        }
+        if (!async) {                   /* A/B: in place, without the BQL */
+            bool unlock = bql_locked();
 
-        if (unlock) {
-            bql_unlock();
+            memcpy(s->job, s->regs, sizeof(s->job));
+            if (unlock) {
+                bql_unlock();
+            }
+            if (!scaler_run(s)) {
+                scaler_unsupported(s);
+            }
+            if (unlock) {
+                bql_lock();
+            }
+        } else {
+            if (!s->worker_up) {
+                qemu_thread_create(&s->worker, "scaler", scaler_worker, s, QEMU_THREAD_DETACHED);
+                s->worker_up = true;
+            }
+            qemu_mutex_lock(&s->lock);
+            memcpy(s->job, s->regs, sizeof(s->job));
+            s->queued = true;
+            qemu_cond_signal(&s->cond);
+            qemu_mutex_unlock(&s->lock);
         }
-        ok = scaler_convert(s) || scaler_rgb(s) || scaler_nv12(s);
-        if (unlock) {
-            bql_lock();
-        }
-        if (!ok) error_report("scaler: unsupported or invalid transfer %08x -> %08x geometry %08x -> %08x",
-            s->regs[4], s->regs[12], s->regs[9], s->regs[16]);
         timer_mod(s->done, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MAX(20000, pixels * 5));
     }
     scaler_irq(s);
@@ -436,6 +517,7 @@ static const MemoryRegionOps scaler_ops = {
 static void scaler_reset(DeviceState *dev)
 {
     IPodScalerState *s = (IPodScalerState *)dev;
+    scaler_wait(s);
     timer_del(s->done);
     memset(s->regs, 0, sizeof(s->regs));
     s->regs[0x260 / 4] = s->version;
@@ -449,6 +531,14 @@ static void scaler_init(Object *obj)
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
     sysbus_init_irq(SYS_BUS_DEVICE(obj), &s->irq);
     s->done = timer_new_ns(QEMU_CLOCK_VIRTUAL, scaler_complete, s);
+    qemu_mutex_init(&s->lock);
+    qemu_cond_init(&s->cond);
+}
+
+static int scaler_pre_save(void *opaque)
+{
+    scaler_wait(opaque);
+    return 0;
 }
 
 static int scaler_post_load(void *opaque, int version_id)
@@ -459,6 +549,7 @@ static int scaler_post_load(void *opaque, int version_id)
 
 static const VMStateDescription scaler_vmstate = {
     .name = "ipod-scaler", .version_id = 2, .minimum_version_id = 2,
+    .pre_save = scaler_pre_save,
     .post_load = scaler_post_load,
     .fields = (const VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, IPodScalerState, 0x1000 / 4),
