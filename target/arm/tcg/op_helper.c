@@ -713,9 +713,26 @@ bool arm_psr_fast(void)
     return fast;
 }
 
+/*
+ * LT_PSR_CHAIN=off: an MSR to the CPSR or a mode-changing CPS returns to the main loop again,
+ * and an MSR to the SPSR ends the TB.
+ */
+bool arm_psr_chain(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_PSR_CHAIN");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 void HELPER(cpsr_write)(CPUARMState *env, uint32_t val, uint32_t mask)
 {
-    uint32_t changed = (cpsr_read(env) ^ val) & mask;
+    uint32_t old = cpsr_read(env);
+    uint32_t changed = (old ^ val) & mask;
+    CPUARMTBFlags hflags = env->hflags;
 
     cpsr_write(env, val, mask, CPSRWriteByInstr);
     /*
@@ -727,6 +744,16 @@ void HELPER(cpsr_write)(CPUARMState *env, uint32_t val, uint32_t mask)
         (changed & ~(CPSR_NZCV | CPSR_Q | CPSR_GE | CPSR_A | CPSR_I | CPSR_F |
                      CPSR_M | CPSR_E | CPSR_IL))) {
         arm_rebuild_hflags(env);   /* cpsr_write() has seen to M, E and IL */
+    }
+    /*
+     * The TB chains straight to the next instruction (LT_PSR_CHAIN). Leave that TB at its start
+     * for the main loop when it was translated for other flags, or when this unmasked an
+     * interrupt that is already pending: the TB-entry check takes this exit request.
+     */
+    if (arm_psr_chain() &&
+        (env->hflags.flags != hflags.flags || env->hflags.flags2 != hflags.flags2 ||
+         ((changed & old & (CPSR_A | CPSR_I | CPSR_F)) && qatomic_read(&env_cpu(env)->interrupt_request)))) {
+        qatomic_set(&env_cpu(env)->neg.icount_decr.u16.high, -1);
     }
 }
 

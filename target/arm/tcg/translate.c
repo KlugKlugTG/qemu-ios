@@ -1541,10 +1541,34 @@ static int gen_set_psr(DisasContext *s, uint32_t mask, int spsr, TCGv_i32 t0)
         tcg_gen_andi_i32(t0, t0, mask);
         tcg_gen_or_i32(tmp, tmp, t0);
         store_cpu_field(tmp, spsr);
+        /* Nothing a TB is translated for, and nothing to unmask: carry on (LT_PSR_CHAIN). */
+        if (!arm_psr_chain()) {
+            gen_lookup_tb(s);
+        }
     } else {
         gen_set_cpsr(t0, mask);
+        /*
+         * iOS restores the CPSR at every lock release and switches modes at every kernel entry,
+         * ~35K main-loop returns a second in a game. Chain to the next instruction instead: the
+         * helper requests an exit when the flags changed or a pending interrupt was unmasked,
+         * taken here, before the chain, so that the jump is never patched to a TB translated for
+         * other flags. A conditional write (one goto_tb slot per path) returns as before.
+         */
+        if (arm_psr_chain() && !s->condjmp) {
+            TCGLabel *stay = gen_new_label();
+            TCGv_i32 t = tcg_temp_new_i32();
+
+            tcg_gen_ld_i32(t, tcg_env, offsetof(CPUState, neg.icount_decr.u32) - sizeof(CPUState));
+            tcg_gen_brcondi_i32(TCG_COND_GE, t, 0, stay);
+            /* The PC on this path only: pc_save stays what the fall-through path has. */
+            gen_pc_plus_diff(s, cpu_R[15], curr_insn_len(s));
+            tcg_gen_exit_tb(NULL, 0);
+            gen_set_label(stay);
+            s->base.is_jmp = DISAS_TOO_MANY;
+        } else {
+            gen_lookup_tb(s);
+        }
     }
-    gen_lookup_tb(s);
     return 0;
 }
 
@@ -1827,6 +1851,17 @@ static bool arm_cp_hflags_skip(void)
     return on;
 }
 
+static bool arm_cp_chain(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_CP_CHAIN");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
                            int opc1, int crn, int crm, int opc2,
                            bool isread, int rt, int rt2)
@@ -1835,6 +1870,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
     const ARMCPRegInfo *ri = get_arm_cp_reginfo(s->cp_regs, key);
     TCGv_ptr tcg_ri = NULL;
     bool need_exit_tb = false;
+    bool chain = false;
     uint32_t syndrome;
 
     /*
@@ -2086,8 +2122,16 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
          * writes those on every context switch and pmap change, and the
          * rebuild was ~1% of the Poco's vCPU. LT_CP_HFLAGS_SKIP=off for A/B.
          */
-        if (!(cpnum == 15 && !is64 && !(ri->type & ARM_CP_NEWEL) &&
-              (crn == 2 || crn == 7 || crn == 8 || crn == 13) && arm_cp_hflags_skip())) {
+        if (cpnum == 15 && !is64 && !(ri->type & ARM_CP_NEWEL) &&
+            (crn == 2 || crn == 7 || crn == 8 || crn == 13) && arm_cp_hflags_skip()) {
+            /*
+             * Nor do they unmask an interrupt, so the TB can chain to the next instruction
+             * like an ISB's, instead of a main-loop return per TTBR and CONTEXTIDR write
+             * (~6 per iOS syscall); not a conditional one, which has a goto_tb slot per
+             * path. LT_CP_CHAIN=off returns as before.
+             */
+            chain = !(ri->type & ARM_CP_IO) && !s->condjmp && arm_cp_chain();
+        } else {
             gen_rebuild_hflags(s, ri->type & ARM_CP_NEWEL);
         }
         /*
@@ -2098,7 +2142,11 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
         need_exit_tb = true;
     }
     if (need_exit_tb) {
-        gen_lookup_tb(s);
+        if (chain) {
+            s->base.is_jmp = DISAS_TOO_MANY;
+        } else {
+            gen_lookup_tb(s);
+        }
     }
 }
 
@@ -2368,7 +2416,10 @@ static void gen_srs(DisasContext *s,
         tcg_gen_addi_i32(addr, addr, offset);
         gen_helper_set_r13_banked(tcg_env, tcg_constant_i32(mode), addr);
     }
-    s->base.is_jmp = DISAS_UPDATE_EXIT;
+    /* Two stores and a banked SP: nothing to leave the TB for (iOS's syscall entry; LT_PSR_CHAIN). */
+    if (!arm_psr_chain()) {
+        s->base.is_jmp = DISAS_UPDATE_EXIT;
+    }
 }
 
 /* Skip this instruction if the ARM condition is false */
