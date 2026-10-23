@@ -84,6 +84,8 @@ struct S5L8930PMGRState {
     uint8_t security_epoch;     /* POWER_ID[31:24] LLB would latch; 0 = measured */
     uint8_t board_id;           /* POWER_ID[23:16], the board straps */
     int64_t tick_base_ns;
+    uint64_t lo_ticks;          /* the last TICKS_LO read's sample, for the TICKS_HI read right after it */
+    bool lo_pending;
     bool keep_timebase;         /* "keep-timebase": the next reset is the AP's wake, see reset */
     S5L8930EventTimer evt[2];
     QEMUTimer *wdog_timer;
@@ -170,11 +172,16 @@ static bool pmgr_modeled(hwaddr off)
  * share of each read; splitting off the remainder keeps the same floor.
  */
 QEMU_BUILD_BUG_ON(PMGR_TIMEBASE_HZ != 24000000);
-static uint64_t pmgr_ticks(S5L8930PMGRState *s)
+static uint64_t pmgr_ticks_at(S5L8930PMGRState *s, int64_t now)
 {
-    uint64_t ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->tick_base_ns;
+    uint64_t ns = now - s->tick_base_ns;
 
     return ns / 125 * 3 + ns % 125 * 3 / 125;
+}
+
+static uint64_t pmgr_ticks(S5L8930PMGRState *s)
+{
+    return pmgr_ticks_at(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
 }
 
 static uint32_t evt_remaining(S5L8930PMGRState *s, S5L8930EventTimer *t)
@@ -284,9 +291,8 @@ static bool pmgr_sync_expiry(void)
     return on;
 }
 
-static void pmgr_expire_due(S5L8930PMGRState *s)
+static void pmgr_expire_due(S5L8930PMGRState *s, int64_t now)
 {
-    int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     bool due = false;
     int i;
 
@@ -302,7 +308,6 @@ static void pmgr_expire_due(S5L8930PMGRState *s)
     if (!due || (!locked && !bql_trylock())) {
         return;
     }
-    now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
     for (i = 0; i < ARRAY_SIZE(s->evt); i++) {
         int64_t at = timer_expire_time_ns(s->evt[i].timer);
         if (at >= 0 && at <= now) {
@@ -326,15 +331,28 @@ static uint64_t s5l8930_pmgr_read(void *opaque, hwaddr off, unsigned size)
      * The kernel reads HI, LO, HI and retries on a mismatch, so both halves
      * can be sampled live.
      */
+    /*
+     * One clock sample a LO read, and the HI read right after it answers from that sample: the kernel reads HI, LO,
+     * HI and retries if the two HI differ, so the second HI is the half that goes with LO. Each sample is a host
+     * clock read, ~200 ns on a Poco F3, and there were four of them a timestamp.
+     */
     if (off == PMGR_TICKS_LO) {
+        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+
         if (pmgr_sync_expiry()) {
-            pmgr_expire_due(s);
+            pmgr_expire_due(s, now);
         }
-        return (uint32_t)pmgr_ticks(s);
+        s->lo_ticks = pmgr_ticks_at(s, now);
+        s->lo_pending = true;
+        return (uint32_t)s->lo_ticks;
     }
     if (off == PMGR_TICKS_HI) {
-        return pmgr_ticks(s) >> 32;
+        bool pending = s->lo_pending;
+
+        s->lo_pending = false;
+        return (pending ? s->lo_ticks : pmgr_ticks(s)) >> 32;
     }
+    s->lo_pending = false;
     BQL_LOCK_GUARD();
     val = s->regs[off / 4];
     if (!pmgr_modeled(off)) {
@@ -377,6 +395,7 @@ static void s5l8930_pmgr_write(void *opaque, hwaddr off, uint64_t val64,
     S5L8930PMGRState *s = opaque;
     uint32_t val = val64;
 
+    s->lo_pending = false;
     BQL_LOCK_GUARD();
     if (!pmgr_modeled(off)) {
         qemu_log_mask(LOG_UNIMP, "%s: unmodeled write 0x%04x <- 0x%08x\n",
@@ -442,6 +461,7 @@ static void s5l8930_pmgr_reset(DeviceState *dev)
     S5L8930PMGRState *s = S5L8930_PMGR(dev);
     int i;
 
+    s->lo_pending = false;
     memset(s->regs, 0, sizeof(s->regs));
     for (i = 0; i < ARRAY_SIZE(pmgr_defaults); i++) {
         s->regs[pmgr_defaults[i].off / 4] = pmgr_defaults[i].val;
