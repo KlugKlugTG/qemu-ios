@@ -397,13 +397,54 @@ static bool el0_tlb_defer_enabled(void)
     return on;
 }
 
+/* LT_TLB_KEEP_PHYS=off flushes the physical-address indexes on every ASID switch again, for A/B. */
+static bool tlb_keep_phys_enabled(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_TLB_KEEP_PHYS");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
+/*
+ * LT_TLB_ASID_BANKS=off flushes the EL0 index when another ASID's code needs it, for A/B. On, the outgoing
+ * ASID's entries are parked and come back when it runs again, as a tagged hardware TLB keeps them.
+ */
+static bool tlb_asid_banks_enabled(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_TLB_ASID_BANKS");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
+extern bool it_acct_on;
+extern uint64_t it_acct_el0_sync, it_acct_el0_used;
+
 void arm_el0_tlb_sync(CPUARMState *env)
 {
     ARMCPU *cpu = env_archcpu(env);
 
     if (cpu->el0_tlb_stale) {
         cpu->el0_tlb_stale = false;
-        tlb_flush_by_mmuidx_keep_jmp_cache(CPU(cpu), ARMMMUIdxBit_E10_0);
+        if (unlikely(it_acct_on)) {
+            it_acct_el0_sync++;
+            it_acct_el0_used += CPU(cpu)->neg.tlb.d[arm_to_core_mmu_idx(ARMMMUIdx_E10_0)].n_used_entries;
+        }
+        if (tlb_asid_banks_enabled()) {
+            uint64_t cid = arm_is_secure(env) ? env->cp15.contextidr_s : env->cp15.contextidr_ns;
+
+            tlb_bank_switch(CPU(cpu), arm_to_core_mmu_idx(ARMMMUIdx_E10_0), cpu->el0_tlb_asid,
+                            extract64(cid, 0, 8));
+        } else {
+            tlb_flush_by_mmuidx_keep_jmp_cache(CPU(cpu), ARMMMUIdxBit_E10_0);
+        }
     }
 }
 
@@ -452,10 +493,19 @@ static void contextidr_write(CPUARMState *env, const ARMCPRegInfo *ri,
         } else {
             cpu->el0_tlb_stale = false;
         }
+        /*
+         * The Phys indexes cache page-table descriptor reads by physical
+         * address, which no ASID or TTBR changes (TLBIALL leaves them too):
+         * flushing them with the rest made every switch refill the walker's
+         * view of the tables, ~26K refills a second on iOS 6.
+         */
+        MMUIdxMap phys = tlb_keep_phys_enabled() ?
+                         (MMUIdxMap)(MAKE_64BIT_MASK(ARMMMUIdx_Phys_S & ARM_MMU_IDX_COREIDX_MASK, 4)) : 0;
+
         tlb_flush_switch_context_keep(CPU(cpu), asid,
                                       keep ? arm_to_core_mmu_idx(ARMMMUIdx_E10_1) : -1,
                                       cpu->ng_el1_pages, keep ? cpu->ng_el1_count : 0,
-                                      defer ? ARMMMUIdxBit_E10_0 : 0);
+                                      (defer ? ARMMMUIdxBit_E10_0 : 0) | phys);
         cpu->ng_el1_count = 0;
     }
     raw_write(env, ri, value);

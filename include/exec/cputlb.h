@@ -173,6 +173,14 @@ void tlb_flush_by_mmuidx_keep_jmp_cache(CPUState *cpu, MMUIdxMap idxmap);
  */
 void tlb_flush_context(CPUState *cpu, uint64_t key);
 
+/*
+ * Park @mmu_idx's table under @old_key and bring back @new_key's if it is still held, else start
+ * @new_key's empty: a per-address-space table for a tagged guest TLB. Flushes of the index cover
+ * the parked tables; tlb_flush_bank_key drops one key's.
+ */
+void tlb_bank_switch(CPUState *cpu, int mmu_idx, uint64_t old_key, uint64_t new_key);
+void tlb_flush_bank_key(CPUState *cpu, uint64_t key);
+
 /**
  * tlb_flush_all_cpus_synced:
  * @cpu: src CPU of the flush

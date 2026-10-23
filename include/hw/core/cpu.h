@@ -322,6 +322,8 @@ typedef struct CPUTLBCommon {
     size_t full_flush_count;
     size_t part_flush_count;
     size_t elide_flush_count;
+    /* Parked tables of one index by address space (tlb_bank_switch), or NULL. */
+    struct TLBBankSet *banks;
 } CPUTLBCommon;
 
 /*

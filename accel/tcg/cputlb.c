@@ -323,6 +323,168 @@ static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
 }
 
 /*
+ * Parked tables for one mmu index, by address space. A guest whose TLB is tagged (ARM's ASID) keeps a process's
+ * entries across switches to another; QEMU's single table per index had to be flushed and refilled instead, ~27
+ * refills per process switch on iOS 6. tlb_bank_switch parks the live table under the outgoing key and brings back
+ * the incoming key's, if still held. Every flush that names the index also applies to the parked tables: a page
+ * flush to each, anything wider drops them all, and tlb_flush_bank_key drops one key's (ARM TLBIASID). Only the
+ * owning vCPU switches; everything is under tlb_c.lock.
+ */
+#define TLB_BANKS 8
+
+typedef struct TLBBank {
+    CPUTLBDesc d;
+    CPUTLBDescFast f;
+    uint64_t key;
+    uint64_t used;          /* LRU stamp; 0 = holds nothing usable */
+} TLBBank;
+
+struct TLBBankSet {
+    int mmu_idx;
+    uint64_t clock;
+    TLBBank b[TLB_BANKS];
+};
+
+static void tlb_bank_swap(CPUState *cpu, int mmu_idx, TLBBank *b)
+{
+    CPUTLBDesc d = cpu->neg.tlb.d[mmu_idx];
+    CPUTLBDescFast f = *cpu_tlb_fast(cpu, mmu_idx);
+
+    cpu->neg.tlb.d[mmu_idx] = b->d;
+    *cpu_tlb_fast(cpu, mmu_idx) = b->f;
+    b->d = d;
+    b->f = f;
+}
+
+static inline bool tlb_banks_on(CPUState *cpu, MMUIdxMap idxmap)
+{
+    struct TLBBankSet *set = cpu->neg.tlb.c.banks;
+
+    return unlikely(set) && ((idxmap >> set->mmu_idx) & 1);
+}
+
+static void tlb_banks_drop_locked(CPUState *cpu)
+{
+    struct TLBBankSet *set = cpu->neg.tlb.c.banks;
+
+    for (int i = 0; i < TLB_BANKS; i++) {
+        set->b[i].used = 0;
+    }
+}
+
+static bool tlb_flush_entry_locked(CPUTLBEntry *tlb_entry, vaddr page);
+
+static void tlb_banks_flush_page_locked(CPUState *cpu, vaddr page)
+{
+    struct TLBBankSet *set = cpu->neg.tlb.c.banks;
+
+    for (int i = 0; i < TLB_BANKS; i++) {
+        TLBBank *b = &set->b[i];
+
+        if (!b->used) {
+            continue;
+        }
+        if ((page & b->d.large_page_mask) == b->d.large_page_addr) {
+            b->used = 0;
+            continue;
+        }
+        if (tlb_flush_entry_locked(&b->f.table[(page >> TARGET_PAGE_BITS) & (b->f.mask >> CPU_TLB_ENTRY_BITS)],
+                                   page)) {
+            b->d.n_used_entries--;
+        }
+        for (int k = 0; k < CPU_VTLB_SIZE; k++) {
+            if (tlb_flush_entry_locked(&b->d.vtable[k], page)) {
+                b->d.n_used_entries--;
+            }
+        }
+    }
+}
+
+static inline int64_t tlb_clock_ns(void);
+
+void tlb_bank_switch(CPUState *cpu, int mmu_idx, uint64_t old_key, uint64_t new_key)
+{
+    struct TLBBankSet *set;
+    TLBBank *in = NULL, *out = NULL;
+    bool live;
+
+    assert_cpu_is_self(cpu);
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    set = cpu->neg.tlb.c.banks;
+    if (!set) {
+        int64_t now = tlb_clock_ns();
+
+        set = g_new0(struct TLBBankSet, 1);
+        set->mmu_idx = mmu_idx;
+        for (int i = 0; i < TLB_BANKS; i++) {
+            tlb_mmu_init(&set->b[i].d, &set->b[i].f, now);
+        }
+        cpu->neg.tlb.c.banks = set;
+    }
+    assert(set->mmu_idx == mmu_idx);
+    if (old_key == new_key) {
+        qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+        return;
+    }
+    for (int i = 0; i < TLB_BANKS; i++) {
+        TLBBank *b = &set->b[i];
+
+        if (b->used && b->key == new_key) {
+            in = b;
+        } else if (b->used && b->key == old_key) {
+            out = b;
+        }
+    }
+    if (!out) {
+        for (int i = 0; i < TLB_BANKS; i++) {
+            TLBBank *b = &set->b[i];
+
+            if (b != in && (!out || b->used < out->used)) {
+                out = b;
+            }
+        }
+    }
+    /* Park the live table; what comes back from that slot is stale until flushed or swapped out again. */
+    live = cpu->neg.tlb.c.dirty & (1 << mmu_idx);
+    tlb_bank_swap(cpu, mmu_idx, out);
+    out->key = old_key;
+    out->used = live ? ++set->clock : 0;
+    if (in) {
+        CPUTLBDescFast *fast = cpu_tlb_fast(cpu, mmu_idx);
+        size_t size;
+
+        tlb_bank_swap(cpu, mmu_idx, in);
+        in->used = 0;
+        cpu->neg.tlb.c.dirty |= 1 << mmu_idx;
+        /* A table that is never flushed is never resized either: grow (or shrink) it here, at the price of its entries. */
+        size = tlb_n_entries(fast);
+        tlb_mmu_resize_locked(&cpu->neg.tlb.d[mmu_idx], fast, tlb_clock_ns());
+        if (tlb_n_entries(fast) != size) {
+            tlb_mmu_flush_locked(&cpu->neg.tlb.d[mmu_idx], fast);
+            cpu->neg.tlb.c.dirty &= ~(1 << mmu_idx);
+        }
+    } else {
+        tlb_flush_one_mmuidx_locked(cpu, mmu_idx, tlb_clock_ns());
+        cpu->neg.tlb.c.dirty &= ~(1 << mmu_idx);
+    }
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+}
+
+void tlb_flush_bank_key(CPUState *cpu, uint64_t key)
+{
+    struct TLBBankSet *set;
+
+    qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    set = cpu->neg.tlb.c.banks;
+    for (int i = 0; set && i < TLB_BANKS; i++) {
+        if (set->b[i].used && set->b[i].key == key) {
+            set->b[i].used = 0;
+        }
+    }
+    qemu_spin_unlock(&cpu->neg.tlb.c.lock);
+}
+
+/*
  * The clock for TLB resizing, which only compares against a 100 ms window. Every flush reads it, and iOS flushes on
  * each context switch (and fully whenever a page flush hits a section): gettimeofday is ~200 ns on a phone (the
  * counter read), the coarse clock ~12 ns.
@@ -376,6 +538,11 @@ void tlb_destroy(CPUState *cpu)
         g_free(fast->table);
         g_free(desc->fulltlb);
     }
+    for (i = 0; cpu->neg.tlb.c.banks && i < TLB_BANKS; i++) {
+        g_free(cpu->neg.tlb.c.banks->b[i].f.table);
+        g_free(cpu->neg.tlb.c.banks->b[i].d.fulltlb);
+    }
+    g_clear_pointer(&cpu->neg.tlb.c.banks, g_free);
 }
 
 /* flush_all_helper: run fn across all cpus
@@ -414,6 +581,9 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
 
+    if (tlb_banks_on(cpu, asked)) {
+        tlb_banks_drop_locked(cpu);
+    }
     all_dirty = cpu->neg.tlb.c.dirty;
     to_clean = asked & all_dirty;
     all_dirty &= ~to_clean;
@@ -464,7 +634,8 @@ void tlb_flush(CPUState *cpu)
 }
 
 extern bool it_acct_on;
-uint64_t it_acct_ctxsw, it_acct_fills[16][2];
+uint64_t it_acct_ctxsw, it_acct_fills[32][2];
+uint64_t it_acct_el0_sync, it_acct_el0_used, it_acct_tlbiasid, it_acct_pflush, it_acct_rflush;
 
 void tlb_flush_switch_context(CPUState *cpu, uint64_t key)
 {
@@ -486,7 +657,9 @@ void tlb_flush_context(CPUState *cpu, uint64_t key)
                                                             TLB_FLUSH_KEEP_JMP_CACHE));
         break;
     case 0:
-        break;  /* another address space: nothing of it is in the TLB */
+        /* another address space: nothing of it is in the TLB, but it may be parked */
+        tlb_flush_bank_key(cpu, key);
+        break;
     default:
         tlb_flush(cpu);
         break;
@@ -631,6 +804,12 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
     /* A clean index holds no entries (see tlb_flush_clean_skip). */
+    if (unlikely(it_acct_on)) {
+        it_acct_pflush++;
+    }
+    if (tlb_banks_on(cpu, idxmap)) {
+        tlb_banks_flush_page_locked(cpu, addr);
+    }
     idxmap = tlb_flush_clean_skip(cpu, idxmap);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         if ((idxmap >> mmu_idx) & 1) {
@@ -852,6 +1031,12 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
               d.addr, d.bits, d.len, d.idxmap);
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    if (unlikely(it_acct_on)) {
+        it_acct_rflush++;
+    }
+    if (tlb_banks_on(cpu, d.idxmap)) {
+        tlb_banks_drop_locked(cpu);
+    }
     d.idxmap = tlb_flush_clean_skip(cpu, d.idxmap);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         if ((d.idxmap >> mmu_idx) & 1) {
@@ -1065,6 +1250,20 @@ void tlb_reset_dirty(CPUState *cpu, uintptr_t start, uintptr_t length)
                                          start, length);
         }
     }
+    for (int b = 0; cpu->neg.tlb.c.banks && b < TLB_BANKS; b++) {
+        TLBBank *bank = &cpu->neg.tlb.c.banks->b[b];
+        unsigned int n = tlb_n_entries(&bank->f);
+
+        if (!bank->used) {
+            continue;
+        }
+        for (unsigned int i = 0; i < n; i++) {
+            tlb_reset_dirty_range_locked(&bank->d.fulltlb[i], &bank->f.table[i], start, length);
+        }
+        for (unsigned int i = 0; i < CPU_VTLB_SIZE; i++) {
+            tlb_reset_dirty_range_locked(&bank->d.vfulltlb[i], &bank->d.vtable[i], start, length);
+        }
+    }
     qemu_spin_unlock(&cpu->neg.tlb.c.lock);
 }
 
@@ -1167,7 +1366,7 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
     assert_cpu_is_self(cpu);
 
     if (unlikely(it_acct_on)) {
-        it_acct_fills[mmu_idx & 15][addr >= 0x80000000]++;   /* by mmu_idx, low/high half */
+        it_acct_fills[mmu_idx & 31][addr >= 0x80000000]++;   /* by mmu_idx, low/high half */
     }
     if (full->lg_page_size <= TARGET_PAGE_BITS) {
         sz = TARGET_PAGE_SIZE;

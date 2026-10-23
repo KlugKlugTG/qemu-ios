@@ -131,7 +131,8 @@ extern uint64_t it_acct_pcrel_invals, it_acct_jc_flushes;
 extern uint64_t it_acct_vcpu_bql_n, it_acct_vcpu_bql_ns, it_acct_vcpu_bql_slow;
 extern struct it_acct_mr { void *mr; uint64_t n, ns; char *name; } it_acct_mrs[256];
 extern uint64_t it_acct_wait_hist[5][2], it_acct_hold_hist[5][2];
-extern uint64_t it_acct_ctxsw, it_acct_fills[16][2];
+extern uint64_t it_acct_ctxsw, it_acct_fills[32][2];
+extern uint64_t it_acct_el0_sync, it_acct_el0_used, it_acct_tlbiasid, it_acct_pflush, it_acct_rflush;
 extern struct it_acct_holder { const char *file; int line; uint64_t n, ns, long_n, long_ns; } it_acct_holders[64];
 extern struct it_acct_cb { void *fn; uint64_t n, ns, long_n, long_ns, max; } it_acct_cbs[64];
 void it_acct_cb_enable(void);
@@ -265,8 +266,10 @@ static void mttcg_acct_dump(int64_t now)
                 c->n, c->ns, c->long_n, c->long_ns, c->max);
 #endif
     }
-    fprintf(stderr, "[acct]   ctxsw %" PRIu64 " tlb-fills", it_acct_ctxsw);
-    for (int i = 0; i < 16; i++) {
+    fprintf(stderr, "[acct]   ctxsw %" PRIu64 " el0-sync %" PRIu64 " el0-used %" PRIu64 " tlbiasid %" PRIu64
+            " pflush %" PRIu64 " rflush %" PRIu64 " tlb-fills", it_acct_ctxsw, it_acct_el0_sync, it_acct_el0_used,
+            it_acct_tlbiasid, it_acct_pflush, it_acct_rflush);
+    for (int i = 0; i < 32; i++) {
         if (it_acct_fills[i][0] || it_acct_fills[i][1]) {
             fprintf(stderr, " idx%d %" PRIu64 "/%" PRIu64, i, it_acct_fills[i][0], it_acct_fills[i][1]);
         }

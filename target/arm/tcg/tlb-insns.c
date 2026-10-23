@@ -116,11 +116,18 @@ static void tlbimva_write(CPUARMState *env, const ARMCPRegInfo *ri,
     }
 }
 
+extern bool it_acct_on;
+extern uint64_t it_acct_tlbiasid;
+
 static void tlbiasid_write(CPUARMState *env, const ARMCPRegInfo *ri,
                            uint64_t value)
 {
     /* Invalidate by ASID (TLBIASID) */
     CPUState *cs = env_cpu(env);
+
+    if (unlikely(it_acct_on)) {
+        it_acct_tlbiasid++;
+    }
 
     if (tlb_force_broadcast(env)) {
         tlb_flush_all_cpus_synced(cs);
