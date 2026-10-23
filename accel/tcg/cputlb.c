@@ -322,6 +322,23 @@ static void tlb_mmu_init(CPUTLBDesc *desc, CPUTLBDescFast *fast, int64_t now)
     tlb_mmu_flush_locked(desc, fast);
 }
 
+/*
+ * The clock for TLB resizing, which only compares against a 100 ms window. Every flush reads it, and iOS flushes on
+ * each context switch (and fully whenever a page flush hits a section): gettimeofday is ~200 ns on a phone (the
+ * counter read), the coarse clock ~12 ns.
+ */
+static inline int64_t tlb_clock_ns(void)
+{
+#ifdef CLOCK_MONOTONIC_COARSE
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC_COARSE, &ts);
+    return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+#else
+    return get_clock_realtime();
+#endif
+}
+
 static inline void tlb_n_used_entries_inc(CPUState *cpu, uintptr_t mmu_idx)
 {
     cpu->neg.tlb.d[mmu_idx].n_used_entries++;
@@ -334,7 +351,7 @@ static inline void tlb_n_used_entries_dec(CPUState *cpu, uintptr_t mmu_idx)
 
 void tlb_init(CPUState *cpu)
 {
-    int64_t now = get_clock_realtime();
+    int64_t now = tlb_clock_ns();
     int i;
 
     qemu_spin_init(&cpu->neg.tlb.c.lock);
@@ -389,7 +406,7 @@ static void tlb_flush_by_mmuidx_async_work(CPUState *cpu, run_on_cpu_data data)
     MMUIdxMap asked = data.host_int & ~TLB_FLUSH_KEEP_JMP_CACHE;
     bool keep_jmp_cache = data.host_int & TLB_FLUSH_KEEP_JMP_CACHE;
     MMUIdxMap all_dirty, work, to_clean;
-    int64_t now = get_clock_realtime();
+    int64_t now = tlb_clock_ns();
 
     assert_cpu_is_self(cpu);
 
@@ -555,17 +572,36 @@ static inline void tlb_flush_vtlb_page_locked(CPUState *cpu, int mmu_idx,
     tlb_flush_vtlb_page_mask_locked(cpu, mmu_idx, page, -1);
 }
 
+/*
+ * The indexes of idxmap a page or range flush has to visit: only the dirty ones, as an index is marked dirty by
+ * every fill and clean again only by a full flush, so a clean one holds no entries, victim TLB included. An index
+ * nothing fills shrinks to the minimum size, where flushing one 4 KiB page means flushing the whole table: on iOS 6,
+ * whose kernel invalidates ~10K pages a second, that was ~15K full flushes a second of empty tables.
+ * LT_TLB_FLUSH_DIRTY_ONLY=off visits them all (A/B).
+ */
+static MMUIdxMap tlb_flush_clean_skip(CPUState *cpu, MMUIdxMap idxmap)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_TLB_FLUSH_DIRTY_ONLY");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on ? idxmap & cpu->neg.tlb.c.dirty : idxmap;
+}
+
 static void tlb_flush_page_locked(CPUState *cpu, int midx, vaddr page)
 {
     vaddr lp_addr = cpu->neg.tlb.d[midx].large_page_addr;
     vaddr lp_mask = cpu->neg.tlb.d[midx].large_page_mask;
+
 
     /* Check if we need to flush due to large pages.  */
     if ((page & lp_mask) == lp_addr) {
         tlb_debug("forcing full flush midx %d (%016"
                   VADDR_PRIx "/%016" VADDR_PRIx ")\n",
                   midx, lp_addr, lp_mask);
-        tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
+        tlb_flush_one_mmuidx_locked(cpu, midx, tlb_clock_ns());
     } else {
         if (tlb_flush_entry_locked(tlb_entry(cpu, midx, page), page)) {
             tlb_n_used_entries_dec(cpu, midx);
@@ -594,6 +630,8 @@ static void tlb_flush_page_by_mmuidx_async_0(CPUState *cpu,
     tlb_debug("page addr: %016" VADDR_PRIx " mmu_map:0x%x\n", addr, idxmap);
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    /* A clean index holds no entries (see tlb_flush_clean_skip). */
+    idxmap = tlb_flush_clean_skip(cpu, idxmap);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         if ((idxmap >> mmu_idx) & 1) {
             tlb_flush_page_locked(cpu, mmu_idx, addr);
@@ -768,7 +806,7 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
         tlb_debug("forcing full flush midx %d ("
                   "%016" VADDR_PRIx "/%016" VADDR_PRIx "+%016" VADDR_PRIx ")\n",
                   midx, addr, mask, len);
-        tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
+        tlb_flush_one_mmuidx_locked(cpu, midx, tlb_clock_ns());
         return;
     }
 
@@ -781,7 +819,7 @@ static void tlb_flush_range_locked(CPUState *cpu, int midx,
         tlb_debug("forcing full flush midx %d ("
                   "%016" VADDR_PRIx "/%016" VADDR_PRIx ")\n",
                   midx, d->large_page_addr, d->large_page_mask);
-        tlb_flush_one_mmuidx_locked(cpu, midx, get_clock_realtime());
+        tlb_flush_one_mmuidx_locked(cpu, midx, tlb_clock_ns());
         return;
     }
 
@@ -814,6 +852,7 @@ static void tlb_flush_range_by_mmuidx_async_0(CPUState *cpu,
               d.addr, d.bits, d.len, d.idxmap);
 
     qemu_spin_lock(&cpu->neg.tlb.c.lock);
+    d.idxmap = tlb_flush_clean_skip(cpu, d.idxmap);
     for (mmu_idx = 0; mmu_idx < NB_MMU_MODES; mmu_idx++) {
         if ((d.idxmap >> mmu_idx) & 1) {
             tlb_flush_range_locked(cpu, mmu_idx, d.addr, d.len, d.bits);
@@ -1130,7 +1169,6 @@ void tlb_set_page_full(CPUState *cpu, int mmu_idx,
     if (unlikely(it_acct_on)) {
         it_acct_fills[mmu_idx & 15][addr >= 0x80000000]++;   /* by mmu_idx, low/high half */
     }
-
     if (full->lg_page_size <= TARGET_PAGE_BITS) {
         sz = TARGET_PAGE_SIZE;
     } else {
