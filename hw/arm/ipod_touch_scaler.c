@@ -23,6 +23,12 @@ typedef struct {
     unsigned sid;
     uint32_t version;   /* +0x260, the block's version: 0 on the S5L8720 (no tiled buffers) */
     QEMUTimer *done;    /* the running transfer's end */
+    /*
+     * Frame-sized work buffers, kept from one transfer to the next: allocated per transfer, each (2.4 MiB for a
+     * 640x960 frame) was on Android a fresh mapping, faulted in a page at a time and unmapped again, every frame.
+     */
+    void *scratch[2];
+    size_t scratch_size[2];
 } IPodScalerState;
 
 void ipod_scaler_set_iommu(DeviceState *dev,
@@ -52,6 +58,16 @@ void ipod_scaler_set_version(DeviceState *dev, uint32_t version)
 
     s->version = version;
     s->regs[0x260 / 4] = version;
+}
+
+static void *scaler_scratch(IPodScalerState *s, unsigned i, size_t size)
+{
+    if (s->scratch_size[i] < size) {
+        g_free(s->scratch[i]);
+        s->scratch[i] = g_malloc(size);
+        s->scratch_size[i] = size;
+    }
+    return s->scratch[i];
 }
 
 static hwaddr scaler_pa(IPodScalerState *s, uint32_t va)
@@ -159,7 +175,7 @@ static bool scaler_rgb(IPodScalerState *s)
     bool cw = rot && (r[0x58 / 4] & 3) == 3;
     sx = sx ? sx : ((uint64_t)sw << 16) / dw;
     sy = sy ? sy : ((uint64_t)sh << 16) / dh;
-    g_autofree uint32_t *src = g_new(uint32_t, (size_t)pitch * sh);
+    uint32_t *src = scaler_scratch(s, 0, sizeof(uint32_t) * pitch * sh);
     for (unsigned y = 0; y < sh; y++) {
         if (!scaler_read_bus(s, scaler_row(r[0x14 / 4], y, ss, ROUND_UP(sw * 4, 256), stiled),
                              src + (size_t)y * pitch, sw * 4)) {
@@ -180,7 +196,7 @@ static bool scaler_rgb(IPodScalerState *s)
         unsigned i = MIN(((uint64_t)y * sy) >> 16, (rot ? sw : sh) - 1);
         yo[y] = cw ? i : rot ? sw - 1 - i : (size_t)i * pitch;
     }
-    g_autofree uint32_t *dst = g_new(uint32_t, (size_t)dw * dh);
+    uint32_t *dst = scaler_scratch(s, 1, sizeof(uint32_t) * dw * dh);
     if (rot) {
         for (unsigned by = 0; by < dh; by += 32) {
             for (unsigned bx = 0; bx < dw; bx += 32) {
@@ -232,7 +248,7 @@ static bool scaler_nv12(IPodScalerState *s)
         !dw || !dh || (dw | dh) & 1 || sys < sw || suvs < sw || dys < dw || duvs < dw) {
         return false;
     }
-    g_autofree uint8_t *y = g_malloc((size_t)sw * sh), *uv = g_malloc((size_t)sw * sh / 2);
+    uint8_t *y = scaler_scratch(s, 0, (size_t)sw * sh), *uv = scaler_scratch(s, 1, (size_t)sw * sh / 2);
     g_autofree uint8_t *row = g_malloc(dw);
     for (unsigned i = 0; i < sh; i++) {
         if (!scaler_read_bus(s, r[0x14 / 4] + i * sys, y + (size_t)i * sw, sw) ||
@@ -302,8 +318,8 @@ static bool scaler_convert(IPodScalerState *s)
         (!s->xlate && (!scaler_range(ybase, ys, h, w) ||
                        !scaler_range(uvbase, uvs, h / 2, w) ||
                        !scaler_range(dest, ds, h, w * bpp)))) return false;
-    g_autofree uint8_t *yplane = g_malloc((size_t)w * h);
-    g_autofree uint8_t *uvplane = g_malloc((size_t)w * h / 2);
+    uint8_t *yplane = scaler_scratch(s, 0, (size_t)w * h);
+    uint8_t *uvplane = scaler_scratch(s, 1, (size_t)w * h / 2);
     g_autofree uint8_t *row = g_malloc(w * bpp);
     /* Snapshot sources before writing: IOSurface transfers may alias. Through the DART on the S5L8920 (3GS). */
     for (unsigned y = 0; y < h; y++) {
