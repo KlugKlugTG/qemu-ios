@@ -22,6 +22,9 @@
 #include "exec/target_page.h"
 #include "exec/tlb-flags.h"
 #include "hw/arm/guest-services/general.h"
+#include "system/ramblock.h"
+#include "system/physmem.h"
+#include "system/memory.h"
 
 /*
  * Guest memory behind the pointers a GL call hands the host (client arrays,
@@ -123,6 +126,33 @@ int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write)
         }
     }
     return cpu_memory_rw_debug(cpu, va, buf, len, write);
+}
+
+bool guest_ram_pages(CPUState *cpu, uint64_t va, size_t len, uint8_t **host, ram_addr_t *ram)
+{
+    CPUArchState *env = cpu_env(cpu);
+    int idx = cpu_mmu_index(cpu, false);
+    uint64_t page = va & TARGET_PAGE_MASK, last = va + len - 1;
+
+    if (!len || last < va || last > UINT32_MAX) {
+        return false;
+    }
+    for (unsigned i = 0; page <= last; i++, page += TARGET_PAGE_SIZE) {
+        void *p;
+        int flags = probe_access_flags(env, page, 0, MMU_DATA_STORE, idx, true, &p, 0);
+
+        /* Not dirty is fine (the writer marks it), unless the page has code to invalidate. */
+        if ((flags & ~TLB_NOTDIRTY) || !p) {
+            return false;
+        }
+        host[i] = p;
+        ram[i] = qemu_ram_addr_from_host(p);
+        if (ram[i] == RAM_ADDR_INVALID ||
+            ((flags & TLB_NOTDIRTY) && !physical_memory_get_dirty_flag(ram[i], DIRTY_MEMORY_CODE))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 static void gles_guest_fault_in(CPUState *cpu)

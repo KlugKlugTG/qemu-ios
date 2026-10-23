@@ -8,6 +8,7 @@
 #include "qemu/bswap.h"
 #include "qemu/timer.h"
 #include "qemu/main-loop.h"
+#include "hw/arm/guest-services/gles.h"
 
 /* 7E18 AppleM2ScalerCSCDriver: 0xc0732388 programs formats, 0xc07323f0
  * source geometry, 0xc073246c destination geometry, 0xc0730288 acknowledges
@@ -102,6 +103,7 @@ static bool scaler_read_bus(IPodScalerState *s, uint32_t va, void *buf, unsigned
 {
     uint8_t *p = buf;
 
+    gles_host_complete_presents();      /* a GL layer it scales may still be on its way */
     while (len) {
         unsigned n = MIN(len, 0x1000 - (va & 0xfff));
         hwaddr pa = scaler_pa(s, va);

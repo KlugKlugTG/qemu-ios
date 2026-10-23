@@ -224,6 +224,7 @@ void ipod_lcd_set_iommu(DeviceState *lcd, hwaddr (*xlate)(void *opaque, uint32_t
  * unmapped pages read black), else physical. */
 static void lcd_bus_read(const IPodTouchLCDState *s, uint32_t addr, uint8_t *buf, uint32_t len)
 {
+    gles_host_complete_presents();      /* a queued GL present may target this memory */
     if (!s->xlate) {
         cpu_physical_memory_read(addr, buf, len);
         return;
@@ -1052,7 +1053,10 @@ static void lcd_refresh_rotated(IPodTouchLCDState *lcd, DisplaySurface *surface,
         lcd->rotbuf = g_malloc(sw * sh * 4);
     }
     bool unlocked = lcd_blit_unlock(lcd);
-    if (!composed) cpu_physical_memory_read(lcd->scanout_base, lcd->rotbuf, sw * sh * 4);
+    if (!composed) {
+        gles_host_complete_presents();
+        cpu_physical_memory_read(lcd->scanout_base, lcd->rotbuf, sw * sh * 4);
+    }
 
     /*
      * A source row maps to a straight line in the destination for every one of

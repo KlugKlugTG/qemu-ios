@@ -12,6 +12,7 @@ static void gles_context_delete_objects(GLESHost *state)
     if (CGLSetCurrentContext(state->cgl) != 0) {
         return;
     }
+    gles_async_free(state);
 #else
     CGLSetCurrentContext(state->cgl);
 #endif

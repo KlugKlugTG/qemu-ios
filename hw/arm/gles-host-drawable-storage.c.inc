@@ -22,6 +22,7 @@ static int64_t gles_drawable_storage(uint32_t width, uint32_t height)
     }
     gh.drawable_announced = true;
     if (width == gh.drawable_width && height == gh.drawable_height) return 0;
+    gles_complete_presents("resize");
     readback = g_try_malloc0_n((size_t)width * height, 4);
     if (!readback) {
         gles_refuse("drawable:memory");

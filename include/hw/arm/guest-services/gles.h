@@ -397,12 +397,18 @@ static inline const char *gles_id_name(uint32_t id)
 #define GLES_SURFACE_LA88_IOS7          0x4c413838  /* 'LA88' */
 
 #ifndef OUT_OF_TREE_BUILD
+#include "exec/vaddr.h"
+#include "system/ram_addr.h"
 int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a);
 /* Guest-pointer access for the GL host: faults untouched pages in (guest-gles.c). */
 int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write);
 /* Guest memory through the host pointers in the vCPU's TLB, as its own loads and stores reach it. False, having
  * possibly copied part, when a page needs the full path (not plain RAM in the TLB, unmapped, not permitted). */
 bool guest_rw_ram(CPUState *cpu, uint64_t va, uint8_t *buf, size_t len, bool write);
+/* Host pointers and RAM offsets of the pages under [va, va + len), as the caller could store to them
+ * now, for a write that lands later on any thread. False when a page would fault, is not plain RAM
+ * or holds translated code: the caller then writes through gles_guest_rw. */
+bool guest_ram_pages(CPUState *cpu, uint64_t va, size_t len, uint8_t **host, ram_addr_t *ram);
 bool gles_guest_fault_pending(void);
 void qc_gles_dump_stats(void);
 int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
@@ -427,6 +433,9 @@ bool gles_host_debug(void);
  * VGA dirty bits of every surface page it checks (its own write-backs included), so a display
  * model that scans such pages out through the dirty log compares this too, or misses frames. */
 uint64_t gles_host_ram_gen(uint64_t addr, uint64_t len);
+/* Copy every queued present into guest RAM (LT_GL_ASYNC_PRESENT), on any thread, before RAM a
+ * present may target is read: a display model's scanout, a DMA engine's fetch. */
+void gles_host_complete_presents(void);
 #endif
 
 #endif /* HW_ARM_GUEST_SERVICES_GLES_H */

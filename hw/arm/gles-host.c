@@ -589,6 +589,11 @@ typedef struct {
     GHashTable *glsl;           /* shader/program names, without a group */
     uint32_t glsl_next;
     GHashTable *uloc;
+#ifdef GLES_HOST_EGL
+    /* LT_GL_ASYNC_PRESENT's staging, two frames (gles-host-async-present.c.inc). */
+    struct GLESPresentJob *async[2];
+    unsigned async_next;
+#endif
 } GLESHost;
 
 /* Old guest engines retain their legacy context. New engines pass opaque
@@ -3870,6 +3875,53 @@ static void gles_trace_surface_mapping(CPUState *cpu, uint32_t ctx,
     ios_frame_path(IOS_FP_SURFACE_MAP_END, ctx, base, physical);
 }
 
+#include "gles-host-async-present.c.inc"
+
+/*
+ * The guest's glFinish, as a glFlush (LT_GLFINISH_AS_FLUSH=off: a glFinish).
+ * Nothing the guest sees waits on it: a write-back or readback reads in the
+ * same context, which orders it after the draws, and a queued present is
+ * fenced. The one thing a flush does not give is another context of the
+ * sharegroup seeing a shared object complete, so the finish is owed until a
+ * call in another context, and paid there if that context shares objects.
+ * CoreAnimation's per-frame finish in backboardd's context has no draws of
+ * its own, but a phone's driver drained the game's queue for it (0.9 ms a
+ * frame on a Pixel 10).
+ */
+#ifdef GLES_HOST_EGL
+static GLESHost *gles_finish_owed;
+
+static void gles_finish_settle(void)
+{
+    GLESHost *owed = gles_finish_owed;
+
+    gles_finish_owed = NULL;
+    if (owed->group && owed->group == gh_current->group && owed->cgl &&
+        CGLSetCurrentContext(owed->cgl) == 0) {
+        glFinish();
+    }
+}
+#endif
+
+static void gles_finish(void)
+{
+#ifdef GLES_HOST_EGL
+    static int as_flush = -1;
+
+    if (as_flush < 0) {
+        const char *v = getenv("LT_GLFINISH_AS_FLUSH");
+        as_flush = !v || (strcmp(v, "off") && strcmp(v, "0"));
+        fprintf(stderr, "[gles] finish-as-flush=%s\n", as_flush ? "on" : "off");
+    }
+    if (as_flush) {
+        glFlush();
+        gles_finish_owed = gh_current;
+        return;
+    }
+#endif
+    glFinish();
+}
+
 static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t stride,
                                    uint32_t width, uint32_t height,
                                    uint32_t format, GLESPresentSample *sample)
@@ -3960,6 +4012,19 @@ static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t s
         size_t fstride = 0;
 
         gles_present_mark(sample, PRESENT_PREP);
+
+#ifdef GLES_HOST_EGL
+        /* Queued without waiting for the GPU; the rows land before anything reads them. */
+        if (bpp == 4 && bgra && !gles_swizzle && !sample &&
+            gles_async_present(cpu, base, stride, rw, rh)) {
+            gh.presents++;
+            gles_frame_end();
+            gles_note_scene();
+            gles_note_frame_gap();
+            gles_report_progress();
+            return 0;
+        }
+#endif
 
         /*
          * The frame, from the render target itself where the host allows it.
@@ -4506,6 +4571,7 @@ static bool gles_surface_range(uint32_t base, uint32_t stride, unsigned rows,
 static bool gles_surface_read(CPUState *cpu, uint32_t base, uint32_t stride,
                               unsigned rows, unsigned rowbytes, uint8_t *dst)
 {
+    gles_complete_presents("surface-read");
     if (!gles_surface_range(base, stride, rows, rowbytes)) return false;
     for (unsigned row = 0; row < rows; row++) {
         if (gles_guest_rw(cpu, base + row * stride,
@@ -4712,6 +4778,7 @@ uint64_t gles_host_ram_gen(uint64_t addr, uint64_t len)
 {
     uint64_t gen = 0;
 
+    gles_complete_presents("ram-gen");
     QEMU_LOCK_GUARD(&gles_page_gen_lock);
     for (size_t page = addr >> TARGET_PAGE_BITS;
          len && page <= (addr + len - 1) >> TARGET_PAGE_BITS && page < gles_page_gen_len; page++) {
@@ -4723,6 +4790,7 @@ uint64_t gles_host_ram_gen(uint64_t addr, uint64_t len)
 /* Whether any of `s`'s pages was written since its texture was uploaded. */
 static bool gles_surface_changed(GLESSurface *s)
 {
+    gles_complete_presents("surface-check");          /* a queued present's rows are a write too */
     bool changed = !s->npages;
 
     for (unsigned i = 0, j; i < s->npages; i = j) {
@@ -5220,6 +5288,7 @@ static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
     unsigned bpp = (s->format == GLES_SURFACE_RGB565 || rgb555) ? 2 : 4;
     g_autofree uint8_t *pixels = g_malloc((size_t)s->width * s->height * 4);
 
+    gles_complete_presents("write-back");
     /* Read through a scratch framebuffer: the texture is no longer the bound
      * target by the time its frame is flushed. */
     glGetIntegerv(GL_FRAMEBUFFER_BINDING_EXT, &framebuffer);
@@ -7449,12 +7518,12 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         glDeleteFencesAPPLE(n, ids);
         return 0;
     }
-    case 465: { uint64_t w0 = gw_t(); glSetFenceAPPLE(a[0]); gw_add(GW_FENCE, w0); return 0; }
+    case 465: { uint64_t w0 = gw_t(); gles_complete_presents("fence"); glSetFenceAPPLE(a[0]); gw_add(GW_FENCE, w0); return 0; }
     case 466: return glIsFenceAPPLE(a[0]);
-    case 467: { uint64_t w0 = gw_t(); GLboolean r = glTestFenceAPPLE(a[0]); gw_add(GW_FENCE, w0); return r; }
-    case 468: { uint64_t w0 = gw_t(); glFinishFenceAPPLE(a[0]); gw_add(GW_FENCE, w0); return 0; }
-    case 469: { uint64_t w0 = gw_t(); GLboolean r = glTestObjectAPPLE(a[0], a[1]); gw_add(GW_FENCE, w0); return r; }
-    case 470: { uint64_t w0 = gw_t(); glFinishObjectAPPLE(a[0], a[1]); gw_add(GW_FENCE, w0); return 0; }
+    case 467: { uint64_t w0 = gw_t(); gles_complete_presents("fence"); GLboolean r = glTestFenceAPPLE(a[0]); gw_add(GW_FENCE, w0); return r; }
+    case 468: { uint64_t w0 = gw_t(); gles_complete_presents("fence"); glFinishFenceAPPLE(a[0]); gw_add(GW_FENCE, w0); return 0; }
+    case 469: { uint64_t w0 = gw_t(); gles_complete_presents("fence"); GLboolean r = glTestObjectAPPLE(a[0], a[1]); gw_add(GW_FENCE, w0); return r; }
+    case 470: { uint64_t w0 = gw_t(); gles_complete_presents("fence"); glFinishObjectAPPLE(a[0], a[1]); gw_add(GW_FENCE, w0); return 0; }
 #endif
 
     /* ---- lighting and fog ---- */
@@ -7542,6 +7611,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         return 0;
 
     case GLES_SLOT_READ_PIXELS: {
+        gles_complete_presents("readpixels");
         /* x, y, w, h, format, type, guest void* */
         uint32_t x = a[0], y = a[1], w = a[2], h = a[3];
         uint32_t fmt = a[4], type = a[5], dst = a[6];
@@ -7590,7 +7660,8 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
 
     case GLES_SLOT_FINISH: {
         uint64_t w0 = gw_t();
-        glFinish();
+        gles_complete_presents("finish");
+        gles_finish();
         gw_add(GW_FINISH, w0);
         GW_CTX(ctx, finish);
         if (w0 && gw.present_end) {
@@ -7603,6 +7674,7 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
 
     case GLES_SLOT_FLUSH: {
         uint64_t w0 = gw_t();
+        gles_complete_presents("flush");
         glFlush();
         gw_add(GW_FLUSH, w0);
         GW_CTX(ctx, flush);
@@ -8020,6 +8092,10 @@ static void gles_group_unref(GLESGroup *group)
 
 static void gles_context_free(GLESHost *state)
 {
+    gles_complete_presents("context-free");
+#ifdef GLES_HOST_EGL
+    if (gles_finish_owed == state) gles_finish_owed = NULL;
+#endif
     GLESArray *arrays[] = { &state->vertex, &state->color, &state->normal, &state->pointsize };
     for (unsigned i = 0; i < ARRAY_SIZE(arrays); i++) {
         gles_buffer_destroy(arrays[i]->vbo);
@@ -8135,6 +8211,7 @@ static void gles_snapshot_register(void) {} /* migration blocker is held for liv
  * Keep handles monotonic so a stale request cannot name a new context. */
 static void gles_drop_all(void)
 {
+    gles_complete_presents("drop-all");
     if (gles_contexts) {
         GHashTableIter it;
         gpointer value;
@@ -8212,6 +8289,11 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
     if (stage_slot >= 0) {
         stage_init = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     }
+#ifdef GLES_HOST_EGL
+    if (gles_finish_owed && gles_finish_owed != gh_current) {
+        gles_finish_settle();
+    }
+#endif
     if (!gles_platform_make_current()) {
         gles_refuse("host:make-current");
         return -1;

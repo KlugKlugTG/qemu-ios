@@ -29,6 +29,7 @@
 #include "ui/console.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
+#include "hw/arm/guest-services/gles.h"
 
 #define PIPE_WORDS          (S5L8930_DISP_PIPE0_SIZE / 4)
 #define CLCD_WORDS          (S5L8930_CLCD_SIZE / 4)
@@ -655,6 +656,7 @@ static void fb_plan(S5L8930DisplayState *s, uint32_t va, size_t off, size_t len)
 /* Run the planned reads into `dst`. RAM reads need no BQL; MMIO takes it in the dispatch. */
 static void plan_run(GArray *plan, uint8_t *dst)
 {
+    gles_host_complete_presents();      /* a layer's frame may still be on its way from the GPU */
     for (guint i = 0; i < plan->len; i++) {
         FbSeg *g = &g_array_index(plan, FbSeg, i);
 
@@ -675,6 +677,7 @@ static void fetch_run(S5L8930DisplayState *s, uint8_t *dst)
 /* Read `len` bytes of framebuffer at IOVA `va`, page by page. */
 static void fb_read(S5L8930DisplayState *s, uint32_t va, uint8_t *dst, unsigned len)
 {
+    gles_host_complete_presents();
     while (len) {
         unsigned n = MIN(len, 0x1000 - (va & 0xfff));
         hwaddr pa = dart_xlate(s, va);
