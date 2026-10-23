@@ -782,6 +782,7 @@ void tb_flush__exclusive_or_serial(void)
     CPU_FOREACH(cpu) {
         TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_full_tb);
         tcg_flush_jmp_cache(cpu);
+        tcg_ras_reset(cpu);
     }
 
     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);

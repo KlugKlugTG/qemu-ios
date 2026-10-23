@@ -642,6 +642,36 @@ const void *HELPER(lookup_tb_ptr_cached)(CPUArchState *env, void *slot,
     return lookup_tb_ptr_cached(cpu, slot, key, NULL);
 }
 
+TCGRasSlot tcg_ras_dummy;
+
+void tcg_ras_reset(CPUState *cpu)
+{
+    cpu->neg.ras_top = 0;
+    for (int i = 0; i < ARRAY_SIZE(cpu->neg.ras); i++) {
+        cpu->neg.ras[i] = &tcg_ras_dummy;
+    }
+}
+
+/*
+ * A return whose popped call slot did not match (tcg_gen_lookup_and_goto_ptr_ras): look up as at any cached
+ * site, and make the target that call's guess, under the same rules as the site cache.
+ */
+const void *HELPER(lookup_tb_ptr_ras)(CPUArchState *env, void *site, uint64_t key, void *ras, uint64_t sig)
+{
+    CPUState *cpu = env_cpu(env);
+    const void *host = lookup_tb_ptr_cached(cpu, site, key, NULL);
+    TCGRasSlot *slot = ras;
+
+    if (slot != &tcg_ras_dummy && host != tcg_code_gen_epilogue &&
+        (uint32_t)(key >> 32) == qatomic_read(&cpu->neg.ibtc_ctx) && (uint32_t)(key >> 32) != 0 &&
+        QTAILQ_EMPTY(&cpu->breakpoints)) {
+        slot->key = key;
+        slot->sig = sig;
+        slot->host = host;
+    }
+    return host;
+}
+
 /* Return the current PC from CPU, which may be cached in TB. */
 static vaddr log_pc(CPUState *cpu, const TranslationBlock *tb)
 {
@@ -1540,6 +1570,7 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
         }
         cpu->tb_jmp_cache = &bank->cache[0];
     }
+    tcg_ras_reset(cpu);
     tlb_init(cpu);
 #ifndef CONFIG_USER_ONLY
     tcg_iommu_init_notifier_list(cpu);

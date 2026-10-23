@@ -369,6 +369,14 @@ typedef union IcountDecr {
  * @plugin_mem_value_high: 64 higher bits of latest accessed mem value.
  */
 typedef struct CPUNegativeOffsetState {
+    /*
+     * Return address stack: call sites push their TCGRasSlot, returns pop one
+     * (tcg_gen_ras_push). Entries point into TB memory, so a TB flush resets
+     * them all to tcg_ras_dummy, whose key matches nothing. Ahead of tlb:
+     * some hosts reach tlb.f only within a small offset of env.
+     */
+    void *ras[32];
+    uint32_t ras_top;
     CPUTLB tlb;
 #ifdef CONFIG_PLUGIN
     /*

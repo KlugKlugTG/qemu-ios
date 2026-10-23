@@ -97,6 +97,8 @@ void tcg_gen_lookup_and_goto_ptr(void);
  * code page to different code in place (as for cross-page chaining).
  */
 void tcg_gen_lookup_and_goto_ptr_cached(TCGv_i32 site_key);
+void tcg_gen_ras_push(void);
+void tcg_gen_lookup_and_goto_ptr_ras(TCGv_i32 site_key, uint64_t sig);
 
 void tcg_gen_plugin_cb(unsigned from);
 void tcg_gen_plugin_mem_cb(TCGv_i64 addr, unsigned meminfo);

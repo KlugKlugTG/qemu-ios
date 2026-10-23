@@ -1339,6 +1339,47 @@ static void gen_goto_ptr(void)
  * state the key would also need, and not for M-profile, where a branch can be
  * an exception return.
  */
+/*
+ * Return prediction (tcg_gen_ras_push): calls push their TB's slot, returns
+ * pop one and try it before the site cache. ~95% of site-cache misses were
+ * returns, which go back to a different caller each time. LT_RAS=off for A/B.
+ */
+static bool arm_ras_enabled(DisasContext *s)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_RAS");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on && translator_use_indirect_cache(&s->base) && !arm_dc_feature(s, ARM_FEATURE_M);
+}
+
+static void gen_ras_push(DisasContext *s)
+{
+    if (arm_ras_enabled(s)) {
+        tcg_gen_ras_push();
+    }
+}
+
+/* The insn just translated returns: BX LR, MOV PC, LR, or a pop of PC off SP. */
+static bool arm_insn_is_return(DisasContext *s)
+{
+    uint32_t i = s->insn;
+
+    if (s->thumb) {
+        if (i < 0x10000) {
+            return i == 0x4770 || (i & 0xff00) == 0xbd00;           /* bx lr; pop {..., pc} */
+        }
+        return ((i >> 16) == 0xe8bd && (i & 0x8000)) ||           /* ldmia.w sp!, {..., pc} */
+               i == 0xf85dfb04;                                    /* ldr.w pc, [sp], #4 */
+    }
+    return (i & 0x0fffffff) == 0x012fff1e ||                       /* bx lr */
+           (i & 0x0fffffff) == 0x01a0f00e ||                       /* mov pc, lr */
+           (i & 0x0fff8000) == 0x08bd8000 ||                       /* ldmia sp!, {..., pc} */
+           (i & 0x0fffffff) == 0x049df004;                         /* ldr pc, [sp], #4 */
+}
+
 static void gen_goto_ptr_indirect(DisasContext *s)
 {
     if (translator_use_indirect_cache(&s->base) && !s->condexec_mask &&
@@ -1347,7 +1388,15 @@ static void gen_goto_ptr_indirect(DisasContext *s)
         QEMU_BUILD_BUG_ON(sizeof_field(CPUARMState, thumb) != 1);
         tcg_gen_ld8u_i32(key, tcg_env, offsetof(CPUARMState, thumb));
         tcg_gen_or_i32(key, key, cpu_R[15]);
-        tcg_gen_lookup_and_goto_ptr_cached(key);
+        if (arm_ras_enabled(s) && arm_insn_is_return(s)) {
+            /* What the target TB inherits from this one: all but PC, Thumb and IT state (none at this exit). */
+            uint64_t am32 = s->base.tb->cs_base &
+                            ~(uint64_t)(R_TBFLAG_AM32_THUMB_MASK | R_TBFLAG_AM32_CONDEXEC_MASK);
+
+            tcg_gen_lookup_and_goto_ptr_ras(key, (uint32_t)s->base.tb->flags | am32 << 32);
+        } else {
+            tcg_gen_lookup_and_goto_ptr_cached(key);
+        }
     } else {
         gen_goto_ptr();
     }
@@ -3586,6 +3635,7 @@ static bool trans_BLX_r(DisasContext *s, arg_BLX_r *a)
     }
     tmp = load_reg(s, a->rm);
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | s->thumb);
+    gen_ras_push(s);
     gen_bx(s, tmp);
     return true;
 }
@@ -5452,6 +5502,7 @@ static bool trans_B_cond_thumb(DisasContext *s, arg_ci *a)
 static bool trans_BL(DisasContext *s, arg_i *a)
 {
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | s->thumb);
+    gen_ras_push(s);
     gen_jmp(s, jmp_diff(s, a->imm));
     return true;
 }
@@ -5472,6 +5523,7 @@ static bool trans_BLX_i(DisasContext *s, arg_BLX_i *a)
     }
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | s->thumb);
     store_cpu_field_constant(!s->thumb, thumb);
+    gen_ras_push(s);
     /* This jump is computed from an aligned PC: subtract off the low bits. */
     gen_jmp(s, jmp_diff(s, a->imm - (s->pc_curr & 3)));
     return true;
@@ -5491,6 +5543,7 @@ static bool trans_BL_suffix(DisasContext *s, arg_BL_suffix *a)
     assert(!arm_dc_feature(s, ARM_FEATURE_THUMB2));
     tcg_gen_addi_i32(tmp, cpu_R[14], (a->imm << 1) | 1);
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | 1);
+    gen_ras_push(s);
     gen_bx(s, tmp);
     return true;
 }
@@ -5507,6 +5560,7 @@ static bool trans_BLX_suffix(DisasContext *s, arg_BLX_suffix *a)
     tcg_gen_addi_i32(tmp, cpu_R[14], a->imm << 1);
     tcg_gen_andi_i32(tmp, tmp, 0xfffffffc);
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | 1);
+    gen_ras_push(s);
     gen_bx(s, tmp);
     return true;
 }

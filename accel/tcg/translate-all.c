@@ -337,6 +337,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     gen_code_buf = tcg_ctx->code_gen_ptr;
     tb->tc.ptr = tcg_splitwx_to_rx(gen_code_buf);
     memset(&tb->ibtc, 0, sizeof(tb->ibtc));
+    memset(&tb->ras, 0, sizeof(tb->ras));
     if (!(s.cflags & CF_PCREL)) {
         tb->pc = s.pc;
     }

@@ -2589,6 +2589,124 @@ void tcg_gen_lookup_and_goto_ptr(void)
     tcg_temp_free_ptr(ptr);
 }
 
+#define RAS_OFS(field) (offsetof(CPUState, neg.field) - sizeof(CPUState))
+#define RAS_MASK (ARRAY_SIZE(((CPUNegativeOffsetState *)0)->ras) - 1)
+
+/* The address of the return stack entry @top & RAS_MASK. */
+static TCGv_ptr gen_ras_entry(TCGv_i32 top)
+{
+    TCGv_i32 ofs = tcg_temp_ebb_new_i32();
+    TCGv_ptr p = tcg_temp_ebb_new_ptr();
+
+    tcg_gen_andi_i32(ofs, top, RAS_MASK);
+    tcg_gen_shli_i32(ofs, ofs, ctz32(sizeof(void *)));
+    tcg_gen_ext_i32_ptr(p, ofs);
+    tcg_gen_add_ptr(p, p, tcg_env);
+    tcg_temp_free_i32(ofs);
+    return p;
+}
+
+/*
+ * A call: push this TB's TCGRasSlot, where the matching return looks first
+ * (tcg_gen_lookup_and_goto_ptr_ras). Emit before the call's branch.
+ */
+void tcg_gen_ras_push(void)
+{
+    TranslationBlock *tb = tcg_ctx->gen_tb;
+    TCGv_i32 top;
+    TCGv_ptr p;
+
+    if (tb->cflags & CF_NO_GOTO_PTR) {
+        return;
+    }
+    top = tcg_temp_ebb_new_i32();
+    tcg_gen_ld_i32(top, tcg_env, RAS_OFS(ras_top));
+    p = gen_ras_entry(top);
+    tcg_gen_st_ptr(tcg_constant_ptr(&tb->ras), p, RAS_OFS(ras[0]));
+    tcg_temp_free_ptr(p);
+    tcg_gen_addi_i32(top, top, 1);
+    tcg_gen_st_i32(top, tcg_env, RAS_OFS(ras_top));
+    tcg_temp_free_i32(top);
+}
+
+/*
+ * A return: pop the newest call's slot and jump to its host code if it was
+ * filled for this target (@site_key, as for tcg_gen_lookup_and_goto_ptr_cached)
+ * from a return site with this one's @sig, the state other than PC and Thumb
+ * that the target TB's flags inherit. Otherwise the site's own cache, then
+ * helper_lookup_tb_ptr_ras, which fills both.
+ */
+void tcg_gen_lookup_and_goto_ptr_ras(TCGv_i32 site_key, uint64_t sig)
+{
+    TranslationBlock *tb = tcg_ctx->gen_tb;
+    TCGv_ptr site, slot, ptr, p;
+    TCGv_i64 key, cached;
+    TCGv_i32 top;
+    TCGLabel *miss, *next;
+
+    if (tb->cflags & CF_NO_GOTO_PTR) {
+        tcg_gen_exit_tb(NULL, 0);
+        return;
+    }
+
+    plugin_gen_disable_mem_helpers();
+    site = tcg_constant_ptr(&tb->ibtc);
+    key = tcg_temp_new_i64();
+    cached = tcg_temp_ebb_new_i64();
+    tcg_gen_extu_i32_i64(key, site_key);
+    tcg_gen_ld32u_i64(cached, tcg_env, RAS_OFS(ibtc_ctx));
+    tcg_gen_deposit_i64(key, key, cached, 32, 32);
+    tcg_temp_free_i64(cached);
+
+    top = tcg_temp_ebb_new_i32();
+    tcg_gen_ld_i32(top, tcg_env, RAS_OFS(ras_top));
+    tcg_gen_subi_i32(top, top, 1);
+    tcg_gen_st_i32(top, tcg_env, RAS_OFS(ras_top));
+    p = gen_ras_entry(top);
+    tcg_temp_free_i32(top);
+    slot = tcg_temp_new_ptr();
+    tcg_gen_ld_ptr(slot, p, RAS_OFS(ras[0]));
+    tcg_temp_free_ptr(p);
+
+    miss = gen_new_label();
+    next = gen_new_label();
+    cached = tcg_temp_ebb_new_i64();
+    tcg_gen_ld_i64(cached, slot, offsetof(TCGRasSlot, key));
+    tcg_gen_brcond_i64(TCG_COND_NE, key, cached, next);
+    tcg_gen_ld_i64(cached, slot, offsetof(TCGRasSlot, sig));
+    tcg_gen_brcondi_i64(TCG_COND_NE, cached, sig, next);
+    tcg_temp_free_i64(cached);
+    ptr = tcg_temp_ebb_new_ptr();
+    tcg_gen_ld_ptr(ptr, slot, offsetof(TCGRasSlot, host));
+    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+    tcg_temp_free_ptr(ptr);
+    gen_set_label(next);
+
+    for (int i = 0; i < ARRAY_SIZE(tb->ibtc.e); i++) {
+        TCGLabel *n = i + 1 < ARRAY_SIZE(tb->ibtc.e) ? gen_new_label() : miss;
+
+        cached = tcg_temp_ebb_new_i64();
+        tcg_gen_ld_i64(cached, site, offsetof(TCGIndirectSlot, e[i].key));
+        tcg_gen_brcond_i64(TCG_COND_NE, key, cached, n);
+        tcg_temp_free_i64(cached);
+        ptr = tcg_temp_ebb_new_ptr();
+        tcg_gen_ld_ptr(ptr, site, offsetof(TCGIndirectSlot, e[i].host));
+        tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+        tcg_temp_free_ptr(ptr);
+        if (n != miss) {
+            gen_set_label(n);
+        }
+    }
+
+    gen_set_label(miss);
+    ptr = tcg_temp_ebb_new_ptr();
+    gen_helper_lookup_tb_ptr_ras(ptr, tcg_env, site, key, slot, tcg_constant_i64(sig));
+    tcg_gen_op1i(INDEX_op_goto_ptr, TCG_TYPE_PTR, tcgv_ptr_arg(ptr));
+    tcg_temp_free_ptr(ptr);
+    tcg_temp_free_ptr(slot);
+    tcg_temp_free_i64(key);
+}
+
 void tcg_gen_lookup_and_goto_ptr_cached(TCGv_i32 site_key)
 {
     TranslationBlock *tb = tcg_ctx->gen_tb;

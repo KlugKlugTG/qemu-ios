@@ -59,6 +59,17 @@ typedef struct TCGIndirectSlot {
     TCGIndirectEntry e[2];
 } TCGIndirectSlot;
 
+/*
+ * A call site's guess at where its return lands (tcg_gen_ras_push,
+ * tcg_gen_lookup_and_goto_ptr_ras): the key as above, the return site's
+ * translation-time state other than PC and Thumb (@sig), and its host code.
+ */
+typedef struct TCGRasSlot {
+    uint64_t key;
+    uint64_t sig;
+    const void *host;
+} TCGRasSlot;
+
 struct TranslationBlock {
     /*
      * Guest PC corresponding to this block.  This must be the true
@@ -166,6 +177,8 @@ struct TranslationBlock {
 
     /* Read and written by generated code and helper_lookup_tb_ptr_cached. */
     TCGIndirectSlot ibtc;
+    /* This TB's call, if it ends in one: see TCGRasSlot. */
+    TCGRasSlot ras;
 };
 
 /* The alignment given to TranslationBlock during allocation. */
@@ -232,5 +245,9 @@ static inline void tb_set_page_addr1(TranslationBlock *tb,
 /* TranslationBlock invalidate API */
 void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
                               tb_page_addr_t last);
+
+/* The return stack's empty entry, and emptying a CPU's stack (TB flush, init). */
+extern TCGRasSlot tcg_ras_dummy;
+void tcg_ras_reset(CPUState *cpu);
 
 #endif /* EXEC_TRANSLATION_BLOCK_H */
