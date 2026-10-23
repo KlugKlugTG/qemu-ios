@@ -972,11 +972,28 @@ uint32_t HELPER(mrs_banked)(CPUARMState *env, uint32_t tgtmode, uint32_t regno)
     }
 }
 
+static const void *access_check_cp_reg(CPUARMState *env, const ARMCPRegInfo *ri,
+                                       uint32_t syndrome, uint32_t isread);
+
 const void *HELPER(access_check_cp_reg)(CPUARMState *env, uint32_t key,
                                         uint32_t syndrome, uint32_t isread)
 {
     ARMCPU *cpu = env_archcpu(env);
-    const ARMCPRegInfo *ri = get_arm_cp_reginfo(cpu->cp_regs, key);
+
+    return access_check_cp_reg(env, get_arm_cp_reginfo(cpu->cp_regs, key), syndrome, isread);
+}
+
+/* The same, given the register's info at translation (see gen_cp_reginfo). */
+const void *HELPER(access_check_cp_reg_ri)(CPUARMState *env, const void *ri,
+                                           uint32_t syndrome, uint32_t isread)
+{
+    return access_check_cp_reg(env, ri, syndrome, isread);
+}
+
+static const void *access_check_cp_reg(CPUARMState *env, const ARMCPRegInfo *ri,
+                                       uint32_t syndrome, uint32_t isread)
+{
+    ARMCPU *cpu = env_archcpu(env);
     CPAccessResult res = CP_ACCESS_OK;
     int target_el;
     uint32_t excp;

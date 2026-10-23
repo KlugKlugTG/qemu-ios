@@ -1954,10 +1954,17 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
         gen_set_condexec(s);
         gen_update_pc(s, 0);
         tcg_ri = tcg_temp_new_ptr();
-        gen_helper_access_check_cp_reg(tcg_ri, tcg_env,
-                                       tcg_constant_i32(key),
-                                       tcg_constant_i32(syndrome),
-                                       tcg_constant_i32(isread));
+        if (cp_reginfo_const_ok(&s->base)) {
+            gen_helper_access_check_cp_reg_ri(tcg_ri, tcg_env,
+                                              tcg_constant_ptr(ri),
+                                              tcg_constant_i32(syndrome),
+                                              tcg_constant_i32(isread));
+        } else {
+            gen_helper_access_check_cp_reg(tcg_ri, tcg_env,
+                                           tcg_constant_i32(key),
+                                           tcg_constant_i32(syndrome),
+                                           tcg_constant_i32(isread));
+        }
     } else if (ri->type & ARM_CP_RAISES_EXC) {
         /*
          * The readfn or writefn might raise an exception;
@@ -1999,7 +2006,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
                 tmp64 = tcg_constant_i64(ri->resetvalue);
             } else if (ri->readfn) {
                 if (!tcg_ri) {
-                    tcg_ri = gen_lookup_cp_reg(key);
+                    tcg_ri = gen_cp_reginfo(&s->base, ri, key);
                 }
                 tmp64 = tcg_temp_new_i64();
                 gen_helper_get_cp_reg64(tmp64, tcg_env, tcg_ri);
@@ -2019,7 +2026,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
                 tmp = tcg_constant_i32(ri->resetvalue);
             } else if (ri->readfn) {
                 if (!tcg_ri) {
-                    tcg_ri = gen_lookup_cp_reg(key);
+                    tcg_ri = gen_cp_reginfo(&s->base, ri, key);
                 }
                 tmp = tcg_temp_new_i32();
                 gen_helper_get_cp_reg(tmp, tcg_env, tcg_ri);
@@ -2050,7 +2057,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
             tcg_gen_concat_i32_i64(tmp64, tmplo, tmphi);
             if (ri->writefn) {
                 if (!tcg_ri) {
-                    tcg_ri = gen_lookup_cp_reg(key);
+                    tcg_ri = gen_cp_reginfo(&s->base, ri, key);
                 }
                 gen_helper_set_cp_reg64(tcg_env, tcg_ri, tmp64);
             } else {
@@ -2060,7 +2067,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
             TCGv_i32 tmp = load_reg(s, rt);
             if (ri->writefn) {
                 if (!tcg_ri) {
-                    tcg_ri = gen_lookup_cp_reg(key);
+                    tcg_ri = gen_cp_reginfo(&s->base, ri, key);
                 }
                 gen_helper_set_cp_reg(tcg_env, tcg_ri, tmp);
             } else {

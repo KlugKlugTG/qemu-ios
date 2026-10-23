@@ -850,6 +850,31 @@ static inline TCGv_ptr gen_lookup_cp_reg(uint32_t key)
 }
 
 /*
+ * The register's info as a constant, where TBs may hold host pointers (as the
+ * indirect-branch caches do): it lives as long as the CPU. Otherwise NULL, and
+ * the caller looks it up at run time by key, a hash lookup per access.
+ * LT_CP_RI_CONST=off always looks it up.
+ */
+static inline bool cp_reginfo_const_ok(DisasContextBase *db)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_CP_RI_CONST");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on && translator_use_indirect_cache(db);
+}
+
+static inline TCGv_ptr gen_cp_reginfo(DisasContextBase *db, const void *ri, uint32_t key)
+{
+    if (cp_reginfo_const_ok(db)) {
+        return tcg_constant_ptr(ri);
+    }
+    return gen_lookup_cp_reg(key);
+}
+
+/*
  * Set and reset rounding mode around another operation.
  */
 static inline TCGv_i32 gen_set_rmode(ARMFPRounding rmode, TCGv_ptr fpst)
