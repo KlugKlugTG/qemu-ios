@@ -724,6 +724,8 @@ static inline uint64_t gles_t(void)
     return gles_prof ? qemu_clock_get_ns(QEMU_CLOCK_REALTIME) : 0;
 }
 
+#include "gles-host-waitprof.c.inc"
+
 /* ---------------------------------------------------------------- context */
 
 /*
@@ -3970,10 +3972,13 @@ static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t s
         /* The zero-copy path hands back the render target's own BGRA rows, so
          * it can only serve a 32-bit destination; 565 goes via the readback,
          * where GL does the packing. */
+        uint64_t w0 = gw_t();
         if (bpp == 4 && bgra && !gles_swizzle) {
             frame = gles_frame_lock(&fstride);
         }
         gles_present_mark(sample, PRESENT_ACQUIRE);
+        if (frame) gw_add(GW_PRESENT_WAIT, w0);
+        w0 = gw_t();
         if (frame) {
             if (sample) {
                 sample->path = 1;
@@ -3996,6 +4001,7 @@ static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t s
                 }
             }
             gles_present_mark(sample, PRESENT_COPY);
+            gw_add(GW_PRESENT_COPY, w0);
             gles_report_frame_pixels(frame, fstride, rw, rh, bpp, bgra, base,
                                      "surface-IOSurface");
             gles_dump_frame(frame, fstride, rw, rh, bgra);
@@ -4047,7 +4053,10 @@ static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t s
         /* Same as the panel present above: read the drawable, not whichever
          * offscreen target the guest left bound. */
         glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, gh.fbo);
+        w0 = gw_t();
         glFinish();
+        gw_add(GW_PRESENT_WAIT, w0);
+        w0 = gw_t();
         if (sample) {
             sample->path = 2;
         }
@@ -4077,6 +4086,7 @@ static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t s
         }
         glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
         gles_present_mark(sample, PRESENT_READBACK);
+        gw_add(GW_PRESENT_READ, w0);
         /*
          * The old path, kept switchable so the two can be compared inside one
          * run. This machine never goes quiet -- eight emulators at once while
@@ -4096,6 +4106,7 @@ static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t s
         }
         gles_present_mark(sample, PRESENT_CONVERT);
 
+        w0 = gw_t();
         for (y = 0; y < rh; y++) {
             /* GL's origin is bottom-left, the surface's is top-left. Only the
              * rw*4 bytes the row actually covers are written, so the staging
@@ -4114,6 +4125,7 @@ static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t s
             }
         }
         gles_present_mark(sample, PRESENT_COPY);
+        gw_add(GW_PRESENT_COPY, w0);
         gles_report_frame_pixels(gh.readback, (size_t)rw * bpp, rw, rh,
                                  bpp, bgra, base, "surface-readback");
         /* The dump writes 32-bit pixels; a 565 frame is not its format. */
@@ -4136,6 +4148,19 @@ static int gles_present_to_surface(CPUState *cpu, uint32_t base, uint32_t stride
                                    uint32_t width, uint32_t height,
                                    uint32_t format)
 {
+    if (gw_enabled()) {
+        uint64_t w0 = gw_t();
+        int result = gles_present_to_surface_impl(cpu, base, stride, width, height,
+                                                  format, NULL);
+        gw_add(GW_PRESENT, w0);
+        if (!result) {
+            gw.present_end = get_clock();
+            gw.since_calls = 0;
+            gw.frames++;
+            GW_CTX(gles_cur_ctx, present);
+        }
+        return result;
+    }
     if (!gles_present_prof) {
         return gles_present_to_surface_impl(cpu, base, stride, width, height,
                                             format, NULL);
@@ -5203,9 +5228,13 @@ static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, s->target, texture, 0);
     glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    uint64_t w0 = gw_t();
     glReadPixels(0, 0, s->width, s->height,
         bpp == 2 && !rgb555 ? GL_RGB : s->format == GLES_SURFACE_RGBA32 ? GL_RGBA : GL_BGRA,
         bpp == 2 && !rgb555 ? GL_UNSIGNED_SHORT_5_6_5 : GL_UNSIGNED_BYTE, pixels);
+    gw_add(GW_WB_READ, w0);
+    GW_CTX(gles_cur_ctx, wb);
+    w0 = gw_t();
     glPixelStorei(GL_PACK_ALIGNMENT, pack);
     glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, s->target, 0, 0);
     glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, framebuffer);
@@ -5254,6 +5283,7 @@ static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
             done += n;
         }
     }
+    gw_add(GW_WB_COPY, w0);
     s->dirty = false;
     /* Our own write: its aliases see a new generation, this texture already holds it. */
     gles_surface_changed(s);
@@ -7419,12 +7449,12 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         glDeleteFencesAPPLE(n, ids);
         return 0;
     }
-    case 465: glSetFenceAPPLE(a[0]); return 0;
+    case 465: { uint64_t w0 = gw_t(); glSetFenceAPPLE(a[0]); gw_add(GW_FENCE, w0); return 0; }
     case 466: return glIsFenceAPPLE(a[0]);
-    case 467: return glTestFenceAPPLE(a[0]);
-    case 468: glFinishFenceAPPLE(a[0]); return 0;
-    case 469: return glTestObjectAPPLE(a[0], a[1]);
-    case 470: glFinishObjectAPPLE(a[0], a[1]); return 0;
+    case 467: { uint64_t w0 = gw_t(); GLboolean r = glTestFenceAPPLE(a[0]); gw_add(GW_FENCE, w0); return r; }
+    case 468: { uint64_t w0 = gw_t(); glFinishFenceAPPLE(a[0]); gw_add(GW_FENCE, w0); return 0; }
+    case 469: { uint64_t w0 = gw_t(); GLboolean r = glTestObjectAPPLE(a[0], a[1]); gw_add(GW_FENCE, w0); return r; }
+    case 470: { uint64_t w0 = gw_t(); glFinishObjectAPPLE(a[0], a[1]); gw_add(GW_FENCE, w0); return 0; }
 #endif
 
     /* ---- lighting and fog ---- */
@@ -7558,13 +7588,26 @@ static int64_t gles_host_call_1(CPUState *cpu, uint32_t slot, uint32_t ctx,
         return 0;
     }
 
-    case GLES_SLOT_FINISH:
+    case GLES_SLOT_FINISH: {
+        uint64_t w0 = gw_t();
         glFinish();
+        gw_add(GW_FINISH, w0);
+        GW_CTX(ctx, finish);
+        if (w0 && gw.present_end) {
+            gw.gap_ns += w0 - gw.present_end;
+            gw.gap_calls += gw.since_calls;
+            gw.gap_n++;
+        }
         return gles_sync_surface(cpu) ? -1 : gles_surface_flush(cpu, 0);
+    }
 
-    case GLES_SLOT_FLUSH:
+    case GLES_SLOT_FLUSH: {
+        uint64_t w0 = gw_t();
         glFlush();
+        gw_add(GW_FLUSH, w0);
+        GW_CTX(ctx, flush);
         return gles_sync_surface(cpu) ? -1 : gles_surface_flush(cpu, 0);
+    }
 
     case GLES_SLOT_GET_ERROR: {
         GLenum error = gh.error;
@@ -8180,6 +8223,7 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
     gh.calls++;
     gles_cur_ctx = ctx;
     t0 = gles_t();
+    uint64_t gw0 = gw_t();
     int64_t st0 = gles_obj_stats > 0 ? g_get_monotonic_time() : 0;
     if (gles_strict) {
         /*
@@ -8255,6 +8299,11 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
             }
             fprintf(stderr, " -> %" PRId64 "\n", r);
         }
+    }
+    if (gw0) {
+        gw_add(GW_CALL, gw0);
+        gw_slot(ctx, slot);
+        gw_report();
     }
     if (st0) gles_us_call += g_get_monotonic_time() - st0;
     {
