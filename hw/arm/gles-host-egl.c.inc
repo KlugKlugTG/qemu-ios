@@ -58,10 +58,26 @@ static __thread CGLContextObj gles_egl_current;
 
 static void CGLReleaseContext(CGLContextObj c);
 
+/*
+ * Only this function binds a context on the host (EGL bindings are per thread), so gles_egl_current is the
+ * thread's binding. Asking EGL as well cost ~0.8 us per guest GL request on the Poco's Adreno driver (2.7% of
+ * Jetpack's vCPU); LT_EGL_CURRENT_CHECK=on asks again.
+ */
+static bool gles_egl_current_check(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_EGL_CURRENT_CHECK");
+        on = v && (!strcmp(v, "on") || !strcmp(v, "1"));
+    }
+    return on;
+}
+
 static int CGLSetCurrentContext(CGLContextObj c)
 {
-    if (gles_egl_current == c && eglGetCurrentContext() ==
-        (c ? c->context : EGL_NO_CONTEXT)) return 0;
+    if (gles_egl_current == c && (!gles_egl_current_check() || eglGetCurrentContext() ==
+        (c ? c->context : EGL_NO_CONTEXT))) return 0;
     if (!eglMakeCurrent(gles_egl_display, c ? c->surface : EGL_NO_SURFACE,
                         c ? c->surface : EGL_NO_SURFACE,
                         c ? c->context : EGL_NO_CONTEXT)) {
