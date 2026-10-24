@@ -785,6 +785,83 @@ static int tcg_out_ldst_finalize(TCGContext *s)
     return 0;
 }
 
+/*
+ * With TranslationBlocks apart from code (tcg_tb_meta_apart), the qemu_ld/st slow paths go below
+ * the block's TranslationBlock, out of the hot code: they run only on a TLB miss but were ~25% of
+ * a block's bytes. They are emitted once after the code to learn their size (the constant pool
+ * entries that pass adds are dropped again), then again at their place; the fast paths' branches
+ * follow the second. Within a chunk every branch involved is in range (arm64 b.cond, adr: +-1 MiB).
+ * LT_TB_COLD_STUBS=off for A/B.
+ */
+static int tcg_out_ldst_finalize_apart(TCGContext *s)
+{
+    static int on = -1;
+    TCGLabelPoolData *pool_next[64], *pool_head = s->pool_labels, *p;
+    uint8_t record[sizeof(TranslationBlock)];
+    TranslationBlock *tb = s->gen_tb;
+    tcg_insn_unit *hot = s->code_ptr;
+    void *save_highwater = s->code_gen_highwater;
+    uintptr_t cold;
+    size_t size, n = 0;
+    int i;
+
+    if (on < 0) {
+        const char *v = getenv("LT_TB_COLD_STUBS");
+
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    if (!on || !tcg_tb_meta_apart || QSIMPLEQ_EMPTY(&s->ldst_labels) ||
+        (void *)tb != s->tb_meta_ptr) {
+        return tcg_out_ldst_finalize(s);
+    }
+    for (p = pool_head; p && n < ARRAY_SIZE(pool_next); p = p->next) {
+        pool_next[n++] = p->next;
+    }
+    if (p) {
+        return tcg_out_ldst_finalize(s);
+    }
+
+    /* Measure, at the end of the hot code. */
+    i = tcg_out_ldst_finalize(s);
+    if (i < 0) {
+        return i;
+    }
+    size = tcg_ptr_byte_diff(s->code_ptr, hot);
+    s->pool_labels = pool_head;
+    n = 0;
+    for (p = pool_head; p; p = p->next) {
+        p->next = pool_next[n++];
+        if (!p->next) {
+            break;
+        }
+    }
+
+    cold = ((uintptr_t)tb - size - 16) & -16;
+    if (cold < (uintptr_t)hot + TCG_HIGHWATER) {
+        s->code_ptr = hot;
+        return -1;
+    }
+    memcpy(record, tb, sizeof(record));
+    s->code_ptr = (tcg_insn_unit *)cold;
+    s->code_gen_highwater = tb;
+    i = tcg_out_ldst_finalize(s);
+    if (i < 0 || (void *)s->code_ptr > (void *)tb) {
+        memcpy(tb, record, sizeof(record));
+        s->code_gen_highwater = save_highwater;
+        s->code_ptr = hot;
+        return i < 0 ? i : -1;
+    }
+#ifndef CONFIG_TCG_INTERPRETER
+    flush_idcache_range((uintptr_t)tcg_splitwx_to_rx((void *)cold), cold,
+                        tcg_ptr_byte_diff(s->code_ptr, (void *)cold));
+#endif
+    /* The next TranslationBlock goes below the stubs; pool and unwind data follow the code. */
+    s->tb_meta_ptr = (void *)cold;
+    s->code_gen_highwater = (void *)(cold - TCG_HIGHWATER);
+    s->code_ptr = hot;
+    return 0;
+}
+
 static int tcg_out_pool_finalize(TCGContext *s)
 {
     TCGLabelPoolData *p = s->pool_labels;
@@ -6824,7 +6901,7 @@ int tcg_gen_code(TCGContext *s, TranslationBlock *tb, uint64_t pc_start)
     s->gen_insn_end_off[num_insns] = tcg_current_code_size(s);
 
     /* Generate TB finalization at the end of block */
-    i = tcg_out_ldst_finalize(s);
+    i = tcg_out_ldst_finalize_apart(s);
     if (i < 0) {
         return i;
     }
