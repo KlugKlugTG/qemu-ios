@@ -8404,6 +8404,61 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
  * together. Poco F3, interleaved pairs: Jetpack Joyride play 29.8/29.7/29.6 -> 31.3/29.9/31.7 fps,
  * Real Racing's attract demo 39.2/42.7 -> 42.3/45.2, Flight Control and Doodle Jump level (58, 60).
  */
+/*
+ * Once the app has loaded, empty the cache once more (LT_FLUSH_SETTLE=off keeps it). The first
+ * flush leaves the app's loading code (decompression, parsing, setup) interleaved with the code that
+ * runs every frame; once translation settles -- at least LT_FLUSH_SETTLE_MB (16) translated since
+ * the first flush, then 5 s in a row under 1 MB/s, sampled at presents -- a second flush packs the
+ * steady-state code together. Poco F3, Jetpack Joyride, 30 s of play, interleaved pairs, a fixed-time
+ * flush in the menu after loading or in play: 29.3 -> 31.4 fps. Gives up 120 s after the first flush.
+ */
+static struct {
+    bool pending;
+    int64_t start, next;
+    size_t base, last;
+    int quiet;
+} gles_settle;
+
+static void gles_flush_code_settle(CPUState *cpu, int64_t now)
+{
+    static int on = -1, log;
+    static size_t min_growth;
+    size_t size;
+
+    if (on < 0) {
+        const char *v = getenv("LT_FLUSH_SETTLE");
+        const char *mb = getenv("LT_FLUSH_SETTLE_MB");
+
+        on = !v || (strcmp(v, "0") && strcmp(v, "off"));
+        log = getenv("LT_FLUSH_SETTLE_LOG") != NULL;
+        min_growth = (mb ? atoi(mb) : 16) * MiB;
+    }
+    if (!on || !gles_settle.pending || now < gles_settle.next) {
+        return;
+    }
+    gles_settle.next = now + NANOSECONDS_PER_SECOND;
+    size = tcg_code_size();
+    if (log) {
+        info_report("gles: settle sample t=%.0f s code %zu KB (+%zd KB/s)",
+                    (now - gles_settle.start) / 1e9, size / KiB,
+                    ((ssize_t)size - (ssize_t)gles_settle.last) / (ssize_t)KiB);
+    }
+    if (size >= gles_settle.base + min_growth && size < gles_settle.last + MiB) {
+        gles_settle.quiet++;
+    } else {
+        gles_settle.quiet = 0;
+    }
+    gles_settle.last = size;
+    if (gles_settle.quiet >= 5) {
+        gles_settle.pending = false;
+        info_report("gles: the app has loaded: emptying the code cache again (%zu MB, %.0f s after "
+                    "its first frame)", size / MiB, (now - gles_settle.start) / 1e9);
+        queue_tb_flush(cpu);
+    } else if (now - gles_settle.start > 120 * NANOSECONDS_PER_SECOND) {
+        gles_settle.pending = false;
+    }
+}
+
 static void gles_flush_code_on_app(CPUState *cpu, uint32_t ctx)
 {
     static int on = -1;
@@ -8416,11 +8471,15 @@ static void gles_flush_code_on_app(CPUState *cpu, uint32_t ctx)
 
         on = tcg_enabled() && (!v || (strcmp(v, "0") && strcmp(v, "off")));
     }
-    if (!on || ctx <= last_ctx) {
+    if (!on) {
+        return;
+    }
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (ctx <= last_ctx) {
+        gles_flush_code_settle(cpu, now);
         return;
     }
     last_ctx = ctx;
-    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     if (tcg_code_size() < 128 * MiB || (last_ns && now - last_ns < 30 * NANOSECONDS_PER_SECOND)) {
         return;
     }
@@ -8428,6 +8487,11 @@ static void gles_flush_code_on_app(CPUState *cpu, uint32_t ctx)
     info_report("gles: a new app's first frame: emptying the code cache (%zu MB)",
                 tcg_code_size() / MiB);
     queue_tb_flush(cpu);
+    gles_settle.pending = true;
+    gles_settle.start = now;
+    gles_settle.next = now + NANOSECONDS_PER_SECOND;
+    gles_settle.base = gles_settle.last = 0;
+    gles_settle.quiet = 0;
 }
 
 int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
