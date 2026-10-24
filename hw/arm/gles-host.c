@@ -38,6 +38,11 @@ extern bool it_profile_on;
 #include "exec/target_page.h"
 #include "system/ram_addr.h"
 #include "system/physmem.h"
+#include "system/tcg.h"
+#include "exec/tb-flush.h"
+#include "tcg/tcg.h"
+#include "qemu/units.h"
+#include "qemu/error-report.h"
 #include "hw/core/sysbus.h"
 #include "hw/arm/ipod_touch_2g.h"
 #include "hw/arm/guest-services/general.h"
@@ -8359,12 +8364,49 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
     return r;
 }
 
+/*
+ * A new app's first frame empties the TCG code cache, once (LT_FLUSH_ON_APP=off keeps it). By the
+ * time a game starts the cache holds hundreds of MB of boot and launch translations, and the game's
+ * code ends up spread among them: its blocks that run only a few times a frame then miss in the host
+ * CPU's caches. Retranslated from empty while the app is still loading, the game's code is packed
+ * together. Poco F3, interleaved pairs: Jetpack Joyride play 29.8/29.7/29.6 -> 31.3/29.9/31.7 fps,
+ * Real Racing's attract demo 39.2/42.7 -> 42.3/45.2, Flight Control and Doodle Jump level (58, 60).
+ */
+static void gles_flush_code_on_app(CPUState *cpu, uint32_t ctx)
+{
+    static int on = -1;
+    static uint32_t last_ctx;
+    static int64_t last_ns;
+    int64_t now;
+
+    if (on < 0) {
+        const char *v = getenv("LT_FLUSH_ON_APP");
+
+        on = tcg_enabled() && (!v || (strcmp(v, "0") && strcmp(v, "off")));
+    }
+    if (!on || ctx <= last_ctx) {
+        return;
+    }
+    last_ctx = ctx;
+    now = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
+    if (tcg_code_size() < 128 * MiB || (last_ns && now - last_ns < 30 * NANOSECONDS_PER_SECOND)) {
+        return;
+    }
+    last_ns = now;
+    info_report("gles: a new app's first frame: emptying the code cache (%zu MB)",
+                tcg_code_size() / MiB);
+    queue_tb_flush(cpu);
+}
+
 int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
                        uint32_t argc, const uint32_t *a)
 {
     uint64_t start = qatomic_read(&it_profile_on) && qemu_ios_profile_begin ?
                      qemu_ios_profile_begin() : 0;
     int64_t result = gles_host_call_impl(cpu, slot, ctx, argc, a);
+    if (slot == GLES_OP_PRESENT_SURFACE) {
+        gles_flush_code_on_app(cpu, ctx);
+    }
     if (start) {
         qemu_ios_profile_gl(start, slot, ctx);
     }
