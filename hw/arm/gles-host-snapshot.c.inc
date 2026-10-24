@@ -1182,9 +1182,21 @@ typedef struct {
 
 static GLESSnap gles_snap;
 
+static void gles_snap_save_1(void *opaque)
+{
+    *(GByteArray **)opaque = gles_snapshot_save();
+}
+
+static void gles_snap_load_1(void *opaque)
+{
+    *(bool *)opaque = gles_snapshot_load(gles_snap.data, gles_snap.len);
+}
+
 static int gles_snap_pre_save(void *opaque)
 {
-    GByteArray *b = gles_snapshot_save();
+    GByteArray *b;
+
+    gles_queue_run(gles_snap_save_1, &b);
     gles_snap.len = b->len;
     gles_snap.data = (uint8_t *)g_byte_array_free(b, false);
     return 0;
@@ -1200,7 +1212,10 @@ static int gles_snap_post_save(void *opaque)
 
 static int gles_snap_post_load(void *opaque, int version_id)
 {
-    bool ok = gles_snapshot_load(gles_snap.data, gles_snap.len);
+    bool ok;
+
+    gles_queue_run(gles_snap_load_1, &ok);
+    gles_queue_forget();
     gles_snap_post_save(opaque);
     return ok ? 0 : -EINVAL;
 }

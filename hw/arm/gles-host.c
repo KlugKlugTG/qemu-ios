@@ -219,6 +219,10 @@ void gles_eagl_iosurface_unlock(void);
 
 #if defined(GLES_HOST_EGL) || defined(GLES_HOST_WGL)
 #include "gles-host-fence.c.inc"
+
+/* gles-host-queue.c.inc: fn on the thread that holds the host contexts. */
+static void gles_queue_run(void (*fn)(void *), void *opaque);
+static void gles_queue_forget(void);
 #endif
 #ifdef GLES_HOST_EGL_ES
 #include "gles-host-native.c.inc"
@@ -8197,11 +8201,19 @@ static void gles_drop_all(void)
 }
 #endif
 
+#if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
+static void gles_drop_all_1(void *opaque)
+{
+    gles_drop_all();
+}
+#endif
+
 void gles_host_reset(void)
 {
 #if !defined(GLES_HOST_EAGL) || defined(GLES_HOST_ANGLE) || defined(GLES_HOST_EGL)
     gles_snapshot_register();
-    gles_drop_all();
+    gles_queue_run(gles_drop_all_1, NULL);
+    gles_queue_forget();
 #endif
 }
 
@@ -8494,12 +8506,15 @@ static void gles_flush_code_on_app(CPUState *cpu, uint32_t ctx)
     gles_settle.quiet = 0;
 }
 
+#include "gles-host-queue.c.inc"
+
 int64_t gles_host_call(CPUState *cpu, uint32_t slot, uint32_t ctx,
                        uint32_t argc, const uint32_t *a)
 {
     uint64_t start = qatomic_read(&it_profile_on) && qemu_ios_profile_begin ?
                      qemu_ios_profile_begin() : 0;
-    int64_t result = gles_host_call_impl(cpu, slot, ctx, argc, a);
+    int64_t result = glq_enabled() ? gles_queue_call(cpu, slot, ctx, argc, a) :
+                     gles_host_call_impl(cpu, slot, ctx, argc, a);
     if (slot == GLES_OP_PRESENT_SURFACE) {
         gles_flush_code_on_app(cpu, ctx);
     }

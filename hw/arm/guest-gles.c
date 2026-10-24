@@ -55,9 +55,16 @@ static struct {
     unsigned repeats, slot;
 } gf;
 
+/*
+ * Set on the GL worker thread while it runs a call the vCPU queued and moved on from
+ * (gles-host-queue.c.inc): that call's guest memory was read ahead, on the vCPU, and
+ * the worker reads it from there. The vCPU's faults are none of its business.
+ */
+__thread int (*gles_guest_rw_hook)(vaddr va, void *buf, size_t len, bool write);
+
 bool gles_guest_fault_pending(void)
 {
-    return gf.pending;
+    return !gles_guest_rw_hook && gf.pending;
 }
 
 /*
@@ -98,6 +105,9 @@ bool guest_rw_ram(CPUState *cpu, uint64_t va, uint8_t *buf, size_t len, bool wri
 
 int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write)
 {
+    if (gles_guest_rw_hook) {
+        return gles_guest_rw_hook(va, buf, len, write);
+    }
     if (len && !gf.pending && guest_rw_ram(cpu, va, buf, len, write)) {
         return 0;
     }

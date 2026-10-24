@@ -400,6 +400,7 @@ static inline const char *gles_id_name(uint32_t id)
 int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a);
 /* Guest-pointer access for the GL host: faults untouched pages in (guest-gles.c). */
 int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write);
+extern __thread int (*gles_guest_rw_hook)(vaddr va, void *buf, size_t len, bool write);
 /* Guest memory through the host pointers in the vCPU's TLB, as its own loads and stores reach it. False, having
  * possibly copied part, when a page needs the full path (not plain RAM in the TLB, unmapped, not permitted). */
 bool guest_rw_ram(CPUState *cpu, uint64_t va, uint8_t *buf, size_t len, bool write);
