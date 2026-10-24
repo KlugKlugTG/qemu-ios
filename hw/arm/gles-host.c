@@ -3893,6 +3893,14 @@ static inline bool gles_present_async_submit(CPUState *cpu, uint32_t base, uint3
     return false;
 }
 static inline void gles_present_async_before_call(uint32_t ctx) {}
+typedef struct GlesPresentPrep GlesPresentPrep;
+static inline GlesPresentPrep *gles_present_async_prepare(CPUState *cpu, uint32_t ctx,
+                                                          const uint32_t *a)
+{
+    return NULL;
+}
+static inline void gles_present_async_run(GlesPresentPrep *prep, bool begin) {}
+static inline void gles_present_async_no_queue(void) {}
 #endif
 
 static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t stride,

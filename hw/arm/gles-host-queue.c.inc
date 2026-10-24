@@ -42,6 +42,7 @@ typedef struct {
 typedef struct {
     void (*fn)(void *);             /* a closure (gles_queue_run) instead of a call */
     void *opaque;
+    GlesPresentPrep *present;       /* a queued present's surface pages */
     CPUState *cpu;
     uint32_t slot, ctx, argc, npre;
     uint32_t args[16];
@@ -49,6 +50,7 @@ typedef struct {
     uint64_t arena_end;
     bool sync;
     int64_t result;
+    int64_t started;                /* when the worker took it (LT_GL_THREAD_LOG) */
 } GlqRec;
 
 typedef struct {
@@ -60,6 +62,12 @@ typedef struct {
     GlqArray vertex, color, normal, pointsize, texcoord[GLES_MAX_TEXUNITS], attr[GLES_MAX_ATTRIBS];
     uint32_t unit;
     bool array_bound, element_bound, program;
+    /*
+     * The share group's IOSurface textures (added only by a sync call). A draw re-reads a
+     * surface whose memory changed, first checking through the vCPU's MMU that the memory
+     * is still the surface's, so while there are any, draws wait.
+     */
+    GHashTable *surfaces;
     /*
      * Calls since a glGetError found no error, and the share group's call count when this
      * context last finished: surfaces belong to the group, so any of its contexts' calls
@@ -85,6 +93,8 @@ static struct {
     uint8_t sync_slot[GLES_OP_BASE];  /* slots found to need the vCPU */
     const GlqRec *running;          /* the worker's queued call */
     uint64_t async, sync, misses;
+    /* LT_GL_THREAD_LOG: per slot, the waits' count, time behind queued calls and own time */
+    uint64_t wait_n[GLES_OP_BASE + 16], wait_behind[GLES_OP_BASE + 16], wait_own[GLES_OP_BASE + 16];
 } glq = { .on = -1 };
 
 static const uint8_t glq_flags[GLES_ID_MAX + 1] = {
@@ -109,7 +119,11 @@ static int glq_payload_rw(vaddr va, void *buf, size_t len, bool write)
             }
         }
     }
-    qatomic_set(&glq.sync_slot[r->slot], 1);
+    if (r->slot < GLES_OP_BASE) {
+        qatomic_set(&glq.sync_slot[r->slot], 1);
+    } else {
+        gles_present_async_no_queue();
+    }
     glq.misses++;
     fprintf(stderr, "[glq] queued %s (slot %u) %s guest 0x%08" PRIx64 "+%zu not read ahead; "
             "the slot waits from now on\n", gles_id_name(r->slot), r->slot,
@@ -123,11 +137,21 @@ static void glq_execute(GlqRec *r)
         r->fn(r->opaque);
         return;
     }
+    if (r->sync && glq.log) {
+        r->started = get_clock();
+    }
     if (!r->sync) {
         glq.running = r;
         gles_guest_rw_hook = glq_payload_rw;
     }
+    if (r->present) {
+        gles_present_async_run(r->present, true);
+    }
     r->result = gles_host_call_impl(r->cpu, r->slot, r->ctx, r->argc, r->args);
+    if (r->present) {
+        gles_present_async_run(r->present, false);
+        g_free(r->present);
+    }
     gles_guest_rw_hook = NULL;
     glq.running = NULL;
 }
@@ -175,6 +199,9 @@ static void *glq_worker(void *opaque)
 /* Until cond holds: spin a little (the worker is usually just behind), then sleep. */
 #define GLQ_WAIT(cond)                                                          \
     do {                                                                        \
+        if (cond) {                                                             \
+            break;                                                              \
+        }                                                                       \
         int64_t until_ = get_clock() + 2000000;                                 \
         while (!(cond) && get_clock() < until_) {                               \
             cpu_relax();                                                        \
@@ -296,6 +323,7 @@ static void glq_mirror_refresh(uint32_t ctx)
     }
     h = h ? h : &gh_legacy;
     m = glq_mirror(ctx);
+    m->surfaces = h->surfaces;
     glq_mirror_array(&m->vertex, &h->vertex);
     glq_mirror_array(&m->color, &h->color);
     glq_mirror_array(&m->normal, &h->normal);
@@ -439,10 +467,15 @@ static void glq_mirror_note(GlqMirror *m, uint32_t slot, const uint32_t *a)
     *x = (GlqArray){ x->enabled, m->array_bound, a[0], a[1], a[2], a[3] };
 }
 
+static bool glq_surfaces(const GlqMirror *m)
+{
+    return m->surfaces && g_hash_table_size(m->surfaces);
+}
+
 /*
  * What a queued call reads of guest memory, or false if it has to wait: not known
- * up front, or a draw this does not model (ES 2.0 programs, indices in a buffer
- * with arrays in guest memory).
+ * up front, a draw this does not model (ES 2.0 programs, indices in a buffer with
+ * arrays in guest memory), or a draw that may re-read an IOSurface.
  */
 static bool glq_plan(CPUState *cpu, GlqMirror *m, uint32_t slot, uint32_t argc, const uint32_t *a,
                      GlqPrefetch *p, uint8_t **idx)
@@ -474,7 +507,7 @@ static bool glq_plan(CPUState *cpu, GlqMirror *m, uint32_t slot, uint32_t argc, 
         return a[3] && n && n <= 65536 && glq_want(p, a[3], n * 4);
     }
     case GLES_SLOT_DRAW_ARRAYS:
-        if (m->program && !a[2]) {
+        if (glq_surfaces(m) || (m->program && !a[2])) {
             return false;
         }
         return glq_want_draw(p, m, a[0], a[1], a[2]);
@@ -482,7 +515,7 @@ static bool glq_plan(CPUState *cpu, GlqMirror *m, uint32_t slot, uint32_t argc, 
         uint32_t count = a[1], itype = a[2], iptr = a[3], isz = gles_type_size(itype);
         uint32_t lo = UINT32_MAX, hi = 0;
 
-        if ((itype != GL_UNSIGNED_BYTE && itype != GL_UNSIGNED_SHORT) || !count) {
+        if (glq_surfaces(m) || (itype != GL_UNSIGNED_BYTE && itype != GL_UNSIGNED_SHORT) || !count) {
             return false;
         }
         if (m->element_bound) {
@@ -513,6 +546,33 @@ static bool glq_plan(CPUState *cpu, GlqMirror *m, uint32_t slot, uint32_t argc, 
         return slot < GLES_ID_MAX + 1 && (glq_flags[slot] & GLES_F_BATCH) &&
                slot != GLES_ID_glBindFramebuffer;
     }
+}
+
+/* The slots the vCPU waited on longest since the last report: count, µs behind queued calls, µs own. */
+static void glq_log_waits(void)
+{
+    for (int k = 0; k < 8; k++) {
+        uint32_t best = 0;
+
+        for (uint32_t i = 1; i < ARRAY_SIZE(glq.wait_n); i++) {
+            if (glq.wait_behind[i] + glq.wait_own[i] > glq.wait_behind[best] + glq.wait_own[best]) {
+                best = i;
+            }
+        }
+        if (!glq.wait_n[best]) {
+            break;
+        }
+        char op[16];
+
+        snprintf(op, sizeof(op), "op 0x%x", best);
+        fprintf(stderr, "[glq]   %-28s %7" PRIu64 " waits, behind %7" PRIu64 " us, own %7" PRIu64 " us\n",
+                best >= GLES_OP_BASE ? op : gles_id_name(best), glq.wait_n[best],
+                glq.wait_behind[best] / 1000, glq.wait_own[best] / 1000);
+        glq.wait_n[best] = glq.wait_behind[best] = glq.wait_own[best] = 0;
+    }
+    memset(glq.wait_n, 0, sizeof(glq.wait_n));
+    memset(glq.wait_behind, 0, sizeof(glq.wait_behind));
+    memset(glq.wait_own, 0, sizeof(glq.wait_own));
 }
 
 /* A call from the vCPU: queued, or run on the worker while the vCPU waits. */
@@ -554,6 +614,24 @@ static int64_t gles_queue_call(CPUState *cpu, uint32_t slot, uint32_t ctx, uint3
             next = now + 10 * NANOSECONDS_PER_SECOND;
             fprintf(stderr, "[glq] queued %" PRIu64 " waited %" PRIu64 " misses %" PRIu64 "\n",
                     glq.async, glq.sync, glq.misses);
+            glq_log_waits();
+        }
+    }
+    if (m && slot == GLES_OP_PRESENT_SURFACE && argc >= 5 && gles_allowed) {
+        /* The frame's calls may still be running: the GL thread presents it when it gets there. */
+        GlesPresentPrep *prep = gles_present_async_prepare(cpu, ctx, a);
+
+        if (prep) {
+            r = glq_alloc(0, &off);
+            r->cpu = cpu;
+            r->slot = slot;
+            r->ctx = ctx;
+            r->argc = argc;
+            memcpy(r->args, a, argc * sizeof(uint32_t));
+            r->present = prep;
+            glq_commit(r);
+            glq.async++;
+            return 0;
         }
     }
     if (m && slot < GLES_OP_BASE && !qatomic_read(&glq.sync_slot[slot]) && gles_allowed &&
@@ -593,9 +671,17 @@ static int64_t gles_queue_call(CPUState *cpu, uint32_t slot, uint32_t ctx, uint3
     r->argc = argc;
     memcpy(r->args, a, argc * sizeof(uint32_t));
     r->sync = true;
+    int64_t t0 = glq.log ? get_clock() : 0;
     glq_commit(r);
     glq_wait_idle();
     glq.sync++;
+    if (glq.log && slot < ARRAY_SIZE(glq.wait_n)) {
+        int64_t t1 = get_clock();
+
+        glq.wait_n[slot]++;
+        glq.wait_behind[slot] += r->started - t0;
+        glq.wait_own[slot] += t1 - r->started;
+    }
     glq_mirror_refresh(ctx);
     m = g_hash_table_lookup(glq.mirrors, GUINT_TO_POINTER(ctx));
     if (m && (slot == GLES_SLOT_FINISH || slot == GLES_SLOT_FLUSH) && r->result >= 0) {
