@@ -36,6 +36,6 @@ guard.check_engine_cache(out,recipe,[out/'build.ninja',out/'compile_commands.jso
 # Build scripts use explicit argv, never shell evaluation. No private assets.
 print(' '.join(map(str,args)),flush=True);subprocess.run(list(map(str,args)),cwd=out,env=env,check=True)
 if not a.configure_only:
- subprocess.run(['ninja','-j2','-d','keeprsp','qemu-system-arm'],cwd=out,env=env,check=True)
+ subprocess.run(['ninja','-j'+os.environ.get('LT_JOBS','2'),'-d','keeprsp','qemu-system-arm'],cwd=out,env=env,check=True)
  if a.abi!='linux':shutil.copyfile(a.ndk.resolve()/'toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib'/triple/'libc++_shared.so',out/'libc++_shared.so')
  subprocess.run(['python3',str(src/'contrib/portable/make-shared.py'),str(out)],cwd=out,env=env,check=True)
