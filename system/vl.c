@@ -2850,6 +2850,7 @@ static void *lt_pgo_thread(void *opaque)
 {
     const char *reset = getenv("LT_PGO_RESET"), *file = getenv("LT_PGO_FILE");
     unsigned dump = atoi(getenv("LT_PGO_DUMP")), at = 0;
+    unsigned every = atoi(getenv("LT_PGO_EVERY"));
 
     if (reset && __llvm_profile_reset_counters) {
         at = atoi(reset);
@@ -2857,11 +2858,21 @@ static void *lt_pgo_thread(void *opaque)
         __llvm_profile_reset_counters();
         fprintf(stderr, "[pgo] counters reset at %u s\n", at);
     }
-    if (dump > at) {
-        g_usleep((gulong)(dump - at) * G_USEC_PER_SEC);
-    }
     if (file && __llvm_profile_set_filename) {
         __llvm_profile_set_filename(file);
+    }
+    if (every) {
+        /* LT_PGO_EVERY keeps the file current: a session on a phone ends with the app going
+         * away and nothing left to run, so the profile covers LT_PGO_RESET up to the last write
+         * instead of waiting for one deadline that the session may never reach. */
+        for (;;) {
+            g_usleep((gulong)every * G_USEC_PER_SEC);
+            at += every;
+            fprintf(stderr, "[pgo] profile written at %u s: %d\n", at, __llvm_profile_write_file());
+        }
+    }
+    if (dump > at) {
+        g_usleep((gulong)(dump - at) * G_USEC_PER_SEC);
     }
     fprintf(stderr, "[pgo] profile written at %u s: %d\n", dump, __llvm_profile_write_file());
     return NULL;
