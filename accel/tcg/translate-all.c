@@ -376,6 +376,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
                           "code_gen_buffer overflow\n");
             tb_unlock_pages(tb);
             tcg_ctx->gen_tb = NULL;
+            tcg_tb_overflow(tcg_ctx);
             goto buffer_overflow;
 
         case -2:
@@ -428,6 +429,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
     if (unlikely(search_size < 0)) {
         trace_tb_gen_code_buffer_overflow("encode_search");
         tb_unlock_pages(tb);
+        tcg_tb_overflow(tcg_ctx);
         goto buffer_overflow;
     }
     tb->tc.size = gen_code_size;
@@ -566,10 +568,7 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 
     /* if the TB already exists, discard what we just translated */
     if (unlikely(existing_tb != tb)) {
-        uintptr_t orig_aligned = (uintptr_t)gen_code_buf;
-
-        orig_aligned -= ROUND_UP(sizeof(*tb), qemu_icache_linesize);
-        qatomic_set(&tcg_ctx->code_gen_ptr, (void *)orig_aligned);
+        tcg_tb_free_last(tcg_ctx, tb, gen_code_buf);
         tcg_tb_remove(tb);
         return existing_tb;
     }

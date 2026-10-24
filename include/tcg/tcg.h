@@ -380,6 +380,9 @@ struct TCGContext {
 
     /* Threshold to flush the translated code buffer.  */
     void *code_gen_highwater;
+    void *tb_meta_ptr;  /* TranslationBlocks grow down from the chunk's end (tcg_tb_meta_apart) */
+    void *tb_meta_end;  /* that chunk's end */
+    bool tb_meta_next;  /* the last TB's code did not fit: start the next chunk */
 
     /* Track which vCPU triggers events */
     CPUState *cpu;                      /* *_trans */
@@ -620,6 +623,9 @@ static inline bool tcg_op_buf_full(void)
 void *tcg_malloc_internal(TCGContext *s, int size);
 void tcg_pool_reset(TCGContext *s);
 TranslationBlock *tcg_tb_alloc(TCGContext *s);
+extern bool tcg_tb_meta_apart;
+void tcg_tb_free_last(TCGContext *s, TranslationBlock *tb, void *code);
+void tcg_tb_overflow(TCGContext *s);
 
 void tcg_region_reset_all(void);
 

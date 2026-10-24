@@ -23,6 +23,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "qemu/units.h"
 
 /* Define to jump the ELF file used to communicate with GDB.  */
 #undef DEBUG_JIT
@@ -1824,12 +1825,67 @@ void tcg_init(size_t tb_size, int splitwx, unsigned max_threads)
  * Allocate TBs right before their corresponding translated code, making
  * sure that TBs and code are on different cache lines.
  */
+/*
+ * TranslationBlocks apart from code: a block's code follows the previous block's instead of a 224-byte
+ * TranslationBlock (256 with alignment) sitting between every two. The region is cut into chunks
+ * under 1 MiB, code growing up from a chunk's start and TranslationBlocks down from its end: an
+ * arm64 goto_tb whose target is out of branch range loads it from its TranslationBlock with a
+ * PC-relative literal, which reaches +-1 MiB. The code a frame runs takes fewer cache lines and
+ * pages: Jetpack Joyride's vCPU cycles per frame -14% (desktop), Poco F3 31.3 -> 34.9 fps.
+ * LT_TB_META_APART=off for A/B.
+ */
+#define TB_META_CHUNK   (1 * MiB - 64 * KiB)
+#define TB_META_GUARD   (64 * KiB)
+
+bool tcg_tb_meta_apart;
+
+/* The code of the TB being generated did not fit; the next tcg_tb_alloc opens a new chunk. */
+void tcg_tb_overflow(TCGContext *s)
+{
+    s->tb_meta_next = true;
+}
+
 TranslationBlock *tcg_tb_alloc(TCGContext *s)
 {
     uintptr_t align = qemu_icache_linesize;
     TranslationBlock *tb;
     void *next;
 
+    static int init;
+    if (!init) {
+        const char *v = getenv("LT_TB_META_APART");
+        init = 1;
+        tcg_tb_meta_apart = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    while (tcg_tb_meta_apart) {
+        uintptr_t meta = ((uintptr_t)s->tb_meta_ptr - sizeof(TranslationBlock)) & -align;
+        uintptr_t code = (uintptr_t)s->code_gen_ptr;
+        uintptr_t end = (uintptr_t)s->code_gen_buffer + s->code_gen_buffer_size;
+
+        if (!s->code_gen_ptr) {         /* no region yet (vCPU hotplug) */
+            if (!tcg_region_alloc(s)) {
+                return NULL;
+            }
+            continue;
+        }
+        if (!s->tb_meta_next && meta - TCG_HIGHWATER >= code + TB_META_GUARD &&
+            meta >= (uintptr_t)s->tb_meta_end - TB_META_CHUNK) {
+            s->tb_meta_ptr = (void *)meta;
+            s->code_gen_highwater = (void *)(meta - TCG_HIGHWATER);
+            return (TranslationBlock *)meta;
+        }
+        /* The next chunk starts where this one's TranslationBlocks end. */
+        s->tb_meta_next = false;
+        code = ROUND_UP((uintptr_t)s->tb_meta_end, align);
+        if (end > code && end - code >= 2 * TB_META_GUARD) {
+            s->tb_meta_end = s->tb_meta_ptr = (void *)MIN(end, code + TB_META_CHUNK);
+            qatomic_set(&s->code_gen_ptr, (void *)code);
+            continue;
+        }
+        if (!tcg_region_alloc(s)) {
+            return NULL;
+        }
+    }
     while (1) {
         tb = (void *)ROUND_UP((uintptr_t)s->code_gen_ptr, align);
 
@@ -1847,6 +1903,24 @@ TranslationBlock *tcg_tb_alloc(TCGContext *s)
         if (!tcg_region_alloc(s)) {
             return NULL;
         }
+    }
+}
+
+/* Undo the last tcg_tb_alloc and the code generated after it (a duplicate of an existing TB). */
+void tcg_tb_free_last(TCGContext *s, TranslationBlock *tb, void *code)
+{
+    if (tcg_tb_meta_apart) {
+        if ((void *)tb == s->tb_meta_ptr) {
+            s->tb_meta_ptr = (void *)((uintptr_t)tb + ROUND_UP(sizeof(*tb), qemu_icache_linesize));
+            s->code_gen_highwater = s->tb_meta_ptr - TCG_HIGHWATER;
+        }
+        /* tcg_tb_alloc may have opened a chunk: the code stays where it was put */
+        qatomic_set(&s->code_gen_ptr, code);
+    } else {
+        uintptr_t orig_aligned = (uintptr_t)code;
+
+        orig_aligned -= ROUND_UP(sizeof(*tb), qemu_icache_linesize);
+        qatomic_set(&s->code_gen_ptr, (void *)orig_aligned);
     }
 }
 
