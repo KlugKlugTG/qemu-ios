@@ -12,6 +12,7 @@
 #include "system/system.h"
 #include "system/runstate.h"
 #include "qapi/qapi-commands-control.h"
+#include "hw/arm/ipod-agent.h"
 #include "../ios-app/qemu-ios-ui.h"
 #include "engine.h"
 
@@ -90,9 +91,17 @@ static void apply_control(void *unused)
         }
         if (!runstate_is_running()) vm_start();
         if (!stop_requested) {
+            /* As qemu_ios_ui_shutdown: the agent's halt (where SpringBoard's slider ends), else the power-off gesture. */
+            IPodAgent *a = ipod_agent_acquire();
+            bool agent = a && !strcmp(ipod_agent_status(a, qemu_clock_get_ms(QEMU_CLOCK_REALTIME)), "alive") &&
+                         !ipod_agent_submit(a, "qemu-ios-shutdown halt\n");
+            ipod_agent_free(a);
             stop_requested = true;
-            qemu_system_powerdown_request();
-            fprintf(stderr, "[windows-stop] requested; waiting for actual guest PMU power-off\n");
+            if (!agent) {
+                qemu_system_powerdown_request();
+            }
+            fprintf(stderr, "[windows-stop] requested (%s); waiting for actual guest PMU power-off\n",
+                    agent ? "agent halt" : "power-off gesture");
         }
     }
     int pause = qatomic_xchg(&pause_request, -1);
