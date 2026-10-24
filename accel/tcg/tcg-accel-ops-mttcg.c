@@ -165,12 +165,24 @@ static int64_t thread_cpu_ns(void)
     return ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
-static void mttcg_acct_init(void)
+/*
+ * The accounting follows the board's first CPU only. Boards with a second core (the A4's IOP,
+ * running Apple's NAND firmware) start its thread after the first, and it used to take over the
+ * CPU clock and add its own execs to "run": a Jetpack profile showed the IOP's 0.08 ms a frame
+ * as the vCPU's CPU time, and more run than wall time while an app loaded.
+ */
+static int acct_vcpu_tid;
+
+static void mttcg_acct_init(CPUState *cpu)
 {
     const char *v = getenv("IT_VCPU_ACCT");
     const char *bql = getenv("LT_BQL_PROF");
     bool bql_only = bql && strcmp(bql, "off") && strcmp(bql, "0");
 
+    if (cpu->cpu_index != 0) {
+        return;
+    }
+    acct_vcpu_tid = qemu_get_thread_id();
 #if !defined(CONFIG_DARWIN) && !defined(_WIN32) /* no pthread_getcpuclockid */
     acct_cpu_clock_ok = !pthread_getcpuclockid(pthread_self(), &acct_cpu_clock);
 #endif
@@ -214,6 +226,57 @@ void it_acct_frame_snapshot(int64_t v[6])
     v[4] = acct_cpu_clock_ok && !clock_gettime(acct_cpu_clock, &ts) ?
            ts.tv_sec * 1000000000LL + ts.tv_nsec : 0;
     v[5] = (int64_t)qatomic_read(&it_acct_insns);
+}
+
+/*
+ * Where the host runs the first vCPU, for the per-frame profile: v[0] cumulative ns it waited
+ * runnable for a host core (schedstat; preemption and contention), v[1] the core it ran on last,
+ * v[2] that core's clock in kHz. -1 where the host has no /proc (macOS, Windows).
+ */
+void it_acct_vcpu_sched(int64_t v[3])
+{
+    v[0] = v[1] = v[2] = -1;
+#ifdef __linux__
+    static int schedstat = -1, stat = -1, freq[32];
+    static bool opened;
+    char buf[512], *p;
+    ssize_t n;
+    unsigned long long run, wait;
+
+    if (!opened && acct_vcpu_tid) {
+        opened = true;
+        snprintf(buf, sizeof(buf), "/proc/self/task/%d/schedstat", acct_vcpu_tid);
+        schedstat = open(buf, O_RDONLY | O_CLOEXEC);
+        snprintf(buf, sizeof(buf), "/proc/self/task/%d/stat", acct_vcpu_tid);
+        stat = open(buf, O_RDONLY | O_CLOEXEC);
+        for (int i = 0; i < ARRAY_SIZE(freq); i++) {
+            snprintf(buf, sizeof(buf), "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", i);
+            freq[i] = open(buf, O_RDONLY | O_CLOEXEC);
+        }
+    }
+    if (schedstat >= 0 && (n = pread(schedstat, buf, sizeof(buf) - 1, 0)) > 0) {
+        buf[n] = 0;
+        if (sscanf(buf, "%llu %llu", &run, &wait) == 2) {
+            v[0] = wait;
+        }
+    }
+    /* Field 39, "processor", counted after the parenthesized name, which may hold spaces. */
+    if (stat >= 0 && (n = pread(stat, buf, sizeof(buf) - 1, 0)) > 0) {
+        buf[n] = 0;
+        p = strrchr(buf, ')');
+        for (int field = 2; p && field < 39; field++) {
+            p = strchr(p + 1, ' ');
+        }
+        if (p) {
+            v[1] = atoi(p + 1);
+        }
+    }
+    if (v[1] >= 0 && v[1] < ARRAY_SIZE(freq) && freq[v[1]] >= 0 &&
+        (n = pread(freq[v[1]], buf, sizeof(buf) - 1, 0)) > 0) {
+        buf[n] = 0;
+        v[2] = atoll(buf);
+    }
+#endif
 }
 
 static void mttcg_acct_dump(int64_t now)
@@ -315,7 +378,7 @@ static void *mttcg_cpu_thread_fn(void *arg)
     g_assert(!icount_enabled());
 
     mttcg_request_performance_core();
-    mttcg_acct_init();
+    mttcg_acct_init(cpu);
     rcu_register_thread();
     force_rcu.notifier.notify = mttcg_force_rcu;
     force_rcu.cpu = cpu;
@@ -333,8 +396,8 @@ static void *mttcg_cpu_thread_fn(void *arg)
 
     do {
         /* Keep one timing decision across exec and relock, including stop races. */
-        bool timing = qatomic_read(&it_bql_acct_on) ||
-                      qatomic_read(&it_profile_on);
+        bool timing = cpu->cpu_index == 0 && (qatomic_read(&it_bql_acct_on) ||
+                                              qatomic_read(&it_profile_on));
         if (!timing) {
             qatomic_set(&acct_io_mark, 0);
         }

@@ -284,6 +284,7 @@ static void ios_report_first_lit_frame(const uint8_t *bgra, int w, int h)
  * the GL ones IT_GLES_PROF.
  */
 void it_acct_frame_snapshot(int64_t v[6]);
+void it_acct_vcpu_sched(int64_t v[3]);
 /* Capture producers only format and enqueue bounded records. The writer never
  * holds this mutex during file I/O, and this mutex never acquires the BQL.
  * Completed GL calls are grouped by publication interval; S rows retain slow
@@ -447,7 +448,8 @@ int qemu_ios_profile_start(const char *path)
         profile_gl_ns = profile_present_ns = 0;
         profile_started = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
         profile_printf_locked("# LightTouch profile v1; monotonic ns; no GL arguments\n"
-                "# F ns serial run outside bql-outside bql-inside vcpu-cpu insns gl present main-cpu due-ns\n"
+                "# F ns serial run outside bql-outside bql-inside vcpu-cpu insns gl present main-cpu due-ns"
+                " vcpu-wait vcpu-core vcpu-khz\n"
                 "# G end-ns slot count total-ns max-ns name (completed calls since preceding F)\n"
                 "# S start-ns end-ns slot context (GL calls >=500us)\n"
                 "# W/H start-ns end-ns file line (BQL wait/hold >=500us)\n"
@@ -579,12 +581,13 @@ void qemu_ios_profile_callback(void *fn, const char *name, int64_t ns)
 
 static void ios_profile_frame(uint64_t due, uint64_t serial)
 {
-    int64_t v[6];
+    int64_t v[6], sched[3];
     struct timespec ts = { 0 };
     if (!qatomic_read(&it_profile_on)) {
         return;
     }
     it_acct_frame_snapshot(v);
+    it_acct_vcpu_sched(sched);
     clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
     g_mutex_lock(&profile_mutex);
     if (qatomic_read(&it_profile_on)) {
@@ -592,9 +595,10 @@ static void ios_profile_frame(uint64_t due, uint64_t serial)
         profile_flush_gl_locked(now);
         profile_printf_locked("F %" PRIu64 " %" PRIu64 " %" PRId64 " %" PRId64
                 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRIu64
-                " %" PRIu64 " %" PRId64 " %" PRIu64 "\n", now, serial,
+                " %" PRIu64 " %" PRId64 " %" PRIu64 " %" PRId64 " %" PRId64 " %" PRId64 "\n", now, serial,
                 v[0], v[1], v[2], MAX((int64_t)0, v[3] - v[2]), v[4], v[5], profile_gl_ns, profile_present_ns,
-                (int64_t)ts.tv_sec * (int64_t)1000000000 + (int64_t)ts.tv_nsec, due);
+                (int64_t)ts.tv_sec * (int64_t)1000000000 + (int64_t)ts.tv_nsec, due,
+                sched[0], sched[1], sched[2]);
         profile_check_locked();
     }
     g_mutex_unlock(&profile_mutex);
