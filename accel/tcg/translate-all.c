@@ -137,7 +137,7 @@ static int cpu_unwind_data_from_tb(TranslationBlock *tb, uintptr_t host_pc,
                                    uint64_t *data)
 {
     uintptr_t iter_pc = (uintptr_t)tb->tc.ptr;
-    const uint8_t *p = tb->tc.ptr + tb->tc.size;
+    const uint8_t *p = tb->search;
     int i, j, num_insns = tb->icount;
 
     host_pc -= GETPC_ADJ;
@@ -289,6 +289,18 @@ static int setjmp_gen_code(CPUArchState *env, TranslationBlock *tb,
     return tcg_gen_code(tcg_ctx, tb, pc);
 }
 
+static bool tb_cold_search(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_TB_COLD_SEARCH");
+
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 /* Called with mmap_lock held for user mode emulation.  */
 TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
 {
@@ -433,6 +445,21 @@ TranslationBlock *tb_gen_code(CPUState *cpu, TCGTBCPUState s)
         goto buffer_overflow;
     }
     tb->tc.size = gen_code_size;
+    tb->search = (const uint8_t *)tb->tc.ptr + gen_code_size;
+    if (tcg_tb_meta_apart && tb_cold_search()) {
+        /*
+         * The unwind data is read only when a guest exception restores state mid-block: it goes
+         * below the TranslationBlock too, out of the hot code. LT_TB_COLD_SEARCH=off for A/B.
+         */
+        uintptr_t dst = ((uintptr_t)tcg_ctx->tb_meta_ptr - search_size) & -8;
+
+        if (dst >= (uintptr_t)gen_code_buf + gen_code_size + search_size) {
+            memcpy((void *)dst, (void *)gen_code_buf + gen_code_size, search_size);
+            tb->search = tcg_splitwx_to_rx((void *)dst);
+            tcg_ctx->tb_meta_ptr = (void *)dst;
+            search_size = 0;
+        }
+    }
 
     /*
      * For CF_PCREL, attribute all executions of the generated code

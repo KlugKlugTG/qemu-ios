@@ -123,6 +123,8 @@ struct TranslationBlock {
     uint16_t icount;
 
     struct tb_tc tc;
+    /* The unwind data (encode_search): after the code, or below this TB when kept apart. */
+    const uint8_t *search;
 
     /*
      * Track tb_page_addr_t intervals that intersect this TB.
