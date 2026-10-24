@@ -31,8 +31,29 @@ static int64_t qemu_clock_get_ns(int c) { (void)c; return now; }
 static void timer_mod(QEMUTimer *t, int64_t at) { t->pending = true; t->deadline = at; }
 static void timer_del(QEMUTimer *t) { t->pending = false; }
 static bool timer_pending(QEMUTimer *t) { return t->pending; }
+/* The worker thread is not started: main sets LT_SCALER_ASYNC=off, so transfers run in the start write. */
+typedef int QemuThread, QemuMutex, QemuCond;
+#define QEMU_THREAD_DETACHED 0
+static void qemu_thread_create(QemuThread *t, const char *n, void *(*f)(void *), void *o, int m)
+{ (void)t; (void)n; (void)f; (void)o; (void)m; assert(0); }
+static void qemu_mutex_lock(QemuMutex *m) { (void)m; }
+static void qemu_mutex_unlock(QemuMutex *m) { (void)m; }
+static void qemu_cond_wait(QemuCond *c, QemuMutex *m) { (void)c; (void)m; assert(0); }
+static void qemu_cond_signal(QemuCond *c) { (void)c; }
+static void qemu_cond_broadcast(QemuCond *c) { (void)c; }
+#define qatomic_read(p) (*(p))
+static bool bql_locked(void) { return false; }
+static void bql_lock(void) {}
+static void bql_unlock(void) {}
+static void gles_present_wait(void) {}
 #include "slice.h"
 static QEMUTimer done;
+/* A transfer reads the registers as they were at its start write (s->job). */
+static bool convert_now(IPodScalerState *s)
+{
+    memcpy(s->job, s->regs, sizeof(s->job));
+    return scaler_convert(s);
+}
 /* The clock reaches the pending end, and the timer fires. */
 static void run_to_end(IPodScalerState *s)
 {
@@ -43,13 +64,14 @@ static void run_to_end(IPodScalerState *s)
 }
 int main(void)
 {
+    setenv("LT_SCALER_ASYNC", "off", 1);
     int irq=0;IPodScalerState s={.irq=&irq,.done=&done};
     uint32_t *r=s.regs;
-    /* A transfer stays busy, its done interrupt unraised, until its end: 5 ns a destination pixel, 20 us at least.
+    /* A transfer stays busy, its done interrupt unraised, until its end: 1 ns a destination pixel, 20 us at least.
      * Done at the start write, an asynchronous transfer's completion freed its request under the kext's submit path. */
     r[2]=1;r[0x40/4]=(640<<16)|960;
     scaler_write(&s,4,1,4);
-    assert(!irq && (r[1]&1) && !r[3] && done.deadline==now+640*960*5);
+    assert(!irq && (r[1]&1) && !r[3] && done.deadline==now+640*960);
     run_to_end(&s);
     assert(irq && !(r[1]&1) && r[3]==1);
     scaler_write(&s,12,1,4);assert(!irq);
@@ -78,9 +100,9 @@ int main(void)
     scaler_write(&s,4,0x201,4);assert(!irq);
     run_to_end(&s);assert(irq);
     assert(!memcmp(ram+512,"\0\0\0\xff\xff\xff\xff\xff\0\0\xfe\xff",12));
-    r[13]=0x10000000;assert(!scaler_convert(&s));
-    r[13]=BASE+512;r[9]|=1;assert(!scaler_convert(&s));
-    r[9]&=~1u;r[16]++;assert(!scaler_convert(&s));
+    r[13]=0x10000000;assert(!convert_now(&s));
+    r[13]=BASE+512;r[9]|=1;assert(!convert_now(&s));
+    r[9]&=~1u;r[16]++;assert(!convert_now(&s));
     scaler_write(&s,4,2,4);assert(!irq);
     for(unsigned i=0;i<G_N_ELEMENTS(s.regs);i++) assert(!s.regs[i]);
     puts("PASS: NV12 matrix conversion, RGB565/BGRA, padding, DMA bounds, IRQ mask/ack and reset, completion after the transfer's time");

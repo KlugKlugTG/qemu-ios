@@ -430,9 +430,11 @@ static uint64_t scaler_read(void *opaque, hwaddr off, unsigned size)
 }
 
 /*
- * A transfer ends some time after its start, as the block's does: 5 ns a destination pixel (200 Mpixel/s, 3 ms for
- * 640x960), at least 20 us. The pixels are written at the start; the busy bit (+0x4 bit 0) stays set and the done
- * interrupt waits for the end. Done at the start write, the interrupt reached the driver's workloop while the
+ * A transfer ends some time after its start, as the block's does: 1 ns a destination pixel (0.6 ms for 640x960;
+ * LT_SCALER_PS_PER_PIXEL changes it), at least 20 us, and not before the worker has written the pixels. The busy bit
+ * (+0x4 bit 0) stays set and the done interrupt waits for the end. The end gates the frame: backboardd swaps the
+ * turned frame only once it is done, so a transfer still running at the VBL costs the game a whole frame. At 5 ns a
+ * pixel (3 ms) that was a quarter of Jetpack Joyride's frames on the Poco. Done at the start write, the interrupt reached the driver's workloop while the
  * submitting thread held the command gate, and the workloop took the CPU the moment the gate opened: the completion
  * of an asynchronous transfer freed the request before AppleM2ScalerCSCDriver's submit path read the request's
  * callback, so the submit path took the freed memory for a synchronous request, released a null DMA command and
@@ -503,7 +505,13 @@ static void scaler_write(void *opaque, hwaddr off, uint64_t value, unsigned size
             qemu_cond_signal(&s->cond);
             qemu_mutex_unlock(&s->lock);
         }
-        timer_mod(s->done, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + MAX(20000, pixels * 5));
+        static int ps_per_pixel = -1;
+        if (ps_per_pixel < 0) {
+            const char *v = getenv("LT_SCALER_PS_PER_PIXEL");
+            ps_per_pixel = v ? atoi(v) : 1000;
+        }
+        timer_mod(s->done, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) +
+                  MAX(20000, pixels * ps_per_pixel / 1000));
     }
     scaler_irq(s);
 }

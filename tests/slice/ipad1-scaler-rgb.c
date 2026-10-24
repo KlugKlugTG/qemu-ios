@@ -49,6 +49,21 @@ static int64_t qemu_clock_get_ns(int c) { (void)c; return 0; }
 static void timer_mod(QEMUTimer *t, int64_t at) { (void)t; (void)at; }
 static void timer_del(QEMUTimer *t) { (void)t; }
 static bool timer_pending(QEMUTimer *t) { (void)t; return false; }
+/* Only scaler_rgb runs here; the worker thread and its locks are never reached. */
+typedef int QemuThread, QemuMutex, QemuCond;
+#define QEMU_THREAD_DETACHED 0
+static void qemu_thread_create(QemuThread *t, const char *n, void *(*f)(void *), void *o, int m)
+{ (void)t; (void)n; (void)f; (void)o; (void)m; assert(0); }
+static void qemu_mutex_lock(QemuMutex *m) { (void)m; }
+static void qemu_mutex_unlock(QemuMutex *m) { (void)m; }
+static void qemu_cond_wait(QemuCond *c, QemuMutex *m) { (void)c; (void)m; assert(0); }
+static void qemu_cond_signal(QemuCond *c) { (void)c; }
+static void qemu_cond_broadcast(QemuCond *c) { (void)c; }
+#define qatomic_read(p) (*(p))
+static bool bql_locked(void) { return false; }
+static void bql_lock(void) {}
+static void bql_unlock(void) {}
+static void gles_present_wait(void) {}
 #include "slice.h"
 
 /* dart2, stream 2 (the scaler's mapper), segment 0 through one page table at PT. */
@@ -93,6 +108,7 @@ static void go(IPodScalerState *s, unsigned sw, unsigned sh, unsigned spitch, un
     r[0x1c/4] = ss << 16 | ss;
     r[0x24/4] = sw << 16 | sh; r[0x40/4] = dw << 16 | dh; r[0x3c/4] = ds << 16 | ds;
     r[0x50/4] = r[0x54/4] = step;
+    memcpy(s->job, s->regs, sizeof(s->job));   /* a transfer reads the registers of its start write */
     assert(scaler_rgb(s));
 }
 static uint32_t at(unsigned dpitch, unsigned x, unsigned y) { Buf d = DST; d.pitch = dpitch; return *px(&d, x, y); }
