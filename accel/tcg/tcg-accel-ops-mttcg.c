@@ -26,6 +26,9 @@
 #include "qemu/osdep.h"
 #ifndef _WIN32
 #include <dlfcn.h>
+#ifdef __ANDROID__
+#include <sys/prctl.h>
+#endif
 #endif
 #include "system/memory.h"
 #include "exec/cpu-common.h"
@@ -183,6 +186,16 @@ static void mttcg_acct_init(CPUState *cpu)
         return;
     }
     acct_vcpu_tid = qemu_get_thread_id();
+#ifdef __ANDROID__
+    {
+        /* Hardware memory tagging checks every heap access the translator and its TLBs make
+         * (GrapheneOS can enable it for apps); hitch reports carry this line. */
+        int ctrl = prctl(56 /* PR_GET_TAGGED_ADDR_CTRL */, 0, 0, 0, 0);
+        fprintf(stderr, "[vcpu] memory tagging: %s\n", ctrl < 0 ? "unavailable" :
+                (ctrl & (1 << 1)) && (ctrl & (1 << 2)) ? "asymmetric" : (ctrl & (1 << 1)) ? "sync" :
+                (ctrl & (1 << 2)) ? "async" : "off");
+    }
+#endif
 #if !defined(CONFIG_DARWIN) && !defined(_WIN32) /* no pthread_getcpuclockid */
     acct_cpu_clock_ok = !pthread_getcpuclockid(pthread_self(), &acct_cpu_clock);
 #endif
