@@ -2837,6 +2837,45 @@ void qmp_x_exit_preconfig(Error **errp)
     }
 }
 
+/*
+ * A profile-instrumented engine (-fprofile-generate, LT_ENGINE_CFLAGS) has no exit at which to write
+ * its profile on Android, where the process is killed: LT_PGO_RESET=S zeroes the counters S seconds
+ * after start and LT_PGO_DUMP=S writes them to LT_PGO_FILE then, so the profile covers that window.
+ */
+extern int __llvm_profile_write_file(void) __attribute__((weak));
+extern void __llvm_profile_set_filename(const char *name) __attribute__((weak));
+extern void __llvm_profile_reset_counters(void) __attribute__((weak));
+
+static void *lt_pgo_thread(void *opaque)
+{
+    const char *reset = getenv("LT_PGO_RESET"), *file = getenv("LT_PGO_FILE");
+    unsigned dump = atoi(getenv("LT_PGO_DUMP")), at = 0;
+
+    if (reset && __llvm_profile_reset_counters) {
+        at = atoi(reset);
+        g_usleep((gulong)at * G_USEC_PER_SEC);
+        __llvm_profile_reset_counters();
+        fprintf(stderr, "[pgo] counters reset at %u s\n", at);
+    }
+    if (dump > at) {
+        g_usleep((gulong)(dump - at) * G_USEC_PER_SEC);
+    }
+    if (file && __llvm_profile_set_filename) {
+        __llvm_profile_set_filename(file);
+    }
+    fprintf(stderr, "[pgo] profile written at %u s: %d\n", dump, __llvm_profile_write_file());
+    return NULL;
+}
+
+static void lt_pgo_start(void)
+{
+    static QemuThread thread;
+
+    if (__llvm_profile_write_file && getenv("LT_PGO_DUMP")) {
+        qemu_thread_create(&thread, "pgo", lt_pgo_thread, NULL, QEMU_THREAD_DETACHED);
+    }
+}
+
 void qemu_init(int argc, char **argv)
 {
     QemuOpts *opts;
@@ -3736,6 +3775,7 @@ void qemu_init(int argc, char **argv)
         perf_enable_perfmap();
     }
 #endif
+    lt_pgo_start();
     qemu_validate_options(machine_opts_dict);
     qemu_process_sugar_options();
 
