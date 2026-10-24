@@ -102,8 +102,11 @@ static bool gles_ahb_usable(void)
     return gles_ahb_api.state > 0;
 }
 
+static void gles_present_async_settle(void);
+
 static void gles_ahb_free(GLESAhb *a)
 {
+    gles_present_async_settle();   /* the present worker may be reading it */
     if (a->image != EGL_NO_IMAGE_KHR) {
         gles_ahb_api.destroy_image(gles_egl_display, a->image);
     }

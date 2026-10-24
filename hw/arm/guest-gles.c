@@ -22,6 +22,9 @@
 #include "exec/target_page.h"
 #include "exec/tlb-flags.h"
 #include "hw/arm/guest-services/general.h"
+#include "hw/arm/gles-present.h"
+
+void (*gles_present_wait_hook)(void);
 
 /*
  * Guest memory behind the pointers a GL call hands the host (client arrays,

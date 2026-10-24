@@ -3214,6 +3214,10 @@ static void gles_report_frame_pixels(const uint8_t *frame, size_t stride,
             pixels.mean[2], pixels.mean[3], pixels.hash);
 }
 
+#ifndef GLES_HOST_AHB
+static inline void gles_present_async_settle(void) {}
+#endif
+
 static void gles_present_to_panel(void)
 {
     IPodTouchMachineState *nms;
@@ -3225,6 +3229,7 @@ static void gles_present_to_panel(void)
      * use its CA surface; reading it as a portrait panel would overrun or crop. */
     if (gh.drawable_width != GLES_FB_WIDTH ||
         gh.drawable_height != GLES_FB_HEIGHT) return;
+    gles_present_async_settle();
 
     nms = (IPodTouchMachineState *)object_dynamic_cast(OBJECT(qdev_get_machine()), TYPE_IPOD_TOUCH_MACHINE);
     if (!nms || !nms->lcd_state) {
@@ -3875,6 +3880,17 @@ static void gles_trace_surface_mapping(CPUState *cpu, uint32_t ctx,
     ios_frame_path(IOS_FP_SURFACE_MAP_END, ctx, base, physical);
 }
 
+#ifdef GLES_HOST_AHB
+#include "gles-host-present-async.c.inc"
+#else
+static inline bool gles_present_async_submit(CPUState *cpu, uint32_t base, uint32_t stride,
+                                             uint32_t rw, uint32_t rh)
+{
+    return false;
+}
+static inline void gles_present_async_before_call(uint32_t ctx) {}
+#endif
+
 static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t stride,
                                    uint32_t width, uint32_t height,
                                    uint32_t format, GLESPresentSample *sample)
@@ -3977,6 +3993,20 @@ static int gles_present_to_surface_impl(CPUState *cpu, uint32_t base, uint32_t s
         /* The zero-copy path hands back the render target's own BGRA rows, so
          * it can only serve a 32-bit destination; 565 goes via the readback,
          * where GL does the packing. */
+        if (bpp == 4 && bgra && !gles_swizzle && gh.iosurface &&
+            gles_present_async_submit(cpu, base, stride, rw, rh)) {
+            if (sample) {
+                sample->path = 4;
+            }
+            gles_present_mark(sample, PRESENT_ACQUIRE);
+            gles_present_mark(sample, PRESENT_COPY);
+            gh.presents++;
+            gles_frame_end();
+            gles_note_scene();
+            gles_note_frame_gap();
+            gles_report_progress();
+            return 0;
+        }
         if (bpp == 4 && bgra && !gles_swizzle) {
             frame = gles_frame_lock(&fstride);
         }
@@ -4953,6 +4983,7 @@ static bool gles_surface_copy(GLuint from, const GLESSurface *src, GLuint to, GL
 
 static int64_t gles_bind_surface(CPUState *cpu, const uint32_t *a, uint32_t id)
 {
+    gles_present_async_settle();   /* the surface may be the frame still being copied */
     bool window = a[0] & GLES_SURFACE_WINDOW_ORDER;
     unsigned target = a[0] & ~GLES_SURFACE_WINDOW_ORDER, w = a[3], h = a[4], fmt = a[5];
     bool nv12 = fmt == 0x34323076 || fmt == 0x34323066;
@@ -8233,6 +8264,7 @@ static int64_t gles_host_call_impl(CPUState *cpu, uint32_t slot, uint32_t ctx,
         stage_current = qemu_clock_get_ns(QEMU_CLOCK_REALTIME);
     }
 
+    gles_present_async_before_call(ctx);
     gh.calls++;
     gles_cur_ctx = ctx;
     t0 = gles_t();

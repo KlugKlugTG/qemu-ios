@@ -9,6 +9,7 @@
 #include "qemu/timer.h"
 #include "qemu/main-loop.h"
 #include "qemu/thread.h"
+#include "hw/arm/gles-present.h"
 
 /* 7E18 AppleM2ScalerCSCDriver: 0xc0732388 programs formats, 0xc07323f0
  * source geometry, 0xc073246c destination geometry, 0xc0730288 acknowledges
@@ -165,6 +166,7 @@ static bool scaler_rgb(IPodScalerState *s)
     uint32_t sx = r[0x50 / 4], sy = r[0x54 / 4];
     bool stiled = r[0x10 / 4] & 0x400, dtiled = r[0x30 / 4] & 0x400;
 
+    gles_present_wait();   /* the source may be a GL frame still being copied in */
     if ((r[0x10 / 4] & 7) != 6 || (r[0x30 / 4] & 7) != 6 || !sw || !sh ||
         !dw || !dh || sw > 2048 || sh > 2048 || dw > 2048 || dh > 2048 ||
         ss < sw * 4 || ds < dw * 4) {

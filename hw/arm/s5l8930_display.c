@@ -20,6 +20,7 @@
 #include "hw/arm/s5l8930.h"
 #include "hw/arm/frame-timeline.h"
 #include "hw/arm/panel-gamma.h"
+#include "hw/arm/gles-present.h"
 #include "system/runstate.h"
 #include "ui/input.h"
 #include "qemu/cutils.h"
@@ -1053,6 +1054,7 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
     unsigned w, h;
     size_t need;
 
+    gles_present_wait();   /* a layer may be a GL frame still being copied in */
     panel_size(s, &w, &h);
     if (trace_event_get_state_backends(TRACE_S5L8930_DISPLAY_LOG)) {
         static unsigned n;
