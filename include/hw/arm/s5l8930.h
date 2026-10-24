@@ -322,6 +322,8 @@ void s5l8930_cdma_sink_done(DeviceState *dev, uint32_t fifo_base, uint32_t size)
 unsigned s5l8930_i2s_rate(unsigned port);
 /* The same, with the port's output voice set to it while TX runs: a CDMA chain's start. */
 unsigned s5l8930_i2s_sync_rate(unsigned port);
+/* A paced CDMA chain's bytes for a TX FIFO in one go; 0 if fifo is no port's TX FIFO. */
+uint32_t s5l8930_i2s_tx_bulk(hwaddr fifo, const uint8_t *buf, uint32_t len);
 #define S5L8930_CDMA_CHANNELS    0x26
 
 /*

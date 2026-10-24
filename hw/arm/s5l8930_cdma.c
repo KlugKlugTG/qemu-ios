@@ -361,6 +361,19 @@ static bool cdma_bulk_enabled(void)
     return on;
 }
 
+/* LT_I2S_BULK=off: paced audio to an I2S TX FIFO a register write at a time (A/B). */
+static bool cdma_i2s_bulk_enabled(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_I2S_BULK");
+
+        on = cdma_bulk_enabled() && !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 static bool cdma_is_memory(S5L8930CDMAState *s, uint32_t addr);
 
 /* The pacing source whose window holds addr, or NULL. */
@@ -715,7 +728,9 @@ static bool cdma_paced_advance(S5L8930CDMAState *s, int ch, uint64_t upto)
 
             dma_memory_read(&address_space_memory, addr + from, buf, to - from,
                             MEMTXATTRS_UNSPECIFIED);
-            cdma_fifo_xfer(s, c->fifo, width, buf, to - from, true);
+            if (!cdma_i2s_bulk_enabled() || !s5l8930_i2s_tx_bulk(c->fifo, buf, to - from)) {
+                cdma_fifo_xfer(s, c->fifo, width, buf, to - from, true);
+            }
         } else if (!to_device && s->paced_sent[ch] < base + len && upto > base) {
             /* Capture (i2s RX FIFO -> memory), same pacing. */
             uint32_t from = MAX(s->paced_sent[ch], base) - base;

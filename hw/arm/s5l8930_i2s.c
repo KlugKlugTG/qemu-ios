@@ -285,6 +285,38 @@ static bool i2s_tx_running(S5L8930I2SState *s)
     return s->ctrl_run ? s->regs[I2S_CTRL >> 2] & 1 : s->regs[I2S_TXCOM >> 2] == I2S_CMD_RUN;
 }
 
+/*
+ * A paced CDMA chain's span for the TX FIFO at fifo, all at once: the same bytes i2s_push takes a
+ * register write at a time. Each of those went through the memory API under the BQL, ~44K a
+ * second of 44.1 kHz stereo, ~8% of the main loop's time on a Pixel 10 in a game. 0 if fifo is
+ * not a TX FIFO here.
+ */
+uint32_t s5l8930_i2s_tx_bulk(hwaddr fifo, const uint8_t *buf, uint32_t len)
+{
+    for (int i = 0; i < ARRAY_SIZE(i2s_ports); i++) {
+        S5L8930I2SState *s = i2s_ports[i];
+
+        if (!s || (!(memory_region_is_mapped(&s->iomem) && s->iomem.addr + I2S_TXFIFO == fifo) &&
+                   !(memory_region_is_mapped(&s->fifo) && s->fifo.addr == fifo))) {
+            continue;
+        }
+        if (s->voice && i2s_tx_running(s)) {
+            uint32_t n = MIN(len, I2S_RING - s->level);   /* host stalled: drop the rest */
+
+            for (uint32_t off = 0; off < n;) {
+                uint32_t chunk = MIN(n - off, I2S_RING - s->head);
+
+                memcpy(s->ring + s->head, buf + off, chunk);
+                s->head = (s->head + chunk) % I2S_RING;
+                off += chunk;
+            }
+            s->level += n;
+        }
+        return len;
+    }
+    return 0;
+}
+
 static void i2s_set_rate(S5L8930I2SState *s, unsigned rate)
 {
     struct audsettings as = {
