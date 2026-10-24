@@ -5299,6 +5299,24 @@ static void op_addr_block_post(DisasContext *s, arg_ldst_block *a,
     }
 }
 
+/*
+ * LT: an LDM/STM (push, pop) moves its words in pairs, one 64-bit access each (each word
+ * single-copy atomic, MO_ATOM_IFALIGN_PAIR, 4-alignment checked): half the softmmu TLB
+ * checks, which were ~9 host instructions a word. Not for BE32 (SCTLR.B), whose 64-bit
+ * accesses swap differently. LT_LDM_PAIR=off for A/B.
+ */
+static bool ldm_pair(DisasContext *s, int n)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_LDM_PAIR");
+
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on && n > 1 && !s->sctlr_b;
+}
+
 static bool op_stm(DisasContext *s, arg_ldst_block *a)
 {
     int i, j, n, list, mem_idx;
@@ -5333,7 +5351,40 @@ static bool op_stm(DisasContext *s, arg_ldst_block *a)
     addr = op_addr_block_pre(s, a, n);
     mem_idx = get_mem_index(s);
 
-    for (i = j = 0; i < 16; i++) {
+    if (ldm_pair(s, n)) {
+        TCGv_i32 val[16];
+
+        for (i = j = 0; i < 16; i++) {
+            if (list & (1 << i)) {
+                if (user && i != 15) {
+                    val[j] = tcg_temp_new_i32();
+                    gen_helper_get_user_reg(val[j], tcg_env, tcg_constant_i32(i));
+                } else {
+                    val[j] = load_reg(s, i);
+                }
+                j++;
+            }
+        }
+        for (j = 0; j < n; j += 2) {
+            TCGv_i32 a1 = tcg_temp_new_i32();
+
+            tcg_gen_addi_i32(a1, addr, j * 4);
+            if (j + 1 < n) {
+                MemOp opc = MO_64 | MO_ALIGN_4 | MO_ATOM_IFALIGN_PAIR | s->be_data;
+                TCGv_i64 t64 = tcg_temp_new_i64();
+
+                if (s->be_data == MO_BE) {
+                    tcg_gen_concat_i32_i64(t64, val[j + 1], val[j]);
+                } else {
+                    tcg_gen_concat_i32_i64(t64, val[j], val[j + 1]);
+                }
+                tcg_gen_qemu_st_i64(t64, gen_aa32_addr(s, a1, opc), mem_idx, opc);
+            } else {
+                gen_aa32_st_i32(s, val[j], a1, mem_idx, MO_UL | MO_ALIGN);
+            }
+        }
+        tcg_gen_addi_i32(addr, addr, (n - 1) * 4);
+    } else for (i = j = 0; i < 16; i++) {
         if (!(list & (1 << i))) {
             continue;
         }
@@ -5420,13 +5471,41 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
     loaded_base = false;
     loaded_var = NULL;
 
+    TCGv_i32 pair_hi = NULL;
+    bool pair = ldm_pair(s, n);
+
     for (i = j = 0; i < 16; i++) {
         if (!(list & (1 << i))) {
             continue;
         }
 
-        tmp = tcg_temp_new_i32();
-        gen_aa32_ld_i32(s, tmp, addr, mem_idx, MO_UL | MO_ALIGN);
+        if (pair && pair_hi) {
+            tmp = pair_hi;                  /* the second word of the last pair */
+            pair_hi = NULL;
+        } else if (pair && j + 1 < n) {
+            MemOp opc = MO_64 | MO_ALIGN_4 | MO_ATOM_IFALIGN_PAIR | s->be_data;
+            TCGv_i64 t64 = tcg_temp_new_i64();
+            TCGv_i32 a1 = tcg_temp_new_i32();
+
+            tmp = tcg_temp_new_i32();
+            pair_hi = tcg_temp_new_i32();
+            tcg_gen_addi_i32(a1, addr, j * 4);
+            tcg_gen_qemu_ld_i64(t64, gen_aa32_addr(s, a1, opc), mem_idx, opc);
+            if (s->be_data == MO_BE) {
+                tcg_gen_extr_i64_i32(pair_hi, tmp, t64);
+            } else {
+                tcg_gen_extr_i64_i32(tmp, pair_hi, t64);
+            }
+        } else if (pair) {
+            TCGv_i32 a1 = tcg_temp_new_i32();
+
+            tmp = tcg_temp_new_i32();
+            tcg_gen_addi_i32(a1, addr, j * 4);
+            gen_aa32_ld_i32(s, tmp, a1, mem_idx, MO_UL | MO_ALIGN);
+        } else {
+            tmp = tcg_temp_new_i32();
+            gen_aa32_ld_i32(s, tmp, addr, mem_idx, MO_UL | MO_ALIGN);
+        }
         if (user) {
             gen_helper_set_user_reg(tcg_env, tcg_constant_i32(i), tmp);
         } else if (i == a->rn) {
@@ -5439,9 +5518,12 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
         }
 
         /* No need to add after the last transfer.  */
-        if (++j != n) {
+        if (++j != n && !pair) {
             tcg_gen_addi_i32(addr, addr, 4);
         }
+    }
+    if (pair) {
+        tcg_gen_addi_i32(addr, addr, (n - 1) * 4);
     }
 
     op_addr_block_post(s, a, addr, n);
