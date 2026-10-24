@@ -8,6 +8,7 @@
 #include "qemu/bswap.h"
 #include "qemu/timer.h"
 #include "qemu/main-loop.h"
+#include "qemu/rcu.h"
 #include "qemu/thread.h"
 #include "hw/arm/gles-present.h"
 
@@ -34,8 +35,15 @@ typedef struct {
     QemuThread worker;
     QemuMutex lock;
     QemuCond cond;
-    bool worker_up, queued, busy;
+    bool worker_up, queued, busy, on_worker;
     uint32_t job[0x1000 / 4];
+    /* a second thread takes half of a large RGB transfer (scaler_split) */
+    QemuThread helper;
+    QemuCond helper_go, helper_done;
+    bool helper_up;
+    unsigned helper_gen, helper_seen, helper_finished;
+    struct ScalerRgbJob *helper_job;
+    int helper_phase;
 } IPodScalerState;
 
 void ipod_scaler_set_iommu(DeviceState *dev,
@@ -157,6 +165,126 @@ static bool scaler_read_bus(IPodScalerState *s, uint32_t va, void *buf, unsigned
  * ponytail: nearest sampling where the hardware has polyphase taps at +0x70
  * on.
  */
+/* An RGB transfer's work in two halves: the source rows read in, then the destination rows turned and written. */
+typedef struct ScalerRgbJob {
+    IPodScalerState *s;
+    const uint32_t *r;
+    uint32_t *src, *dst;
+    const size_t *xo, *yo;
+    unsigned sw, sh, dw, dh, ss, ds, pitch;
+    bool stiled, dtiled, rot, ok[2];
+} ScalerRgbJob;
+
+static void scaler_rgb_part(ScalerRgbJob *j, int phase, unsigned half)
+{
+    if (phase == 0) {
+        unsigned lo = half ? j->sh / 2 : 0, hi = half ? j->sh : j->sh / 2;
+
+        for (unsigned y = lo; y < hi; y++) {
+            if (!scaler_read_bus(j->s, scaler_row(j->r[0x14 / 4], y, j->ss, ROUND_UP(j->sw * 4, 256), j->stiled),
+                                 j->src + (size_t)y * j->pitch, j->sw * 4)) {
+                j->ok[half] = false;
+                return;
+            }
+        }
+        return;
+    }
+    /* Destination rows in 32-row bands, so each half keeps the turned copy's 32x32 blocks. */
+    unsigned mid = MIN(ROUND_UP(j->dh / 2, 32), j->dh);
+    unsigned lo = half ? mid : 0, hi = half ? j->dh : mid;
+    const uint32_t *src = j->src;
+    uint32_t *dst = j->dst;
+
+    if (j->rot) {
+        for (unsigned by = lo; by < hi; by += 32) {
+            for (unsigned bx = 0; bx < j->dw; bx += 32) {
+                for (unsigned x = bx; x < MIN(bx + 32, j->dw); x++) {
+                    const uint32_t *col = src + j->xo[x];
+                    for (unsigned y = by; y < MIN(by + 32, hi); y++) {
+                        dst[(size_t)y * j->dw + x] = col[j->yo[y]];
+                    }
+                }
+            }
+        }
+    } else {
+        for (unsigned y = lo; y < hi; y++) {
+            const uint32_t *line = src + j->yo[y];
+            uint32_t *row = dst + (size_t)y * j->dw;
+            for (unsigned x = 0; x < j->dw; x++) {
+                row[x] = line[j->xo[x]];
+            }
+        }
+    }
+    for (unsigned y = lo; y < hi; y++) {
+        if (!scaler_write_bus(j->s, scaler_row(j->r[0x34 / 4], y, j->ds, ROUND_UP(j->dw * 4, 256), j->dtiled),
+                              dst + (size_t)y * j->dw, j->dw * 4)) {
+            j->ok[half] = false;
+            return;
+        }
+    }
+}
+
+static void *scaler_helper(void *opaque)
+{
+    IPodScalerState *s = opaque;
+
+    rcu_register_thread();
+    qemu_mutex_lock(&s->lock);
+    for (;;) {
+        while (s->helper_seen == s->helper_gen) {
+            qemu_cond_wait(&s->helper_go, &s->lock);
+        }
+        s->helper_seen = s->helper_gen;
+        ScalerRgbJob *j = s->helper_job;
+        int phase = s->helper_phase;
+        qemu_mutex_unlock(&s->lock);
+        scaler_rgb_part(j, phase, 1);
+        qemu_mutex_lock(&s->lock);
+        s->helper_finished = s->helper_seen;
+        qemu_cond_broadcast(&s->helper_done);
+    }
+    return NULL;
+}
+
+/*
+ * Both halves of a phase, the second on the helper thread when the worker runs a large transfer
+ * (LT_SCALER_SPLIT=off: one thread). CoreAnimation turns every frame of a landscape game, 640x960 on
+ * the iPod touch 4G: ~3.3 ms of one Pixel 10 mid core, often still running at the VBL that frame
+ * was for.
+ */
+static void scaler_split(IPodScalerState *s, ScalerRgbJob *j, int phase)
+{
+    static int split = -1;
+
+    if (split < 0) {
+        const char *v = getenv("LT_SCALER_SPLIT");
+        split = !v || strcmp(v, "off");
+    }
+    if (!split || !s->on_worker || (size_t)j->dw * j->dh < 65536) {
+        scaler_rgb_part(j, phase, 0);
+        scaler_rgb_part(j, phase, 1);
+        return;
+    }
+    if (!s->helper_up) {
+        qemu_cond_init(&s->helper_go);
+        qemu_cond_init(&s->helper_done);
+        qemu_thread_create(&s->helper, "scaler-2", scaler_helper, s, QEMU_THREAD_DETACHED);
+        s->helper_up = true;
+    }
+    qemu_mutex_lock(&s->lock);
+    s->helper_job = j;
+    s->helper_phase = phase;
+    s->helper_gen++;
+    qemu_cond_signal(&s->helper_go);
+    qemu_mutex_unlock(&s->lock);
+    scaler_rgb_part(j, phase, 0);
+    qemu_mutex_lock(&s->lock);
+    while (s->helper_finished != s->helper_gen) {
+        qemu_cond_wait(&s->helper_done, &s->lock);
+    }
+    qemu_mutex_unlock(&s->lock);
+}
+
 static bool scaler_rgb(IPodScalerState *s)
 {
     uint32_t *r = s->job;
@@ -184,12 +312,6 @@ static bool scaler_rgb(IPodScalerState *s)
     sx = sx ? sx : ((uint64_t)sw << 16) / dw;
     sy = sy ? sy : ((uint64_t)sh << 16) / dh;
     uint32_t *src = scaler_scratch(s, 0, sizeof(uint32_t) * pitch * sh);
-    for (unsigned y = 0; y < sh; y++) {
-        if (!scaler_read_bus(s, scaler_row(r[0x14 / 4], y, ss, ROUND_UP(sw * 4, 256), stiled),
-                             src + (size_t)y * pitch, sw * 4)) {
-            return false;
-        }
-    }
     /*
      * Destination (x, y) is src[xo[x] + yo[y]]. Turned, a destination row walks a source column, so the
      * pixels go in 32x32 blocks: the whole frame turned a pixel at a time missed the cache on every read,
@@ -205,33 +327,17 @@ static bool scaler_rgb(IPodScalerState *s)
         yo[y] = cw ? i : rot ? sw - 1 - i : (size_t)i * pitch;
     }
     uint32_t *dst = scaler_scratch(s, 1, sizeof(uint32_t) * dw * dh);
-    if (rot) {
-        for (unsigned by = 0; by < dh; by += 32) {
-            for (unsigned bx = 0; bx < dw; bx += 32) {
-                for (unsigned x = bx; x < MIN(bx + 32, dw); x++) {
-                    const uint32_t *col = src + xo[x];
-                    for (unsigned y = by; y < MIN(by + 32, dh); y++) {
-                        dst[(size_t)y * dw + x] = col[yo[y]];
-                    }
-                }
-            }
-        }
-    } else {
-        for (unsigned y = 0; y < dh; y++) {
-            const uint32_t *line = src + yo[y];
-            uint32_t *row = dst + (size_t)y * dw;
-            for (unsigned x = 0; x < dw; x++) {
-                row[x] = line[xo[x]];
-            }
-        }
+    ScalerRgbJob j = {
+        .s = s, .r = r, .src = src, .dst = dst, .xo = xo, .yo = yo, .sw = sw, .sh = sh, .dw = dw, .dh = dh,
+        .ss = ss, .ds = ds, .pitch = pitch, .stiled = stiled, .dtiled = dtiled, .rot = rot, .ok = { true, true },
+    };
+
+    scaler_split(s, &j, 0);
+    if (!j.ok[0] || !j.ok[1]) {
+        return false;
     }
-    for (unsigned y = 0; y < dh; y++) {
-        if (!scaler_write_bus(s, scaler_row(r[0x34 / 4], y, ds, ROUND_UP(dw * 4, 256), dtiled),
-                              dst + (size_t)y * dw, dw * 4)) {
-            return false;
-        }
-    }
-    return true;
+    scaler_split(s, &j, 1);
+    return j.ok[0] && j.ok[1];
 }
 
 /*
@@ -389,6 +495,7 @@ static void *scaler_worker(void *opaque)
         }
         s->queued = false;
         s->busy = true;
+        s->on_worker = true;
         qemu_mutex_unlock(&s->lock);
         if (!scaler_run(s)) {
             scaler_unsupported(s);

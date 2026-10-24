@@ -41,6 +41,8 @@ static void qemu_mutex_unlock(QemuMutex *m) { (void)m; }
 static void qemu_cond_wait(QemuCond *c, QemuMutex *m) { (void)c; (void)m; assert(0); }
 static void qemu_cond_signal(QemuCond *c) { (void)c; }
 static void qemu_cond_broadcast(QemuCond *c) { (void)c; }
+static void qemu_cond_init(QemuCond *c) { (void)c; }
+static void rcu_register_thread(void) {}
 #define qatomic_read(p) (*(p))
 static bool bql_locked(void) { return false; }
 static void bql_lock(void) {}
