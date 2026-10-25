@@ -11,6 +11,9 @@
 #include "qemu/rcu.h"
 #include "qemu/thread.h"
 #include "hw/arm/gles-present.h"
+#ifdef __aarch64__
+#include <arm_neon.h>
+#endif
 
 /* 7E18 AppleM2ScalerCSCDriver: 0xc0732388 programs formats, 0xc07323f0
  * source geometry, 0xc073246c destination geometry, 0xc0730288 acknowledges
@@ -172,8 +175,49 @@ typedef struct ScalerRgbJob {
     uint32_t *src, *dst;
     const size_t *xo, *yo;
     unsigned sw, sh, dw, dh, ss, ds, pitch;
-    bool stiled, dtiled, rot, ok[2];
+    bool stiled, dtiled, rot, cw, turn4, ok[2];
 } ScalerRgbJob;
+
+#ifdef __aarch64__
+/* d0..d3 get the 4x4 block whose rows are s0..s3, turned about its diagonal. */
+static inline void scaler_t4(const uint32_t *s0, const uint32_t *s1, const uint32_t *s2, const uint32_t *s3,
+                             uint32_t *d0, uint32_t *d1, uint32_t *d2, uint32_t *d3)
+{
+    uint32x4_t a = vld1q_u32(s0), b = vld1q_u32(s1), c = vld1q_u32(s2), d = vld1q_u32(s3);
+    uint64x2_t ab0 = vreinterpretq_u64_u32(vtrn1q_u32(a, b)), ab1 = vreinterpretq_u64_u32(vtrn2q_u32(a, b));
+    uint64x2_t cd0 = vreinterpretq_u64_u32(vtrn1q_u32(c, d)), cd1 = vreinterpretq_u64_u32(vtrn2q_u32(c, d));
+
+    vst1q_u32(d0, vreinterpretq_u32_u64(vtrn1q_u64(ab0, cd0)));
+    vst1q_u32(d1, vreinterpretq_u32_u64(vtrn1q_u64(ab1, cd1)));
+    vst1q_u32(d2, vreinterpretq_u32_u64(vtrn2q_u64(ab0, cd0)));
+    vst1q_u32(d3, vreinterpretq_u32_u64(vtrn2q_u64(ab1, cd1)));
+}
+
+/*
+ * Destination rows lo..hi of a quarter turn at 1:1, in 4x4 blocks without the offset tables: destination (x, y) is
+ * source row r(x) = cw ? sh - 1 - x : x, column c(y) = cw ? y : sw - 1 - y. Four destination rows read four
+ * adjacent source columns, which turned the other way come out last row first.
+ */
+static void scaler_turn4(ScalerRgbJob *j, unsigned lo, unsigned hi)
+{
+    unsigned sw = j->sw, sh = j->sh, dw = j->dw;
+
+    for (unsigned bx = 0; bx < dw; bx += 32) {
+        for (unsigned y = lo; y < hi; y += 4) {
+            unsigned c0 = j->cw ? y : sw - 4 - y;
+            uint32_t *d = j->dst + (size_t)y * dw;
+            uint32_t *d0 = j->cw ? d : d + 3 * (size_t)dw, *d1 = j->cw ? d + dw : d + 2 * (size_t)dw;
+            uint32_t *d2 = j->cw ? d + 2 * (size_t)dw : d + dw, *d3 = j->cw ? d + 3 * (size_t)dw : d;
+            for (unsigned x = bx; x < bx + 32 && x < dw; x += 4) {
+                size_t r0 = j->cw ? sh - 1 - x : x;
+                const uint32_t *s0 = j->src + r0 * j->pitch + c0;
+                ptrdiff_t step = j->cw ? -(ptrdiff_t)j->pitch : (ptrdiff_t)j->pitch;
+                scaler_t4(s0, s0 + step, s0 + 2 * step, s0 + 3 * step, d0 + x, d1 + x, d2 + x, d3 + x);
+            }
+        }
+    }
+}
+#endif
 
 static void scaler_rgb_part(ScalerRgbJob *j, int phase, unsigned half)
 {
@@ -195,6 +239,23 @@ static void scaler_rgb_part(ScalerRgbJob *j, int phase, unsigned half)
     const uint32_t *src = j->src;
     uint32_t *dst = j->dst;
 
+#ifdef __aarch64__
+    if (j->turn4) {
+        /* A band at a time, written out while it is still in the cache. */
+        for (unsigned by = lo; by < hi; by += 32) {
+            unsigned be = MIN(by + 32, hi);
+            scaler_turn4(j, by, be);
+            for (unsigned y = by; y < be; y++) {
+                if (!scaler_write_bus(j->s, scaler_row(j->r[0x34 / 4], y, j->ds, ROUND_UP(j->dw * 4, 256), j->dtiled),
+                                      dst + (size_t)y * j->dw, j->dw * 4)) {
+                    j->ok[half] = false;
+                    return;
+                }
+            }
+        }
+        return;
+    }
+#endif
     if (j->rot) {
         for (unsigned by = lo; by < hi; by += 32) {
             for (unsigned bx = 0; bx < j->dw; bx += 32) {
@@ -327,9 +388,20 @@ static bool scaler_rgb(IPodScalerState *s)
         yo[y] = cw ? i : rot ? sw - 1 - i : (size_t)i * pitch;
     }
     uint32_t *dst = scaler_scratch(s, 1, sizeof(uint32_t) * dw * dh);
+    /*
+     * A quarter turn at 1:1 (a landscape game on the iPod touch 4G, every frame) goes through scaler_turn4 on arm64
+     * hosts: about a third less time than the offset tables on a Poco F3 mid core (LT_SCALER_TURN4=off for A/B).
+     */
+    static int turn4 = -1;
+    if (turn4 < 0) {
+        const char *v = getenv("LT_SCALER_TURN4");
+        turn4 = !v || strcmp(v, "off");
+    }
     ScalerRgbJob j = {
         .s = s, .r = r, .src = src, .dst = dst, .xo = xo, .yo = yo, .sw = sw, .sh = sh, .dw = dw, .dh = dh,
-        .ss = ss, .ds = ds, .pitch = pitch, .stiled = stiled, .dtiled = dtiled, .rot = rot, .ok = { true, true },
+        .ss = ss, .ds = ds, .pitch = pitch, .stiled = stiled, .dtiled = dtiled, .rot = rot, .cw = cw,
+        .turn4 = turn4 && rot && sx == 0x10000 && sy == 0x10000 && dw == sh && dh == sw && !(dw % 4) && !(dh % 4),
+        .ok = { true, true },
     };
 
     scaler_split(s, &j, 0);
