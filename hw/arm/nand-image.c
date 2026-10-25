@@ -13,6 +13,9 @@
 #include "block/block.h"
 #include "system/runstate.h"
 #include "hw/arm/nand-image.h"
+#ifdef _WIN32
+#include <winioctl.h>
+#endif
 
 struct NANDImage {
     BlockBackend *chip[NAND_IMAGE_MAX_CHIPS];
@@ -22,6 +25,30 @@ struct NANDImage {
     uint8_t *buffer;
     VMChangeStateEntry *vm_state;
 };
+
+/*
+ * Size a new, empty file. On Windows it is made sparse first (an overlay
+ * chip is gigabytes the guest mostly never writes), and sized through the
+ * handle: MinGW's ftruncate refuses to grow a file past the disk's free
+ * space, sparse or not, and crashes where FindFirstVolumeW fails (Wine).
+ */
+static int nand_image_size_new(int fd, size_t size)
+{
+#ifdef _WIN32
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    FILE_END_OF_FILE_INFO end = { .EndOfFile.QuadPart = size };
+    DWORD returned;
+
+    DeviceIoControl(h, FSCTL_SET_SPARSE, NULL, 0, NULL, 0, &returned, NULL);
+    if (!SetFileInformationByHandle(h, FileEndOfFileInfo, &end, sizeof(end))) {
+        errno = GetLastError() == ERROR_DISK_FULL ? ENOSPC : EIO;
+        return -1;
+    }
+    return 0;
+#else
+    return ftruncate(fd, size);
+#endif
+}
 
 BlockBackend *nand_image_open_file(DeviceState *owner, const char *path,
                                    size_t size, bool writable, Error **errp)
@@ -35,7 +62,7 @@ BlockBackend *nand_image_open_file(DeviceState *owner, const char *path,
     int fd = open(path, (writable ? O_RDWR | O_CREAT : O_RDONLY) | O_BINARY, 0644);
 
     if (fd < 0 || fstat(fd, &st) < 0 ||
-        (writable && st.st_size == 0 && ftruncate(fd, size) < 0)) {
+        (writable && st.st_size == 0 && nand_image_size_new(fd, size) < 0)) {
         error_setg_errno(errp, errno, "cannot open NAND file %s", path);
         if (fd >= 0) {
             close(fd);
