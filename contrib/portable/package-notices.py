@@ -203,9 +203,15 @@ def main():
             archive = subprocess.check_output(['git', 'archive', slirp_revision], cwd=slirp)
             subprocess.run(['tar', '-xf', '-', '-C', temporary], input=archive, check=True)
             subprocess.run(['git', 'apply', '-'], cwd=temporary, input=patch, check=True)
-            names = subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', slirp_revision], cwd=slirp, text=True).splitlines()
-            for name in names:
-                if (Path(temporary) / name).read_bytes() != (slirp / name).read_bytes():
+            entries = subprocess.check_output(['git', 'ls-tree', '-r', slirp_revision], cwd=slirp, text=True).splitlines()
+            for entry in entries:
+                metadata, name = entry.split('\t', 1)
+                if metadata.startswith('160000 '):
+                    continue  # Fuzzing corpus submodules are not libslirp inputs.
+                expected, actual = Path(temporary) / name, slirp / name
+                same = (actual.is_symlink() and os.readlink(expected) == os.readlink(actual)) if metadata.startswith('120000 ') else (
+                    not actual.is_symlink() and expected.read_bytes() == actual.read_bytes())
+                if not same:
                     parser.error('libslirp source differs from pinned integration: ' + name)
         for name in ['COPYRIGHT', 'LICENSE']:
             files['dependencies/libslirp/' + name] = git_bytes(slirp_revision, name, slirp)
