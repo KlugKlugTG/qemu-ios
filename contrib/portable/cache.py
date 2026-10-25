@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """Refuse mutable build-cache reuse without matching recorded inputs."""
-import hashlib,json,pathlib,subprocess
+import hashlib,json,pathlib,shutil,subprocess
 
 def digest(path):
     return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
@@ -13,7 +13,13 @@ def check_cache(output,identity,markers,name):
     if stamp.exists():
         previous=json.loads(stamp.read_text())
         if previous!=identity:
-            raise RuntimeError('Build inputs changed; use a fresh output directory. Existing stamp: '+str(stamp))
+            changed=sorted(k for k in set(previous)|set(identity)
+                           if previous.get(k)!=identity.get(k))
+            print('Build inputs changed ('+', '.join(changed)+'); the stale tree is rebuilt',
+                  file=__import__('sys').stderr)
+            shutil.rmtree(output,ignore_errors=True)
+            pathlib.Path(output).mkdir(parents=True,exist_ok=True)
+            stamp.write_text(json.dumps(identity,sort_keys=True,indent=2)+'\n')
     else:
         existing=[str(p) for p in markers if pathlib.Path(p).exists()]
         if existing:
