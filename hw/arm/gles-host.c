@@ -5264,10 +5264,33 @@ static bool gles_finish_flush(void)
     return on;
 }
 
-/* Texture `texture`'s pixels into its surface's guest memory. */
-static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
+/* Return the current guest FBO's IOSurface texture when it can be read in place. */
+static GLuint gles_bound_surface_texture(GLint *framebuffer, uint32_t base)
 {
-    GLint pack = 4, framebuffer = 0;
+    GLint kind = GL_NONE, texture = 0, level = -1;
+
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING_EXT, framebuffer);
+    if (!gh.bound_framebuffer || !*framebuffer) return 0;
+    glGetFramebufferAttachmentParameterivEXT(GL_FRAMEBUFFER_EXT,
+        GL_COLOR_ATTACHMENT0_EXT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE_EXT, &kind);
+    if (kind != GL_TEXTURE) return 0;
+    glGetFramebufferAttachmentParameterivEXT(GL_FRAMEBUFFER_EXT,
+        GL_COLOR_ATTACHMENT0_EXT, GL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME_EXT, &texture);
+    if (texture <= 0) return 0;
+    GLESSurface *s = g_hash_table_lookup(gh.surfaces, GUINT_TO_POINTER((GLuint)texture));
+    if (!s || !s->dirty || (base && s->base != base)) return 0;
+    glGetFramebufferAttachmentParameterivEXT(GL_FRAMEBUFFER_EXT,
+        GL_COLOR_ATTACHMENT0_EXT, GL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL_EXT, &level);
+    if (level != 0 ||
+        glCheckFramebufferStatusEXT(GL_FRAMEBUFFER_EXT) != GL_FRAMEBUFFER_COMPLETE_EXT) return 0;
+    return (GLuint)texture;
+}
+
+/* Texture `texture`'s pixels into its surface's guest memory. */
+static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s,
+                                  bool use_current_fbo, GLint framebuffer, bool *finished)
+{
+    GLint pack = 4;
     bool rgb555 = s->format == GLES_SURFACE_RGB555;
     unsigned bpp = (s->format == GLES_SURFACE_RGB565 || rgb555) ? 2 : 4;
     size_t need = (size_t)s->width * s->height * 4;
@@ -5285,20 +5308,27 @@ static int gles_surface_writeback(CPUState *cpu, GLuint texture, GLESSurface *s)
         pixels = fresh = g_malloc(need);
     }
 
-    /* Read through a scratch framebuffer: the texture is no longer the bound
-     * target by the time its frame is flushed. */
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING_EXT, &framebuffer);
-    if (!gh.sync_fbo) gh.sync_fbo = gles_private_name(glIsFramebufferEXT);
-    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, gh.sync_fbo);
-    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, s->target, texture, 0);
+    if (!use_current_fbo) {
+        if (!*finished) {
+            glFinish();
+            *finished = true;
+        }
+        if (!gh.sync_fbo) gh.sync_fbo = gles_private_name(glIsFramebufferEXT);
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, gh.sync_fbo);
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, s->target, texture, 0);
+    }
     glGetIntegerv(GL_PACK_ALIGNMENT, &pack);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0, s->width, s->height,
         bpp == 2 && !rgb555 ? GL_RGB : s->format == GLES_SURFACE_RGBA32 ? GL_RGBA : GL_BGRA,
         bpp == 2 && !rgb555 ? GL_UNSIGNED_SHORT_5_6_5 : GL_UNSIGNED_BYTE, pixels);
     glPixelStorei(GL_PACK_ALIGNMENT, pack);
-    glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, s->target, 0, 0);
-    glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, framebuffer);
+    if (!use_current_fbo) {
+        glFramebufferTexture2DEXT(GL_FRAMEBUFFER_EXT, GL_COLOR_ATTACHMENT0_EXT, s->target, 0, 0);
+        glBindFramebufferEXT(GL_FRAMEBUFFER_EXT, framebuffer);
+    } else {
+        *finished = true;
+    }
     if (glGetError() != GL_NO_ERROR) {
         gles_refuse("surface:writeback");
         s->dirty = false;
@@ -5360,6 +5390,9 @@ static int gles_surface_flush(CPUState *cpu, uint32_t base)
     GHashTableIter it;
     gpointer key, value;
     unsigned attempted = 0, copied = 0;
+    GLuint bound_texture = 0;
+    GLint framebuffer = 0;
+    bool has_dirty = false, finished = false;
 
     if (!gh.surfaces) {
         gles_report_surface_flush(base, 0, 0, 0, 0);
@@ -5369,8 +5402,34 @@ static int gles_surface_flush(CPUState *cpu, uint32_t base)
     while (g_hash_table_iter_next(&it, &key, &value)) {
         GLESSurface *s = value;
         if (s->dirty && (!base || s->base == base)) {
+            has_dirty = true;
+            break;
+        }
+    }
+    if (!has_dirty) {
+        gles_report_surface_flush(base, g_hash_table_size(gh.surfaces), 0, 0, 0);
+        return 0;
+    }
+
+    bound_texture = gles_bound_surface_texture(&framebuffer, base);
+    if (bound_texture) {
+        GLESSurface *s = g_hash_table_lookup(gh.surfaces, GUINT_TO_POINTER(bound_texture));
+        attempted++;
+        if (gles_surface_writeback(cpu, bound_texture, s, true, framebuffer, &finished)) {
+            gles_report_surface_flush(base, g_hash_table_size(gh.surfaces),
+                                      attempted, copied, -1);
+            return -1;
+        }
+        copied++;
+    }
+
+    g_hash_table_iter_init(&it, gh.surfaces);
+    while (g_hash_table_iter_next(&it, &key, &value)) {
+        GLESSurface *s = value;
+        if (s->dirty && (!base || s->base == base)) {
             attempted++;
-            if (gles_surface_writeback(cpu, GPOINTER_TO_UINT(key), s)) {
+            if (gles_surface_writeback(cpu, GPOINTER_TO_UINT(key), s, false,
+                                       framebuffer, &finished)) {
                 gles_report_surface_flush(base, g_hash_table_size(gh.surfaces),
                                           attempted, copied, -1);
                 return -1;

@@ -173,6 +173,8 @@ int main(void)
         for(int x=0;x<4;x++) assert(!memcmp(ram+y*20+x*4,"\xff\xff\0\xff",4));
         for(int x=16;x<20;x++) assert(ram[y*20+x]==0xa5);
     }
+    /* Read the bound IOSurface in place instead of allocating the scratch FBO. */
+    assert(!gh.sync_fbo);
     /* Current render target must survive a refresh; sampled aliases must see DMA. */
     glEnable(GL_TEXTURE_RECTANGLE_ARB);
     memset(ram,0,40);assert(gles_refresh_surfaces(NULL));
