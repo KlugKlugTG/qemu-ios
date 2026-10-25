@@ -36,6 +36,7 @@
 #include "system/hw_accel.h"
 #include "exec/cpu-common.h"
 #include "qemu/thread.h"
+#define IOS_FRAME_PATH_DEFINES_WAIT /* strong definitions on Windows: see the header */
 #include "qemu/ios-frame-path.h"
 #include "qemu/main-loop.h"
 #include "qemu/plugin.h"

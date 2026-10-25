@@ -19,6 +19,7 @@
 #include "qemu/timer.h"
 #include "qemu/seqlock.h"
 #include "qemu/cutils.h"
+#define IOS_FRAME_PATH_DEFINES_EVENT /* strong definitions on Windows: see the header */
 #include "qemu/ios-frame-path.h"
 #include "hw/arm/ipod_touch_lis302dl.h"
 #include "qemu/aio.h"
