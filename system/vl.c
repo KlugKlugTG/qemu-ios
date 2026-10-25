@@ -2849,11 +2849,14 @@ extern void __llvm_profile_reset_counters(void) __attribute__((weak));
 static void *lt_pgo_thread(void *opaque)
 {
     const char *reset = getenv("LT_PGO_RESET"), *file = getenv("LT_PGO_FILE");
-    unsigned dump = atoi(getenv("LT_PGO_DUMP")), at = 0;
-    unsigned every = atoi(getenv("LT_PGO_EVERY"));
+    unsigned dump = lt_pgo_num("LT_PGO_DUMP"), at = 0;
+    unsigned every = lt_pgo_num("LT_PGO_EVERY");
 
+    if (!every) {
+        every = dump ? dump : 300;
+    }
     if (reset && __llvm_profile_reset_counters) {
-        at = atoi(reset);
+        at = lt_pgo_num("LT_PGO_RESET");
         g_usleep((gulong)at * G_USEC_PER_SEC);
         __llvm_profile_reset_counters();
         fprintf(stderr, "[pgo] counters reset at %u s\n", at);
@@ -2878,11 +2881,21 @@ static void *lt_pgo_thread(void *opaque)
     return NULL;
 }
 
+static unsigned lt_pgo_num(const char *name)
+{
+    const char *v = getenv(name);
+
+    return v ? (unsigned)atoi(v) : 0;
+}
+
 static void lt_pgo_start(void)
 {
     static QemuThread thread;
 
-    if (__llvm_profile_write_file && getenv("LT_PGO_DUMP")) {
+    /* Any of the three names asks for the profile: a session that only sets the file and an
+     * interval is as much a request as one that names a single dump second. */
+    if (__llvm_profile_write_file && (getenv("LT_PGO_FILE") || getenv("LT_PGO_EVERY") ||
+                                      getenv("LT_PGO_DUMP"))) {
         qemu_thread_create(&thread, "pgo", lt_pgo_thread, NULL, QEMU_THREAD_DETACHED);
     }
 }
