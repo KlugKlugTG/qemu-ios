@@ -114,7 +114,9 @@ def main():
             parser.error('tracked source differs from recorded commit: ' + name)
         return data
 
-    for name in ['COPYING', 'COPYING.LIB', 'LICENSE', 'licenses/S5LBox-MIT.txt',
+    # Project-specific grants are retained from each selected source below;
+    # this branch has no aggregate licenses/S5LBox-MIT.txt document.
+    for name in ['COPYING', 'COPYING.LIB', 'LICENSE',
                  'hw/arm/powervr/LICENSE.md', 'hw/arm/powervr/README.md']:
         files['qemu/' + name] = tracked(name)
     snippets = []
