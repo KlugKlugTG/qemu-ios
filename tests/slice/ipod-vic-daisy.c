@@ -2,10 +2,12 @@
  *
  * SLICE:state include/hw/intc/pl192.h define PL192_
  * SLICE:state include/hw/intc/pl192.h range struct PL192State { | \n};\n
- * SLICE hw/intc/pl192.c fn pl192_raise pl192_lower pl192_priority_sorter pl192_update pl192_mask_priority pl192_unmask_priority pl192_irq_ack pl192_irq_fin pl192_irq_handler
+ * SLICE hw/intc/pl192.c fn pl192_raise pl192_lower pl192_priority_sorter pl192_update pl192_mask_priority pl192_unmask_priority pl192_irq_ack pl192_irq_fin pl192_skip_same_level pl192_irq_handler
  */
 #include <assert.h>
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 typedef int SysBusDevice;
