@@ -27,7 +27,7 @@ index d8fe7cb2..ab6cfdcb 100644
          } else {
              struct socket *so;
 diff --git a/src/libslirp.h b/src/libslirp.h
-index 240dfe8b..f96ddbbc 100644
+index 240dfe8b..b9d6918d 100644
 --- a/src/libslirp.h
 +++ b/src/libslirp.h
 @@ -268,6 +268,28 @@ Slirp *slirp_init(int restricted, bool in_enabled, struct in_addr vnetwork,
@@ -127,7 +127,7 @@ index 63330314..097b0b94 100644
  int get_dns6_addr(struct in6_addr *pdns6_addr, uint16_t *pdns_port,
                    uint32_t *scope_id);
 diff --git a/src/socket.c b/src/socket.c
-index 8ca61d74..b92c8ab8 100644
+index 8ca61d74..9d9ebdd8 100644
 --- a/src/socket.c
 +++ b/src/socket.c
 @@ -976,6 +976,14 @@ void sofwdrain(struct socket *so)
@@ -155,7 +155,7 @@ index 8ca61d74..b92c8ab8 100644
          if (so->so_fport == htons(53) &&
                  get_dns6_addr(&sin->sin6_addr, &sin->sin6_port, &scope_id) >= 0) {
              sin->sin6_scope_id = scope_id;
-@@ -1019,14 +1030,26 @@ static bool sotranslate_out6(Slirp *s, struct socket *so, struct sockaddr_in6 *s
+@@ -1019,14 +1030,36 @@ static bool sotranslate_out6(Slirp *s, struct socket *so, struct sockaddr_in6 *s
  
  int sotranslate_out(struct socket *so, struct sockaddr_storage *addr)
  {
@@ -167,24 +167,34 @@ index 8ca61d74..b92c8ab8 100644
 -        ok = sotranslate_out4(so->slirp, so, (struct sockaddr_in *)addr);
 +        ok = sotranslate_out4(s, so, (struct sockaddr_in *)addr);
 +        /* The host's DNS server may sit on the LAN; that is the one exemption. */
-+        if (ok && s->local_network_blocked &&
++        uint32_t target4 = ntohl(((struct sockaddr_in *)addr)->sin_addr.s_addr);
++        if (ok &&
 +            !(!s->disable_dns && so->so_faddr.s_addr == s->vnameserver_addr.s_addr) &&
-+            slirp_local_network_addr4(((struct sockaddr_in *)addr)->sin_addr)) {
++            ((target4 >> 24) == 127 || !(target4 >> 24) ||
++             (s->local_network_blocked &&
++              slirp_local_network_addr4(((struct sockaddr_in *)addr)->sin_addr)))) {
 +            ok = false;
 +        }
          break;
      case AF_INET6:
 -        ok = sotranslate_out6(so->slirp, so, (struct sockaddr_in6 *)addr);
 +        ok = sotranslate_out6(s, so, (struct sockaddr_in6 *)addr);
-+        if (ok && s->local_network_blocked &&
++        const struct in6_addr *target6 = &((struct sockaddr_in6 *)addr)->sin6_addr;
++        uint32_t mapped4;
++        memcpy(&mapped4, &target6->s6_addr[12], sizeof(mapped4));
++        mapped4 = ntohl(mapped4);
++        if (ok &&
 +            !(!s->disable_dns && in6_equal(&so->so_faddr6, &s->vnameserver_addr6)) &&
-+            slirp_local_network_addr6(&((struct sockaddr_in6 *)addr)->sin6_addr)) {
++            (IN6_IS_ADDR_LOOPBACK(target6) || IN6_IS_ADDR_UNSPECIFIED(target6) ||
++             (IN6_IS_ADDR_V4MAPPED(target6) &&
++              ((mapped4 >> 24) == 127 || !(mapped4 >> 24))) ||
++             (s->local_network_blocked && slirp_local_network_addr6(target6)))) {
 +            ok = false;
 +        }
          break;
      }
  
-@@ -1065,6 +1088,9 @@ void sotranslate_in(struct socket *so, struct sockaddr_storage *addr)
+@@ -1065,6 +1098,9 @@ void sotranslate_in(struct socket *so, struct sockaddr_storage *addr)
                  sin->sin_port == dns_port &&
                  sin->sin_addr.s_addr == sin_addr.s_addr)
              sin->sin_port = htons(53);
