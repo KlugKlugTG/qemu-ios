@@ -2841,7 +2841,13 @@ void qmp_x_exit_preconfig(Error **errp)
  * A profile-instrumented engine (-fprofile-generate, LT_ENGINE_CFLAGS) has no exit at which to write
  * its profile on Android, where the process is killed: LT_PGO_RESET=S zeroes the counters S seconds
  * after start and LT_PGO_DUMP=S writes them to LT_PGO_FILE then, so the profile covers that window.
+ * Not on macOS: ld64 refuses weak references nothing defines, and only Android builds are profiled.
  */
+#ifdef __APPLE__
+static void lt_pgo_start(void)
+{
+}
+#else
 extern int __llvm_profile_write_file(void) __attribute__((weak));
 extern void __llvm_profile_set_filename(const char *name) __attribute__((weak));
 extern void __llvm_profile_reset_counters(void) __attribute__((weak));
@@ -2875,6 +2881,7 @@ static void lt_pgo_start(void)
         qemu_thread_create(&thread, "pgo", lt_pgo_thread, NULL, QEMU_THREAD_DETACHED);
     }
 }
+#endif
 
 void qemu_init(int argc, char **argv)
 {

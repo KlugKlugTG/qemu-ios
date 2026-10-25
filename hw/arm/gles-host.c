@@ -219,11 +219,10 @@ void gles_eagl_iosurface_unlock(void);
 
 #if defined(GLES_HOST_EGL) || defined(GLES_HOST_WGL)
 #include "gles-host-fence.c.inc"
-
-/* gles-host-queue.c.inc: fn on the thread that holds the host contexts. */
+#endif
+/* gles-host-queue.c.inc (every backend, CGL too): fn on the thread that holds the host contexts. */
 static void gles_queue_run(void (*fn)(void *), void *opaque);
 static void gles_queue_forget(void);
-#endif
 #ifdef GLES_HOST_EGL_ES
 #include "gles-host-native.c.inc"
 #ifdef __ANDROID__
