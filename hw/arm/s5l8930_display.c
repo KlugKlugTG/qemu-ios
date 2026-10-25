@@ -360,6 +360,18 @@ static bool vbl_irq_first(void)
 }
 
 /* LT_FRAME_COPY_UNLOCKED=off copies the latched frame to the console with the BQL held. */
+/* LT_LATCH_WAIT_UNLOCKED=off: the latch waits for the GL thread's presents with the BQL held (A/B). */
+static bool latch_wait_unlocked(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_LATCH_WAIT_UNLOCKED");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 static bool frame_copy_unlocked(void)
 {
     static int on = -1;
@@ -1053,8 +1065,18 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
 {
     unsigned w, h;
     size_t need;
+    bool unlocked = vbl && bql_locked();
+    /*
+     * A layer may be a GL frame still being copied in. The wait only has to end before the pixels
+     * are read, below without the BQL; waited for here, with it held, the main loop kept the vCPU
+     * out for as long as the GL thread took to get through the game's queued calls to its present,
+     * up to 20 ms on a Poco F3 in Epic Citadel (the GL thread never takes the BQL).
+     */
+    bool wait_unlocked = unlocked && latch_wait_unlocked();
 
-    gles_present_wait();   /* a layer may be a GL frame still being copied in */
+    if (!wait_unlocked) {
+        gles_present_wait();
+    }
     panel_size(s, &w, &h);
     if (trace_event_get_state_backends(TRACE_S5L8930_DISPLAY_LOG)) {
         static unsigned n;
@@ -1092,9 +1114,11 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
      * swap below is locked again. A movie frame too: composed under the lock it held the BQL ~8 ms
      * every vsync (Asphalt 5's intro on the iPod touch 4G).
      */
-    bool unlocked = vbl && bql_locked();
     if (unlocked) {
         bql_unlock();
+    }
+    if (wait_unlocked) {
+        gles_present_wait();
     }
     if (video) {
         size_t vlen = (size_t)vp.sw * vp.sh * 3 / 2;
