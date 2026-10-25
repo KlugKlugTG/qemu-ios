@@ -2846,6 +2846,8 @@ extern int __llvm_profile_write_file(void) __attribute__((weak));
 extern void __llvm_profile_set_filename(const char *name) __attribute__((weak));
 extern void __llvm_profile_reset_counters(void) __attribute__((weak));
 
+static unsigned lt_pgo_num(const char *name);
+
 static void *lt_pgo_thread(void *opaque)
 {
     const char *reset = getenv("LT_PGO_RESET"), *file = getenv("LT_PGO_FILE");
