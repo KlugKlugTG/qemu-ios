@@ -13,7 +13,7 @@ env['PKG_CONFIG_PATH']=str(crypto_prefix/'lib/pkgconfig')+':'+str(prefix/'lib/pk
 if a.abi!='linux': env['PKG_CONFIG_LIBDIR']=env['PKG_CONFIG_PATH']
 pc=out/'target-pkg-config'
 pc.write_text('#!/bin/sh\nexec pkg-config --static "$@"\n');pc.chmod(0o755);env['PKG_CONFIG']=str(pc)
-args=[src/'configure','--target-list=arm-softmmu','--without-default-features','--without-default-devices','--with-devices-arm=portable','--enable-tcg','--enable-pixman','--enable-gcrypt','--python=/usr/bin/python3','--disable-docs','--disable-tools','--disable-werror','--disable-pie','--extra-cflags=-fPIC -DQEMU_IOS_PORTABLE_CRYPTO','--extra-ldflags=-L'+str(prefix/'lib'),'--audio-drv-list=']
+args=[src/'configure','--target-list=arm-softmmu','--without-default-features','--without-default-devices','--with-devices-arm=portable','--enable-tcg','--enable-pixman','--enable-gcrypt','--enable-slirp','--python=/usr/bin/python3','--disable-docs','--disable-tools','--disable-werror','--disable-pie','--extra-cflags=-fPIC -DQEMU_IOS_PORTABLE_CRYPTO','--extra-ldflags=-L'+str(prefix/'lib'),'--audio-drv-list=']
 if a.cpp_standard:
  if a.abi!='linux':p.error('--cpp-standard is a Linux packaging option')
  args+=['-Dcpp_std='+a.cpp_standard]

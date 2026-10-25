@@ -38,7 +38,14 @@ if enable_passt
   system_ss.add(files('passt.c'))
 endif
 system_ss.add(when: slirp, if_true: files('slirp.c'))
-if host_os == 'darwin'
+# host_os stays 'linux' for the Android cross build (QEMU only records Android as a
+# rust os variant), so the target is asked of the compiler itself.
+compiling_for_android = cc.compiles('''
+#ifndef __ANDROID__
+#error not Android
+#endif
+''', name: 'Android target')
+if host_os == 'darwin' or compiling_for_android
   system_ss.add(when: slirp, if_true: files('slirp-dns.c'))
 endif
 system_ss.add(when: vde, if_true: files('vde.c'))

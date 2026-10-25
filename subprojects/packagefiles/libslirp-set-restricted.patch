@@ -45,7 +45,7 @@ index 240dfe8b..f96ddbbc 100644
 + * side (10/8, 172.16/12, 192.168/16, 169.254/16, 224/4, fc00::/7, fe80::/10,
 + * ff00::/8). Refused, such a connection or datagram fails as if unreachable;
 + * loopback forwards stay reachable, and so does the host's own DNS server (the
-+ * guest's 10.0.2.3) unless slirp_set_dns_forward gives a resolver instead. Allowed by default; takes effect on the next connection. */
++ * guest's 10.0.2.3). slirp_set_dns_forward overrides DNS independently (Android has no resolv.conf). Allowed by default; takes effect on the next connection. */
 +SLIRP_EXPORT
 +void slirp_set_local_network(Slirp *slirp, int allowed);
 +
@@ -134,7 +134,7 @@ index 8ca61d74..b92c8ab8 100644
  static bool sotranslate_out4(Slirp *s, struct socket *so, struct sockaddr_in *sin)
  {
      if (!s->disable_dns && so->so_faddr.s_addr == s->vnameserver_addr.s_addr) {
-+        if (s->local_network_blocked && s->dns_forward.sin_port) {
++        if (s->dns_forward.sin_port) {
 +            if (so->so_fport != htons(53) || so->so_type != IPPROTO_UDP) {
 +                return false;
 +            }
@@ -149,7 +149,7 @@ index 8ca61d74..b92c8ab8 100644
  {
      if (!s->disable_dns && in6_equal(&so->so_faddr6, &s->vnameserver_addr6)) {
          uint32_t scope_id;
-+        if (s->local_network_blocked && s->dns_forward.sin_port) {
++        if (s->dns_forward.sin_port) {
 +            return false; /* the guest falls back to its IPv4 nameserver */
 +        }
          if (so->so_fport == htons(53) &&
