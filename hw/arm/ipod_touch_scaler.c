@@ -11,6 +11,8 @@
 #include "qemu/rcu.h"
 #include "qemu/thread.h"
 #include "hw/arm/gles-present.h"
+#include "system/physmem.h"
+#include "system/ram_addr.h"
 #ifdef __aarch64__
 #include <arm_neon.h>
 #endif
@@ -175,8 +177,92 @@ typedef struct ScalerRgbJob {
     uint32_t *src, *dst;
     const size_t *xo, *yo;
     unsigned sw, sh, dw, dh, ss, ds, pitch;
-    bool stiled, dtiled, rot, cw, turn4, ok[2];
+    bool stiled, dtiled, rot, cw, turn4, direct, ok[2];
+    const struct ScalerRow *srows, *drows;
 } ScalerRgbJob;
+
+/* A row of a surface in host memory: its bytes before `split` from lo, the rest from hi (both indexed from the row's
+ * start), since a row in guest RAM can run over into a page that is somewhere else on the host. */
+typedef struct ScalerRow {
+    uint8_t *lo, *hi;
+    unsigned split;
+} ScalerRow;
+
+#ifdef __aarch64__
+static inline void *scaler_at(const ScalerRow *row, unsigned off)
+{
+    return (off < row->split ? row->lo : row->hi) + off;
+}
+
+/* The host address of the guest RAM page at bus address `va` and its RAM offset; NULL if it is unmapped or not RAM. */
+static uint8_t *scaler_ram_page(IPodScalerState *s, uint32_t va, bool write, ram_addr_t *ram)
+{
+    hwaddr pa = scaler_pa(s, va), xlat, len = 0x1000;
+    MemoryRegion *mr;
+
+    if (pa == (hwaddr)-1 || (pa & 0xfff)) {
+        return NULL;
+    }
+    mr = address_space_translate(&address_space_memory, pa, &xlat, &len, write, MEMTXATTRS_UNSPECIFIED);
+    if (!memory_region_is_ram(mr) || (write && mr->readonly) || len < 0x1000) {
+        return NULL;
+    }
+    *ram = memory_region_get_ram_addr(mr) + xlat;
+    return qemu_map_ram_ptr(NULL, *ram);
+}
+
+/*
+ * Rows 0..n of a surface (as scaler_row addresses them) as host pointers into guest RAM, each page translated once
+ * while the rows walk it; a written surface's pages go into `pages` to be marked dirty. False if a page is not RAM,
+ * a row is longer than a page, or a row does not start on 16 bytes (the turn's 4-pixel groups would straddle pages).
+ * The caller holds the RCU read lock while the pointers are in use.
+ */
+static bool scaler_rows_ram(IPodScalerState *s, ScalerRow *out, unsigned n, uint32_t base, unsigned stride,
+                            unsigned bytes, bool tiled, GArray *pages)
+{
+    uint32_t seen[2] = { 1, 1 };   /* never a page address */
+    uint8_t *host[2] = { NULL, NULL };
+    unsigned next = 0;
+
+    if (bytes > 0x1000) {
+        return false;
+    }
+    for (unsigned y = 0; y < n; y++) {
+        uint32_t va = scaler_row(base, y, stride, ROUND_UP(bytes, 256), tiled);
+        uint32_t pg[2] = { va & ~0xfffu, (va + bytes - 1) & ~0xfffu };
+        uint8_t *p[2];
+
+        if (va & 15) {
+            return false;
+        }
+        for (int k = 0; k < 2; k++) {
+            if (k && pg[1] == pg[0]) {
+                p[1] = p[0];
+                break;
+            }
+            if (seen[0] == pg[k] || seen[1] == pg[k]) {
+                p[k] = host[seen[1] == pg[k]];
+                continue;
+            }
+            ram_addr_t ram;
+            p[k] = scaler_ram_page(s, pg[k], pages != NULL, &ram);
+            if (!p[k]) {
+                return false;
+            }
+            if (pages) {
+                g_array_append_val(pages, ram);
+            }
+            seen[next] = pg[k];
+            host[next] = p[k];
+            next ^= 1;
+        }
+        out[y].lo = p[0] + (va & 0xfff);
+        out[y].split = 0x1000 - (va & 0xfff);
+        out[y].hi = p[1] - out[y].split;
+    }
+    return true;
+}
+#endif
 
 #ifdef __aarch64__
 /* d0..d3 get the 4x4 block whose rows are s0..s3, turned about its diagonal. */
@@ -196,23 +282,24 @@ static inline void scaler_t4(const uint32_t *s0, const uint32_t *s1, const uint3
 /*
  * Destination rows lo..hi of a quarter turn at 1:1, in 4x4 blocks without the offset tables: destination (x, y) is
  * source row r(x) = cw ? sh - 1 - x : x, column c(y) = cw ? y : sw - 1 - y. Four destination rows read four
- * adjacent source columns, which turned the other way come out last row first.
+ * adjacent source columns, which turned the other way come out last row first. Rows are found through the job's row
+ * tables: the scratch copies, or the surfaces in guest RAM themselves.
  */
 static void scaler_turn4(ScalerRgbJob *j, unsigned lo, unsigned hi)
 {
     unsigned sw = j->sw, sh = j->sh, dw = j->dw;
+    int step = j->cw ? -1 : 1;
 
     for (unsigned bx = 0; bx < dw; bx += 32) {
         for (unsigned y = lo; y < hi; y += 4) {
-            unsigned c0 = j->cw ? y : sw - 4 - y;
-            uint32_t *d = j->dst + (size_t)y * dw;
-            uint32_t *d0 = j->cw ? d : d + 3 * (size_t)dw, *d1 = j->cw ? d + dw : d + 2 * (size_t)dw;
-            uint32_t *d2 = j->cw ? d + 2 * (size_t)dw : d + dw, *d3 = j->cw ? d + 3 * (size_t)dw : d;
+            unsigned c = (j->cw ? y : sw - 4 - y) * 4;
+            const ScalerRow *d0 = &j->drows[j->cw ? y : y + 3], *d1 = &j->drows[j->cw ? y + 1 : y + 2];
+            const ScalerRow *d2 = &j->drows[j->cw ? y + 2 : y + 1], *d3 = &j->drows[j->cw ? y + 3 : y];
             for (unsigned x = bx; x < bx + 32 && x < dw; x += 4) {
-                size_t r0 = j->cw ? sh - 1 - x : x;
-                const uint32_t *s0 = j->src + r0 * j->pitch + c0;
-                ptrdiff_t step = j->cw ? -(ptrdiff_t)j->pitch : (ptrdiff_t)j->pitch;
-                scaler_t4(s0, s0 + step, s0 + 2 * step, s0 + 3 * step, d0 + x, d1 + x, d2 + x, d3 + x);
+                const ScalerRow *r = &j->srows[j->cw ? sh - 1 - x : x];
+                scaler_t4(scaler_at(r, c), scaler_at(r + step, c), scaler_at(r + 2 * step, c),
+                          scaler_at(r + 3 * step, c), scaler_at(d0, x * 4), scaler_at(d1, x * 4),
+                          scaler_at(d2, x * 4), scaler_at(d3, x * 4));
             }
         }
     }
@@ -223,6 +310,10 @@ static void scaler_rgb_part(ScalerRgbJob *j, int phase, unsigned half)
 {
     if (phase == 0) {
         unsigned lo = half ? j->sh / 2 : 0, hi = half ? j->sh : j->sh / 2;
+
+        if (j->direct) {   /* turned straight from guest RAM */
+            return;
+        }
 
         for (unsigned y = lo; y < hi; y++) {
             if (!scaler_read_bus(j->s, scaler_row(j->r[0x14 / 4], y, j->ss, ROUND_UP(j->sw * 4, 256), j->stiled),
@@ -241,11 +332,11 @@ static void scaler_rgb_part(ScalerRgbJob *j, int phase, unsigned half)
 
 #ifdef __aarch64__
     if (j->turn4) {
-        /* A band at a time, written out while it is still in the cache. */
+        /* A band at a time, written out while it is still in the cache (or turned into guest RAM directly). */
         for (unsigned by = lo; by < hi; by += 32) {
             unsigned be = MIN(by + 32, hi);
             scaler_turn4(j, by, be);
-            for (unsigned y = by; y < be; y++) {
+            for (unsigned y = by; y < be && !j->direct; y++) {
                 if (!scaler_write_bus(j->s, scaler_row(j->r[0x34 / 4], y, j->ds, ROUND_UP(j->dw * 4, 256), j->dtiled),
                                       dst + (size_t)y * j->dw, j->dw * 4)) {
                     j->ok[half] = false;
@@ -403,12 +494,49 @@ static bool scaler_rgb(IPodScalerState *s)
         .turn4 = turn4 && rot && sx == 0x10000 && sy == 0x10000 && dw == sh && dh == sw && !(dw % 4) && !(dh % 4),
         .ok = { true, true },
     };
+#ifdef __aarch64__
+    /*
+     * The turn reads and writes the surfaces in guest RAM when both are there (LT_SCALER_DIRECT=off for A/B): no copy
+     * of the source in, none of the result out through the bus a page at a time. The written pages are marked dirty
+     * as a bus write would; their translated code, which a frame's pages never hold, is left alone.
+     */
+    static int direct = -1;
+    if (direct < 0) {
+        const char *v = getenv("LT_SCALER_DIRECT");
+        direct = !v || strcmp(v, "off");
+    }
+    g_autofree ScalerRow *srows = NULL, *drows = NULL;
+    g_autoptr(GArray) pages = NULL;
+    RCU_READ_LOCK_GUARD();
+    if (j.turn4) {
+        srows = g_new(ScalerRow, sh);
+        drows = g_new(ScalerRow, dh);
+        pages = g_array_new(false, false, sizeof(ram_addr_t));
+        j.direct = direct && scaler_rows_ram(s, srows, sh, r[0x14 / 4], ss, sw * 4, stiled, NULL) &&
+                   scaler_rows_ram(s, drows, dh, r[0x34 / 4], ds, dw * 4, dtiled, pages);
+        if (!j.direct) {
+            for (unsigned y = 0; y < sh; y++) {
+                srows[y] = (ScalerRow){ (uint8_t *)(src + (size_t)y * pitch), NULL, UINT_MAX };
+            }
+            for (unsigned y = 0; y < dh; y++) {
+                drows[y] = (ScalerRow){ (uint8_t *)(dst + (size_t)y * dw), NULL, UINT_MAX };
+            }
+        }
+        j.srows = srows;
+        j.drows = drows;
+    }
+#endif
 
     scaler_split(s, &j, 0);
     if (!j.ok[0] || !j.ok[1]) {
         return false;
     }
     scaler_split(s, &j, 1);
+#ifdef __aarch64__
+    for (guint i = 0; j.direct && i < pages->len; i++) {
+        physical_memory_set_dirty_range(g_array_index(pages, ram_addr_t, i), 0x1000, DIRTY_CLIENTS_NOCODE);
+    }
+#endif
     return j.ok[0] && j.ok[1];
 }
 
@@ -560,6 +688,7 @@ static void *scaler_worker(void *opaque)
 {
     IPodScalerState *s = opaque;
 
+    rcu_register_thread();
     qemu_mutex_lock(&s->lock);
     for (;;) {
         while (!s->queued) {
