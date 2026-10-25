@@ -14,6 +14,9 @@ static FILE *ios_fp_file;
 static uint64_t ios_fp_count;
 static bool ios_fp_on;
 static bool ios_fp_context;
+/* LT_FRAME_PATH_DELAY_MS: record nothing until this long after start, so a capture of a game's steady state
+ * is not spent on boot and loading (the context trace fills its buffer in under a minute). */
+static int64_t ios_fp_start_ns;
 
 void qemu_ios_frame_path_init(void)
 {
@@ -52,8 +55,12 @@ void qemu_ios_frame_path_init(void)
         ios_fp_file = NULL;
         return;
     }
+    const char *delay = getenv("LT_FRAME_PATH_DELAY_MS");
+    if (delay && *delay) {
+        ios_fp_start_ns = qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + strtoll(delay, NULL, 10) * SCALE_MS;
+    }
     fprintf(ios_fp_file, "# LT_FRAME_PATH 1 capacity=%u begin-ns=%" PRId64 "\n",
-            ios_fp_capacity, qemu_clock_get_ns(QEMU_CLOCK_REALTIME));
+            ios_fp_capacity, MAX(ios_fp_start_ns, qemu_clock_get_ns(QEMU_CLOCK_REALTIME)));
     fflush(ios_fp_file);
     qatomic_store_release(&ios_fp_on, true);
     if (qemu_ios_native_wait_init) {
@@ -69,6 +76,9 @@ void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b, uint64_t 
         return;
     }
     if ((event == IOS_FP_CONTEXT_SWITCH || event == IOS_FP_TTBR0) && !ios_fp_context) {
+        return;
+    }
+    if (ios_fp_start_ns && qemu_clock_get_ns(QEMU_CLOCK_REALTIME) < ios_fp_start_ns) {
         return;
     }
     uint64_t index = qatomic_fetch_inc(&ios_fp_count);
