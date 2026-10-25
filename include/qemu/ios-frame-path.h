@@ -40,12 +40,23 @@ enum IOSFramePathEvent {
     IOS_FP_BT_STATE,
 };
 
-void qemu_ios_native_wait_init(void) __attribute__((weak));
-void qemu_ios_native_wait_finish(void) __attribute__((weak));
-void qemu_ios_bql_spin_finish(void) __attribute__((weak));
+/*
+ * Weak so a host may leave them out (Android defines them in its own library). Not on Windows: PE weak
+ * externals give every referencing object its own null default, and the linker may pick one over the real
+ * definition, so calls jump to address zero. The desktop engine defines all four itself.
+ */
+#ifdef _WIN32
+#define IOS_FRAME_PATH_HOOK
+#else
+#define IOS_FRAME_PATH_HOOK __attribute__((weak))
+#endif
+
+void qemu_ios_native_wait_init(void) IOS_FRAME_PATH_HOOK;
+void qemu_ios_native_wait_finish(void) IOS_FRAME_PATH_HOOK;
+void qemu_ios_bql_spin_finish(void) IOS_FRAME_PATH_HOOK;
 
 void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b,
-                               uint64_t c) __attribute__((weak));
+                               uint64_t c) IOS_FRAME_PATH_HOOK;
 
 static inline void ios_frame_path(unsigned event, uint64_t a, uint64_t b,
                                    uint64_t c)
