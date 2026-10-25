@@ -855,10 +855,13 @@ elif host_os == 'darwin'
   pvg = dependency('appleframeworks', modules: ['ParavirtualizedGraphics', 'Metal'],
                    required: get_option('pvg'))
   # qemu-ios front-end hooks, declared weak and defined only in the app library
-  # (contrib/ios-app/qemu-ios-ui.c). ELF and PE resolve a missing weak symbol to
-  # null; Apple's linker does so only for the symbols it is told may be missing.
+  # (contrib/ios-app/qemu-ios-ui.c), and the profile runtime's (system/vl.c,
+  # LT_PGO_DUMP). ELF and PE resolve a missing weak symbol to null; Apple's
+  # linker does so only for the symbols it is told may be missing.
   foreach hook : ['qemu_ios_frame_path_event', 'qemu_ios_profile_begin',
-                  'qemu_ios_profile_gl', 'qemu_ios_profile_lock']
+                  'qemu_ios_profile_gl', 'qemu_ios_profile_lock',
+                  'qemu_ios_profile_callback', '__llvm_profile_write_file',
+                  '__llvm_profile_set_filename', '__llvm_profile_reset_counters']
     emulator_link_args += '-Wl,-U,_' + hook
   endforeach
 elif host_os == 'sunos'
