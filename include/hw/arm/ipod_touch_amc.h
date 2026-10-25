@@ -5,6 +5,7 @@
 #include "qemu/module.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/irq.h"
+#include "qemu/thread.h"
 
 #define TYPE_IPOD_TOUCH_AMC "ipodtouch.amc"
 OBJECT_DECLARE_SIMPLE_TYPE(IPodTouchAMCState, IPOD_TOUCH_AMC)
@@ -157,6 +158,15 @@ typedef struct IPodTouchAMCState {
     uint32_t pending;
     void *decoder;
     QEMUTimer *decode_timer;
+    /*
+     * The decode runs without the BQL (amc_decode_drain). decoding: from before it drops the BQL until
+     * it has it again, so a close in between leaves the decoder to it; decode_running (decode_lock):
+     * while it runs unlocked, which a snapshot waits out.
+     */
+    bool decoding;
+    QemuMutex decode_lock;
+    QemuCond decode_idle;
+    bool decode_running;
 } IPodTouchAMCState;
 
 /* For the board's DMA engine: bytes waiting in the output port. */

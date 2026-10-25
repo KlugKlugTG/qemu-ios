@@ -125,6 +125,7 @@
 #include "qemu/error-report.h"
 #include "cpu.h"
 #include "qemu/timer.h"
+#include "qemu/main-loop.h"
 #include "migration/vmstate.h"
 #include "migration/qemu-file.h"
 #include "trace.h"
@@ -315,18 +316,37 @@ static unsigned amc_output_capacity(AMCProgram codec)
     }
 }
 
+static void amc_decoder_free(AMCDecoder *d)
+{
+    avcodec_free_context(&d->codec);
+    av_frame_free(&d->frame);
+    g_byte_array_unref(d->pcm);
+    g_queue_clear(&d->output_sizes);
+    amc_replay_forget(d);
+    g_free(d);
+}
+
 static void amc_decoder_close(IPodTouchAMCState *s)
 {
     AMCDecoder *d = s->decoder;
     if (d) {
-        avcodec_free_context(&d->codec);
-        av_frame_free(&d->frame);
-        g_byte_array_unref(d->pcm);
-        g_queue_clear(&d->output_sizes);
-        amc_replay_forget(d);
-        g_free(d);
         s->decoder = NULL;
+        if (!s->decoding) {     /* else the decode, which is using it, frees it when it has the BQL back */
+            amc_decoder_free(d);
+        }
     }
+}
+
+/* LT_AMC_DECODE_UNLOCKED=off: decode with the BQL held, as before (A/B). */
+static bool amc_decode_unlocked(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_AMC_DECODE_UNLOCKED");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
 }
 
 static bool amc_dram(IPodTouchAMCState *s, uint32_t addr, size_t size)
@@ -562,6 +582,19 @@ static void amc_decode_drain(IPodTouchAMCState *s)
     }
     AVFrame *frame = d->frame;
     int err = 0;
+    /*
+     * The decode itself goes without the BQL: up to 64 KiB of PCM at a time, the main loop held it up to
+     * 6.5 ms while the vCPU, which takes it thousands of times a second, waited (Epic Citadel's music on
+     * a Poco F3). Only this loop touches the decoder meanwhile; the guest can close it (amc_decoder_close).
+     */
+    bool unlocked = bql_locked() && amc_decode_unlocked();
+    if (unlocked) {
+        s->decoding = true;
+        qemu_mutex_lock(&s->decode_lock);
+        s->decode_running = true;
+        qemu_mutex_unlock(&s->decode_lock);
+        bql_unlock();
+    }
     while (d->pcm->len < 65536 &&
            (err = avcodec_receive_frame(d->codec, frame)) == 0) {
         amc_replay_received(d);
@@ -599,6 +632,18 @@ static void amc_decode_drain(IPodTouchAMCState *s)
         g_queue_push_tail(&d->output_sizes,
             GUINT_TO_POINTER(frame->nb_samples * channels * 2));
         av_frame_unref(frame);
+    }
+    if (unlocked) {
+        qemu_mutex_lock(&s->decode_lock);
+        s->decode_running = false;
+        qemu_cond_broadcast(&s->decode_idle);
+        qemu_mutex_unlock(&s->decode_lock);
+        bql_lock();
+        s->decoding = false;
+        if (s->decoder != d) {  /* the guest closed the stream */
+            amc_decoder_free(d);
+            return;
+        }
     }
     if (err == AVERROR(EAGAIN)) {
         d->input_pending = false;
@@ -1396,6 +1441,8 @@ static void ipod_touch_amc_init(Object *obj)
     sysbus_init_mmio(sbd, &s->port_mr);
     sysbus_init_irq(sbd, &s->irq);
     s->decode_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, amc_decode_tick, s);
+    qemu_mutex_init(&s->decode_lock);
+    qemu_cond_init(&s->decode_idle);
 }
 
 static void ipod_touch_amc_finalize(Object *obj)
@@ -1518,6 +1565,12 @@ static int amc_pre_save(void *opaque)
 {
 #ifdef IT_HAVE_AVCODEC
     IPodTouchAMCState *s = opaque;
+    /* A decode running without the BQL (another thread is saving) finishes first; it needs nothing to. */
+    qemu_mutex_lock(&s->decode_lock);
+    while (s->decode_running) {
+        qemu_cond_wait(&s->decode_idle, &s->decode_lock);
+    }
+    qemu_mutex_unlock(&s->decode_lock);
     AMCDecoder *d = s->decoder;
     if (d && d->history_overflow && !d->failed) {
         error_report("AMC snapshot replay limit exceeded (64 MiB / 65536 packets / "
