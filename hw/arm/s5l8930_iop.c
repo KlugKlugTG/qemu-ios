@@ -68,7 +68,7 @@ static void ioprof_tick(void)
 {
     static const char *names[IOPROF_N] = {
         "pread", "pwrite", "zero", "pread_us", "pwrite_us", "zero_us", "pg_read", "pg_prog", "erase",
-        "fmi_irq", "cdma_irq", "db_ap2iop", "db_iop2ap", "cachectl", "cdma_go",
+        "fmi_irq", "cdma_irq", "db_ap2iop", "db_iop2ap", "cachectl", "cdma_go", "iop_us", "ap_us",
     };
     static int64_t last;
     static uint64_t prev[IOPROF_N];
@@ -86,7 +86,8 @@ static void ioprof_tick(void)
     for (int i = 0; i < IOPROF_N; i++) {
         uint64_t v = qatomic_read(&s5l8930_ioprof[i]), d = v - prev[i];
         prev[i] = v;
-        if (i == IOPROF_PREAD_NS || i == IOPROF_PWRITE_NS || i == IOPROF_ZERO_NS) {
+        if (i == IOPROF_PREAD_NS || i == IOPROF_PWRITE_NS || i == IOPROF_ZERO_NS ||
+            i == IOPROF_IOP_NS || i == IOPROF_AP_NS) {
             d /= 1000;
         }
         g_string_append_printf(out, " %s %" PRIu64, names[i], d);
