@@ -196,13 +196,17 @@ def main():
         slirp = ROOT / 'subprojects/slirp'
         if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=slirp, text=True).strip() != slirp_revision:
             parser.error('libslirp source checkout differs from pinned revision')
-        patch = tracked('subprojects/packagefiles/libslirp-set-restricted.patch')
+        # The wrap's diff_files, in the order meson applies them.
+        patch_names = [n.strip() for n in re.search(r'^diff_files\s*=\s*(.+)$', wrap, re.M)[1].split(',')]
+        patches = [tracked('subprojects/packagefiles/' + n) for n in patch_names]
+        patch = b''.join(patches)
         # Judge the entire tracked dependency tree against the pinned source plus
         # the recorded integration edit; do not hide extra local dependency edits.
         with tempfile.TemporaryDirectory(prefix='slirp-notice-check-') as temporary:
             archive = subprocess.check_output(['git', 'archive', slirp_revision], cwd=slirp)
             subprocess.run(['tar', '-xf', '-', '-C', temporary], input=archive, check=True)
-            subprocess.run(['git', 'apply', '-'], cwd=temporary, input=patch, check=True)
+            for one in patches:
+                subprocess.run(['git', 'apply', '-'], cwd=temporary, input=one, check=True)
             entries = subprocess.check_output(['git', 'ls-tree', '-r', slirp_revision], cwd=slirp, text=True).splitlines()
             for entry in entries:
                 metadata, name = entry.split('\t', 1)
