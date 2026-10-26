@@ -2,7 +2,7 @@
  *
  * SLICE include/hw/arm/ipod_touch_fmss.h define FMSS
  * SLICE hw/arm/ipod_touch_fmss.c define FMSS_CHIP|FMSS_SCRIPT
- * SLICE hw/arm/ipod_touch_fmss.c fn fmss_var_read fmss_run_script
+ * SLICE hw/arm/ipod_touch_fmss.c fn fmss_var_read fmss_tx_done fmss_run_script
  */
 #include <assert.h>
 #include <stdint.h>
@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #define fmss_script_trace(...) ((void)0)
 #define LOG_UNIMP 0
 #define LOG_GUEST_ERROR 1

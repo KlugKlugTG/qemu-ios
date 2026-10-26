@@ -8,8 +8,14 @@
 #include "qemu/bswap.h"
 #include "qemu/timer.h"
 #include "qemu/main-loop.h"
+#include "qemu/rcu.h"
 #include "qemu/thread.h"
 #include "hw/arm/gles-present.h"
+#include "system/physmem.h"
+#include "system/ram_addr.h"
+#ifdef __aarch64__
+#include <arm_neon.h>
+#endif
 
 /* 7E18 AppleM2ScalerCSCDriver: 0xc0732388 programs formats, 0xc07323f0
  * source geometry, 0xc073246c destination geometry, 0xc0730288 acknowledges
@@ -34,8 +40,15 @@ typedef struct {
     QemuThread worker;
     QemuMutex lock;
     QemuCond cond;
-    bool worker_up, queued, busy;
+    bool worker_up, queued, busy, on_worker;
     uint32_t job[0x1000 / 4];
+    /* a second thread takes half of a large RGB transfer (scaler_split) */
+    QemuThread helper;
+    QemuCond helper_go, helper_done;
+    bool helper_up;
+    unsigned helper_gen, helper_seen, helper_finished;
+    struct ScalerRgbJob *helper_job;
+    int helper_phase;
 } IPodScalerState;
 
 void ipod_scaler_set_iommu(DeviceState *dev,
@@ -157,6 +170,273 @@ static bool scaler_read_bus(IPodScalerState *s, uint32_t va, void *buf, unsigned
  * ponytail: nearest sampling where the hardware has polyphase taps at +0x70
  * on.
  */
+/* An RGB transfer's work in two halves: the source rows read in, then the destination rows turned and written. */
+typedef struct ScalerRgbJob {
+    IPodScalerState *s;
+    const uint32_t *r;
+    uint32_t *src, *dst;
+    const size_t *xo, *yo;
+    unsigned sw, sh, dw, dh, ss, ds, pitch;
+    bool stiled, dtiled, rot, cw, turn4, direct, ok[2];
+    const struct ScalerRow *srows, *drows;
+} ScalerRgbJob;
+
+/* A row of a surface in host memory: its bytes before `split` from lo, the rest from hi (both indexed from the row's
+ * start), since a row in guest RAM can run over into a page that is somewhere else on the host. */
+typedef struct ScalerRow {
+    uint8_t *lo, *hi;
+    unsigned split;
+} ScalerRow;
+
+#ifdef __aarch64__
+static inline void *scaler_at(const ScalerRow *row, unsigned off)
+{
+    return (off < row->split ? row->lo : row->hi) + off;
+}
+
+/* The host address of the guest RAM page at bus address `va` and its RAM offset; NULL if it is unmapped or not RAM. */
+static uint8_t *scaler_ram_page(IPodScalerState *s, uint32_t va, bool write, ram_addr_t *ram)
+{
+    hwaddr pa = scaler_pa(s, va), xlat, len = 0x1000;
+    MemoryRegion *mr;
+
+    if (pa == (hwaddr)-1 || (pa & 0xfff)) {
+        return NULL;
+    }
+    mr = address_space_translate(&address_space_memory, pa, &xlat, &len, write, MEMTXATTRS_UNSPECIFIED);
+    if (!memory_region_is_ram(mr) || (write && mr->readonly) || len < 0x1000) {
+        return NULL;
+    }
+    *ram = memory_region_get_ram_addr(mr) + xlat;
+    return qemu_map_ram_ptr(NULL, *ram);
+}
+
+/*
+ * Rows 0..n of a surface (as scaler_row addresses them) as host pointers into guest RAM, each page translated once
+ * while the rows walk it; a written surface's pages go into `pages` to be marked dirty. False if a page is not RAM,
+ * a row is longer than a page, or a row does not start on 16 bytes (the turn's 4-pixel groups would straddle pages).
+ * The caller holds the RCU read lock while the pointers are in use.
+ */
+static bool scaler_rows_ram(IPodScalerState *s, ScalerRow *out, unsigned n, uint32_t base, unsigned stride,
+                            unsigned bytes, bool tiled, GArray *pages)
+{
+    uint32_t seen[2] = { 1, 1 };   /* never a page address */
+    uint8_t *host[2] = { NULL, NULL };
+    unsigned next = 0;
+
+    if (bytes > 0x1000) {
+        return false;
+    }
+    for (unsigned y = 0; y < n; y++) {
+        uint32_t va = scaler_row(base, y, stride, ROUND_UP(bytes, 256), tiled);
+        uint32_t pg[2] = { va & ~0xfffu, (va + bytes - 1) & ~0xfffu };
+        uint8_t *p[2];
+
+        if (va & 15) {
+            return false;
+        }
+        for (int k = 0; k < 2; k++) {
+            if (k && pg[1] == pg[0]) {
+                p[1] = p[0];
+                break;
+            }
+            if (seen[0] == pg[k] || seen[1] == pg[k]) {
+                p[k] = host[seen[1] == pg[k]];
+                continue;
+            }
+            ram_addr_t ram;
+            p[k] = scaler_ram_page(s, pg[k], pages != NULL, &ram);
+            if (!p[k]) {
+                return false;
+            }
+            if (pages) {
+                g_array_append_val(pages, ram);
+            }
+            seen[next] = pg[k];
+            host[next] = p[k];
+            next ^= 1;
+        }
+        out[y].lo = p[0] + (va & 0xfff);
+        out[y].split = 0x1000 - (va & 0xfff);
+        out[y].hi = p[1] - out[y].split;
+    }
+    return true;
+}
+#endif
+
+#ifdef __aarch64__
+/* d0..d3 get the 4x4 block whose rows are s0..s3, turned about its diagonal. */
+static inline void scaler_t4(const uint32_t *s0, const uint32_t *s1, const uint32_t *s2, const uint32_t *s3,
+                             uint32_t *d0, uint32_t *d1, uint32_t *d2, uint32_t *d3)
+{
+    uint32x4_t a = vld1q_u32(s0), b = vld1q_u32(s1), c = vld1q_u32(s2), d = vld1q_u32(s3);
+    uint64x2_t ab0 = vreinterpretq_u64_u32(vtrn1q_u32(a, b)), ab1 = vreinterpretq_u64_u32(vtrn2q_u32(a, b));
+    uint64x2_t cd0 = vreinterpretq_u64_u32(vtrn1q_u32(c, d)), cd1 = vreinterpretq_u64_u32(vtrn2q_u32(c, d));
+
+    vst1q_u32(d0, vreinterpretq_u32_u64(vtrn1q_u64(ab0, cd0)));
+    vst1q_u32(d1, vreinterpretq_u32_u64(vtrn1q_u64(ab1, cd1)));
+    vst1q_u32(d2, vreinterpretq_u32_u64(vtrn2q_u64(ab0, cd0)));
+    vst1q_u32(d3, vreinterpretq_u32_u64(vtrn2q_u64(ab1, cd1)));
+}
+
+/*
+ * Destination rows lo..hi of a quarter turn at 1:1, in 4x4 blocks without the offset tables: destination (x, y) is
+ * source row r(x) = cw ? sh - 1 - x : x, column c(y) = cw ? y : sw - 1 - y. Four destination rows read four
+ * adjacent source columns, which turned the other way come out last row first. Rows are found through the job's row
+ * tables: the scratch copies, or the surfaces in guest RAM themselves.
+ */
+static void scaler_turn4(ScalerRgbJob *j, unsigned lo, unsigned hi)
+{
+    unsigned sw = j->sw, sh = j->sh, dw = j->dw;
+    int step = j->cw ? -1 : 1;
+
+    for (unsigned bx = 0; bx < dw; bx += 32) {
+        for (unsigned y = lo; y < hi; y += 4) {
+            unsigned c = (j->cw ? y : sw - 4 - y) * 4;
+            const ScalerRow *d0 = &j->drows[j->cw ? y : y + 3], *d1 = &j->drows[j->cw ? y + 1 : y + 2];
+            const ScalerRow *d2 = &j->drows[j->cw ? y + 2 : y + 1], *d3 = &j->drows[j->cw ? y + 3 : y];
+            for (unsigned x = bx; x < bx + 32 && x < dw; x += 4) {
+                const ScalerRow *r = &j->srows[j->cw ? sh - 1 - x : x];
+                scaler_t4(scaler_at(r, c), scaler_at(r + step, c), scaler_at(r + 2 * step, c),
+                          scaler_at(r + 3 * step, c), scaler_at(d0, x * 4), scaler_at(d1, x * 4),
+                          scaler_at(d2, x * 4), scaler_at(d3, x * 4));
+            }
+        }
+    }
+}
+#endif
+
+static void scaler_rgb_part(ScalerRgbJob *j, int phase, unsigned half)
+{
+    if (phase == 0) {
+        unsigned lo = half ? j->sh / 2 : 0, hi = half ? j->sh : j->sh / 2;
+
+        if (j->direct) {   /* turned straight from guest RAM */
+            return;
+        }
+
+        for (unsigned y = lo; y < hi; y++) {
+            if (!scaler_read_bus(j->s, scaler_row(j->r[0x14 / 4], y, j->ss, ROUND_UP(j->sw * 4, 256), j->stiled),
+                                 j->src + (size_t)y * j->pitch, j->sw * 4)) {
+                j->ok[half] = false;
+                return;
+            }
+        }
+        return;
+    }
+    /* Destination rows in 32-row bands, so each half keeps the turned copy's 32x32 blocks. */
+    unsigned mid = MIN(ROUND_UP(j->dh / 2, 32), j->dh);
+    unsigned lo = half ? mid : 0, hi = half ? j->dh : mid;
+    const uint32_t *src = j->src;
+    uint32_t *dst = j->dst;
+
+#ifdef __aarch64__
+    if (j->turn4) {
+        /* A band at a time, written out while it is still in the cache (or turned into guest RAM directly). */
+        for (unsigned by = lo; by < hi; by += 32) {
+            unsigned be = MIN(by + 32, hi);
+            scaler_turn4(j, by, be);
+            for (unsigned y = by; y < be && !j->direct; y++) {
+                if (!scaler_write_bus(j->s, scaler_row(j->r[0x34 / 4], y, j->ds, ROUND_UP(j->dw * 4, 256), j->dtiled),
+                                      dst + (size_t)y * j->dw, j->dw * 4)) {
+                    j->ok[half] = false;
+                    return;
+                }
+            }
+        }
+        return;
+    }
+#endif
+    if (j->rot) {
+        for (unsigned by = lo; by < hi; by += 32) {
+            for (unsigned bx = 0; bx < j->dw; bx += 32) {
+                for (unsigned x = bx; x < MIN(bx + 32, j->dw); x++) {
+                    const uint32_t *col = src + j->xo[x];
+                    for (unsigned y = by; y < MIN(by + 32, hi); y++) {
+                        dst[(size_t)y * j->dw + x] = col[j->yo[y]];
+                    }
+                }
+            }
+        }
+    } else {
+        for (unsigned y = lo; y < hi; y++) {
+            const uint32_t *line = src + j->yo[y];
+            uint32_t *row = dst + (size_t)y * j->dw;
+            for (unsigned x = 0; x < j->dw; x++) {
+                row[x] = line[j->xo[x]];
+            }
+        }
+    }
+    for (unsigned y = lo; y < hi; y++) {
+        if (!scaler_write_bus(j->s, scaler_row(j->r[0x34 / 4], y, j->ds, ROUND_UP(j->dw * 4, 256), j->dtiled),
+                              dst + (size_t)y * j->dw, j->dw * 4)) {
+            j->ok[half] = false;
+            return;
+        }
+    }
+}
+
+static void *scaler_helper(void *opaque)
+{
+    IPodScalerState *s = opaque;
+
+    rcu_register_thread();
+    qemu_mutex_lock(&s->lock);
+    for (;;) {
+        while (s->helper_seen == s->helper_gen) {
+            qemu_cond_wait(&s->helper_go, &s->lock);
+        }
+        s->helper_seen = s->helper_gen;
+        ScalerRgbJob *j = s->helper_job;
+        int phase = s->helper_phase;
+        qemu_mutex_unlock(&s->lock);
+        scaler_rgb_part(j, phase, 1);
+        qemu_mutex_lock(&s->lock);
+        s->helper_finished = s->helper_seen;
+        qemu_cond_broadcast(&s->helper_done);
+    }
+    return NULL;
+}
+
+/*
+ * Both halves of a phase, the second on the helper thread when the worker runs a large transfer
+ * (LT_SCALER_SPLIT=off: one thread). CoreAnimation turns every frame of a landscape game, 640x960 on
+ * the iPod touch 4G: ~3.3 ms of one Pixel 10 mid core, often still running at the VBL that frame
+ * was for.
+ */
+static void scaler_split(IPodScalerState *s, ScalerRgbJob *j, int phase)
+{
+    static int split = -1;
+
+    if (split < 0) {
+        const char *v = getenv("LT_SCALER_SPLIT");
+        split = !v || strcmp(v, "off");
+    }
+    if (!split || !s->on_worker || (size_t)j->dw * j->dh < 65536) {
+        scaler_rgb_part(j, phase, 0);
+        scaler_rgb_part(j, phase, 1);
+        return;
+    }
+    if (!s->helper_up) {
+        qemu_cond_init(&s->helper_go);
+        qemu_cond_init(&s->helper_done);
+        qemu_thread_create(&s->helper, "scaler-2", scaler_helper, s, QEMU_THREAD_DETACHED);
+        s->helper_up = true;
+    }
+    qemu_mutex_lock(&s->lock);
+    s->helper_job = j;
+    s->helper_phase = phase;
+    s->helper_gen++;
+    qemu_cond_signal(&s->helper_go);
+    qemu_mutex_unlock(&s->lock);
+    scaler_rgb_part(j, phase, 0);
+    qemu_mutex_lock(&s->lock);
+    while (s->helper_finished != s->helper_gen) {
+        qemu_cond_wait(&s->helper_done, &s->lock);
+    }
+    qemu_mutex_unlock(&s->lock);
+}
+
 static bool scaler_rgb(IPodScalerState *s)
 {
     uint32_t *r = s->job;
@@ -184,12 +464,6 @@ static bool scaler_rgb(IPodScalerState *s)
     sx = sx ? sx : ((uint64_t)sw << 16) / dw;
     sy = sy ? sy : ((uint64_t)sh << 16) / dh;
     uint32_t *src = scaler_scratch(s, 0, sizeof(uint32_t) * pitch * sh);
-    for (unsigned y = 0; y < sh; y++) {
-        if (!scaler_read_bus(s, scaler_row(r[0x14 / 4], y, ss, ROUND_UP(sw * 4, 256), stiled),
-                             src + (size_t)y * pitch, sw * 4)) {
-            return false;
-        }
-    }
     /*
      * Destination (x, y) is src[xo[x] + yo[y]]. Turned, a destination row walks a source column, so the
      * pixels go in 32x32 blocks: the whole frame turned a pixel at a time missed the cache on every read,
@@ -205,33 +479,65 @@ static bool scaler_rgb(IPodScalerState *s)
         yo[y] = cw ? i : rot ? sw - 1 - i : (size_t)i * pitch;
     }
     uint32_t *dst = scaler_scratch(s, 1, sizeof(uint32_t) * dw * dh);
-    if (rot) {
-        for (unsigned by = 0; by < dh; by += 32) {
-            for (unsigned bx = 0; bx < dw; bx += 32) {
-                for (unsigned x = bx; x < MIN(bx + 32, dw); x++) {
-                    const uint32_t *col = src + xo[x];
-                    for (unsigned y = by; y < MIN(by + 32, dh); y++) {
-                        dst[(size_t)y * dw + x] = col[yo[y]];
-                    }
-                }
+    /*
+     * A quarter turn at 1:1 (a landscape game on the iPod touch 4G, every frame) goes through scaler_turn4 on arm64
+     * hosts: about a third less time than the offset tables on a Poco F3 mid core (LT_SCALER_TURN4=off for A/B).
+     */
+    static int turn4 = -1;
+    if (turn4 < 0) {
+        const char *v = getenv("LT_SCALER_TURN4");
+        turn4 = !v || strcmp(v, "off");
+    }
+    ScalerRgbJob j = {
+        .s = s, .r = r, .src = src, .dst = dst, .xo = xo, .yo = yo, .sw = sw, .sh = sh, .dw = dw, .dh = dh,
+        .ss = ss, .ds = ds, .pitch = pitch, .stiled = stiled, .dtiled = dtiled, .rot = rot, .cw = cw,
+        .turn4 = turn4 && rot && sx == 0x10000 && sy == 0x10000 && dw == sh && dh == sw && !(dw % 4) && !(dh % 4),
+        .ok = { true, true },
+    };
+#ifdef __aarch64__
+    /*
+     * The turn reads and writes the surfaces in guest RAM when both are there (LT_SCALER_DIRECT=off for A/B): no copy
+     * of the source in, none of the result out through the bus a page at a time. The written pages are marked dirty
+     * as a bus write would; their translated code, which a frame's pages never hold, is left alone.
+     */
+    static int direct = -1;
+    if (direct < 0) {
+        const char *v = getenv("LT_SCALER_DIRECT");
+        direct = !v || strcmp(v, "off");
+    }
+    g_autofree ScalerRow *srows = NULL, *drows = NULL;
+    g_autoptr(GArray) pages = NULL;
+    RCU_READ_LOCK_GUARD();
+    if (j.turn4) {
+        srows = g_new(ScalerRow, sh);
+        drows = g_new(ScalerRow, dh);
+        pages = g_array_new(false, false, sizeof(ram_addr_t));
+        j.direct = direct && scaler_rows_ram(s, srows, sh, r[0x14 / 4], ss, sw * 4, stiled, NULL) &&
+                   scaler_rows_ram(s, drows, dh, r[0x34 / 4], ds, dw * 4, dtiled, pages);
+        if (!j.direct) {
+            for (unsigned y = 0; y < sh; y++) {
+                srows[y] = (ScalerRow){ (uint8_t *)(src + (size_t)y * pitch), NULL, UINT_MAX };
+            }
+            for (unsigned y = 0; y < dh; y++) {
+                drows[y] = (ScalerRow){ (uint8_t *)(dst + (size_t)y * dw), NULL, UINT_MAX };
             }
         }
-    } else {
-        for (unsigned y = 0; y < dh; y++) {
-            const uint32_t *line = src + yo[y];
-            uint32_t *row = dst + (size_t)y * dw;
-            for (unsigned x = 0; x < dw; x++) {
-                row[x] = line[xo[x]];
-            }
-        }
+        j.srows = srows;
+        j.drows = drows;
     }
-    for (unsigned y = 0; y < dh; y++) {
-        if (!scaler_write_bus(s, scaler_row(r[0x34 / 4], y, ds, ROUND_UP(dw * 4, 256), dtiled),
-                              dst + (size_t)y * dw, dw * 4)) {
-            return false;
-        }
+#endif
+
+    scaler_split(s, &j, 0);
+    if (!j.ok[0] || !j.ok[1]) {
+        return false;
     }
-    return true;
+    scaler_split(s, &j, 1);
+#ifdef __aarch64__
+    for (guint i = 0; j.direct && i < pages->len; i++) {
+        physical_memory_set_dirty_range(g_array_index(pages, ram_addr_t, i), 0x1000, DIRTY_CLIENTS_NOCODE);
+    }
+#endif
+    return j.ok[0] && j.ok[1];
 }
 
 /*
@@ -382,6 +688,7 @@ static void *scaler_worker(void *opaque)
 {
     IPodScalerState *s = opaque;
 
+    rcu_register_thread();
     qemu_mutex_lock(&s->lock);
     for (;;) {
         while (!s->queued) {
@@ -389,6 +696,7 @@ static void *scaler_worker(void *opaque)
         }
         s->queued = false;
         s->busy = true;
+        s->on_worker = true;
         qemu_mutex_unlock(&s->lock);
         if (!scaler_run(s)) {
             scaler_unsupported(s);

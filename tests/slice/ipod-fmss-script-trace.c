@@ -5,7 +5,7 @@
  *
  * SLICE include/hw/arm/ipod_touch_fmss.h define FMSS
  * SLICE hw/arm/ipod_touch_fmss.c define FMSS_CHIP|FMSS_SCRIPT
- * SLICE hw/arm/ipod_touch_fmss.c fn fmss_script_trace fmss_var_read fmss_run_script
+ * SLICE hw/arm/ipod_touch_fmss.c fn fmss_script_trace fmss_var_read fmss_tx_done fmss_run_script
  */
 #define FMSS_SCRIPT_TRACE_TEST
 #include <stdio.h>

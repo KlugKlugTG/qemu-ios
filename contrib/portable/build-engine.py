@@ -13,7 +13,7 @@ env['PKG_CONFIG_PATH']=str(crypto_prefix/'lib/pkgconfig')+':'+str(prefix/'lib/pk
 if a.abi!='linux': env['PKG_CONFIG_LIBDIR']=env['PKG_CONFIG_PATH']
 pc=out/'target-pkg-config'
 pc.write_text('#!/bin/sh\nexec pkg-config --static "$@"\n');pc.chmod(0o755);env['PKG_CONFIG']=str(pc)
-args=[src/'configure','--target-list=arm-softmmu','--without-default-features','--without-default-devices','--with-devices-arm=portable','--enable-tcg','--enable-pixman','--enable-gcrypt','--python=/usr/bin/python3','--disable-docs','--disable-tools','--disable-werror','--disable-pie','--extra-cflags=-fPIC -DQEMU_IOS_PORTABLE_CRYPTO','--extra-ldflags=-L'+str(prefix/'lib'),'--audio-drv-list=']
+args=[src/'configure','--target-list=arm-softmmu','--without-default-features','--without-default-devices','--with-devices-arm=portable','--enable-tcg','--enable-pixman','--enable-gcrypt','--enable-slirp','--python=/usr/bin/python3','--disable-docs','--disable-tools','--disable-werror','--disable-pie','--extra-cflags=-fPIC -DQEMU_IOS_PORTABLE_CRYPTO','--extra-ldflags=-L'+str(prefix/'lib'),'--audio-drv-list=']
 if a.cpp_standard:
  if a.abi!='linux':p.error('--cpp-standard is a Linux packaging option')
  args+=['-Dcpp_std='+a.cpp_standard]
@@ -36,6 +36,6 @@ guard.check_engine_cache(out,recipe,[out/'build.ninja',out/'compile_commands.jso
 # Build scripts use explicit argv, never shell evaluation. No private assets.
 print(' '.join(map(str,args)),flush=True);subprocess.run(list(map(str,args)),cwd=out,env=env,check=True)
 if not a.configure_only:
- subprocess.run(['ninja','-j2','-d','keeprsp','qemu-system-arm'],cwd=out,env=env,check=True)
+ subprocess.run(['ninja','-j'+os.environ.get('LT_JOBS','2'),'-d','keeprsp','qemu-system-arm'],cwd=out,env=env,check=True)
  if a.abi!='linux':shutil.copyfile(a.ndk.resolve()/'toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib'/triple/'libc++_shared.so',out/'libc++_shared.so')
  subprocess.run(['python3',str(src/'contrib/portable/make-shared.py'),str(out)],cwd=out,env=env,check=True)

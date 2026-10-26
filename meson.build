@@ -855,10 +855,13 @@ elif host_os == 'darwin'
   pvg = dependency('appleframeworks', modules: ['ParavirtualizedGraphics', 'Metal'],
                    required: get_option('pvg'))
   # qemu-ios front-end hooks, declared weak and defined only in the app library
-  # (contrib/ios-app/qemu-ios-ui.c). ELF and PE resolve a missing weak symbol to
-  # null; Apple's linker does so only for the symbols it is told may be missing.
+  # (contrib/ios-app/qemu-ios-ui.c), and the profile runtime's (system/vl.c,
+  # LT_PGO_DUMP). ELF and PE resolve a missing weak symbol to null; Apple's
+  # linker does so only for the symbols it is told may be missing.
   foreach hook : ['qemu_ios_frame_path_event', 'qemu_ios_profile_begin',
-                  'qemu_ios_profile_gl', 'qemu_ios_profile_lock', 'qemu_ios_profile_callback']
+                  'qemu_ios_profile_gl', 'qemu_ios_profile_lock',
+                  'qemu_ios_profile_callback', '__llvm_profile_write_file',
+                  '__llvm_profile_set_filename', '__llvm_profile_reset_counters']
     emulator_link_args += '-Wl,-U,_' + hook
   endforeach
 elif host_os == 'sunos'
@@ -1340,8 +1343,8 @@ else
 endif
 
 slirp = not_found
-if not get_option('slirp').auto() or have_system
-  slirp = dependency('slirp', required: get_option('slirp'),
+if not get_option('slirp').disabled() and (not get_option('slirp').auto() or have_system)
+  slirp = dependency('slirp', allow_fallback: false, required: false,
                      method: 'pkg-config')
   # slirp < 4.7 is incompatible with CFI support in QEMU.  This is because
   # it passes function pointers within libslirp as callbacks for timers.
@@ -1364,7 +1367,7 @@ if not get_option('slirp').auto() or have_system
   # both from subprojects/packagefiles/libslirp-set-restricted.patch. A libslirp built with
   # the patch (the app's static native root) is used as found; one without it (Homebrew's)
   # gives way to the patched subproject, static so the binaries gain no runtime dylib.
-  if slirp.found() and not cc.has_function('slirp_set_dns_forward', dependencies: slirp,
+  if not slirp.found() or not cc.has_function('slirp_set_dns_forward', dependencies: slirp,
                                            prefix: '#include <libslirp.h>')
     slirp = subproject('slirp', default_options: ['default_library=static']).get_variable('libslirp_libdep')
   endif

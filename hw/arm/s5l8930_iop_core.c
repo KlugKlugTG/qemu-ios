@@ -22,6 +22,7 @@
  */
 #include "qemu/osdep.h"
 #include "qemu/log.h"
+#include "qemu/timer.h"
 #include "qapi/error.h"
 #include "hw/core/sysbus.h"
 #include "hw/core/qdev-properties.h"
@@ -79,6 +80,24 @@ static uint64_t ap_vic_tap_read(void *opaque, hwaddr off, unsigned size)
                                 MEMTXATTRS_UNSPECIFIED, NULL);
 }
 
+/* LT_NAND_PROF: wall time from the AP's doorbell to the IOP's answer (iop_us), and from the answer to the
+ * AP's next doorbell (ap_us). */
+static int64_t ioprof_ap2iop_at, ioprof_iop2ap_at;
+
+static void ioprof_doorbell(bool to_iop)
+{
+    if (likely(!s5l8930_ioprof_on)) {
+        return;
+    }
+    int64_t now = get_clock(), *from = to_iop ? &ioprof_iop2ap_at : &ioprof_ap2iop_at;
+
+    if (*from) {
+        s5l8930_ioprof_add(to_iop ? IOPROF_AP_NS : IOPROF_IOP_NS, now - *from);
+        *from = 0;
+    }
+    *(to_iop ? &ioprof_ap2iop_at : &ioprof_iop2ap_at) = now;
+}
+
 static void ap_vic_tap_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
 {
     S5L8930IOPCoreState *s = opaque;
@@ -91,6 +110,7 @@ static void ap_vic_tap_write(void *opaque, hwaddr off, uint64_t val, unsigned si
     }
     if (off == 0x18) {
         s5l8930_ioprof_add(IOPROF_DB_IOP2AP, 1);
+        ioprof_doorbell(false);
     }
     if (off == 0x18 && s->iop) {        /* SOFTINT: the firmware has answered something */
         s5l8930_iop_trace_rings(s->iop);
@@ -115,6 +135,7 @@ static void vic0_tap_write(void *opaque, hwaddr off, uint64_t val, unsigned size
 
     if (off == 0x18) {
         s5l8930_ioprof_add(IOPROF_DB_AP2IOP, 1);
+        ioprof_doorbell(true);
     }
     if (off == 0x18 && s->iop) {
         s5l8930_iop_trace_rings(s->iop);

@@ -66,7 +66,7 @@ def notice_archive_inputs(inputs):
             entry = empty.setdefault(path.name, {'sha256': expected, 'member_count': 0,
                                                 'input_paths': []})
             entry['input_paths'].append(str(path))
-    covered = {'libqemuutil.a', 'libltm-pvrtc.a', 'libfdt.a', 'libatomic.a'}
+    covered = {'libqemuutil.a', 'libltm-pvrtc.a', 'libfdt.a', 'libatomic.a', 'libslirp.a'}
     covered.update(lib for names in ARCHIVES.values() for lib in names)
     unmapped = linked.keys() - covered - empty.keys()
     if unmapped:
@@ -114,7 +114,9 @@ def main():
             parser.error('tracked source differs from recorded commit: ' + name)
         return data
 
-    for name in ['COPYING', 'COPYING.LIB', 'LICENSE', 'licenses/S5LBox-MIT.txt',
+    # Project-specific grants are retained from each selected source below;
+    # this branch has no aggregate licenses/S5LBox-MIT.txt document.
+    for name in ['COPYING', 'COPYING.LIB', 'LICENSE',
                  'hw/arm/powervr/LICENSE.md', 'hw/arm/powervr/README.md']:
         files['qemu/' + name] = tracked(name)
     snippets = []
@@ -186,6 +188,36 @@ def main():
         files['dependencies/libfdt/SOURCE-NOTICES.txt'] = ('\n'.join(dtc_notices)).encode()
         components.append({'name': 'libfdt', 'source_reference': dtc_url,
                            'source_revision': dtc_revision, 'linked_archive_sha256': linked['libfdt.a']})
+
+    if 'libslirp.a' in linked:
+        wrap = tracked('subprojects/slirp.wrap').decode()
+        slirp_revision = re.search(r'^revision\s*=\s*([0-9a-f]{40})$', wrap, re.M)[1]
+        slirp_url = re.search(r'^url\s*=\s*(\S+)$', wrap, re.M)[1]
+        slirp = ROOT / 'subprojects/slirp'
+        if subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=slirp, text=True).strip() != slirp_revision:
+            parser.error('libslirp source checkout differs from pinned revision')
+        patch = tracked('subprojects/packagefiles/libslirp-set-restricted.patch')
+        # Judge the entire tracked dependency tree against the pinned source plus
+        # the recorded integration edit; do not hide extra local dependency edits.
+        with tempfile.TemporaryDirectory(prefix='slirp-notice-check-') as temporary:
+            archive = subprocess.check_output(['git', 'archive', slirp_revision], cwd=slirp)
+            subprocess.run(['tar', '-xf', '-', '-C', temporary], input=archive, check=True)
+            subprocess.run(['git', 'apply', '-'], cwd=temporary, input=patch, check=True)
+            entries = subprocess.check_output(['git', 'ls-tree', '-r', slirp_revision], cwd=slirp, text=True).splitlines()
+            for entry in entries:
+                metadata, name = entry.split('\t', 1)
+                if metadata.startswith('160000 '):
+                    continue  # Fuzzing corpus submodules are not libslirp inputs.
+                expected, actual = Path(temporary) / name, slirp / name
+                same = (actual.is_symlink() and os.readlink(expected) == os.readlink(actual)) if metadata.startswith('120000 ') else (
+                    not actual.is_symlink() and expected.read_bytes() == actual.read_bytes())
+                if not same:
+                    parser.error('libslirp source differs from pinned integration: ' + name)
+        for name in ['COPYRIGHT', 'LICENSE']:
+            files['dependencies/libslirp/' + name] = git_bytes(slirp_revision, name, slirp)
+        components.append({'name': 'libslirp', 'source_reference': slirp_url,
+                           'source_revision': slirp_revision, 'integration_patch_sha256': sha(patch),
+                           'linked_archive_sha256': linked['libslirp.a']})
 
     wrap = tracked('subprojects/keycodemapdb.wrap').decode()
     key_revision = re.search(r'^revision\s*=\s*([0-9a-f]{40})$', wrap, re.M)[1]

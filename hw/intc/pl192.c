@@ -381,14 +381,35 @@ static void pl192_write(void *opaque, hwaddr offset, uint64_t value, unsigned si
     pl192_update(s);
 }
 
+/*
+ * LT_PL192_SAME_LEVEL=off: re-evaluate on every input call, as before (A/B). Devices re-assert an unchanged
+ * level on most register writes (the iPod touch 4G's CDMA on each one, thousands per storage request), and a
+ * full update re-sorts the priorities and lowers the parent FIQ each time. Every other input to the result
+ * (enables, priorities, software interrupts, the daisy chain, vector acknowledge) runs its own update.
+ */
+static bool pl192_skip_same_level(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *e = getenv("LT_PL192_SAME_LEVEL");
+        on = !e || strcmp(e, "off");
+    }
+    return on;
+}
+
 static void pl192_irq_handler(void *opaque, int irq, int level)
 {
     PL192State *s = (PL192State *) opaque;
+    uint32_t old = s->rawintr;
 
     if (level) {
         s->rawintr |= 1u << irq;
     } else {
         s->rawintr &= ~(1u << irq);
+    }
+    if (s->rawintr == old && pl192_skip_same_level()) {
+        return;
     }
     pl192_update(opaque);
 }

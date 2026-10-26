@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #ifndef FMSS_SCRIPT_TRACE_TEST
 #define fmss_script_trace(...) ((void)0)

@@ -105,7 +105,7 @@ stage ipad-guest-tools "$B/armv6.itpack"
 stage ipad-guest-tools "$B/armv7.itpack"
 # The n72 recipe's inputs (new iPods from a stock IPSW); libappsync.dylib is the fat one above.
 for p in it-gles/sblaunch it-instprogress/sbdlicon it-agent/it_agent it-agent/it_typein.dylib \
-         it-agent/com.qemu.it-agent.plist; do
+         it-agent/com.qemu.it-agent.plist it-proxy/ittrust it-proxy/itproxy; do
     stage ipad-guest-tools "$C/$p"
 done
 # 1.x: its own GL front end that replaces OpenGLES.framework/OpenGLES (gles1x.c, without EAGL), and
