@@ -1833,12 +1833,10 @@ static void ipod_touch_fmss_realize(DeviceState *dev, Error **errp)
                 "requires active LT_FRAME_PATH\n", fmss_path_on ? "on" : "off");
     }
     if (s->nand_path && nand_image_is_store(s->nand_path)) {
-        if (s->nand_overlay) {
-            error_setg(errp, "%s is a NAND image store, written in place: it takes no nandrw overlay",
-                       s->nand_path);
-            return;
-        }
-        s->image = nand_image_open(dev, s->nand_path, &geo, errp);
+        /* A container writes into nandrw's nand.qcow2; a store of chip files is written in place. Either way the
+         * per-page overlay code below never runs. */
+        s->image = nand_image_open(dev, s->nand_path, s->nand_overlay, &geo, errp);
+        s->nand_overlay = NULL;
         return;
     }
     fmss_try_map_packed(s);

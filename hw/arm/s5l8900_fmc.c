@@ -405,7 +405,8 @@ static void s5l8900_fmc_init(Object *obj)
     sysbus_init_irq(sbd, &s->irq);
 }
 
-/* A nand= directory whose geometry.json names the image format opens as the store, written in place. */
+/* A nand= directory whose geometry.json names the image format opens as the store: a container under
+ * nand-overlay's nand.qcow2, or chip files written in place. */
 static void s5l8900_fmc_realize(DeviceState *dev, Error **errp)
 {
     S5L8900FMCState *s = S5L8900_FMC(dev);
@@ -417,11 +418,10 @@ static void s5l8900_fmc_realize(DeviceState *dev, Error **errp)
     if (!s->nand_path || !nand_image_is_store(s->nand_path)) {
         return;
     }
-    if (s->nand_overlay) {
-        error_setg(errp, "%s is a NAND image store, written in place: it takes no nand-overlay", s->nand_path);
-        return;
-    }
-    s->image = nand_image_open(dev, s->nand_path, &geo, errp);
+    /* A container writes into nand-overlay's nand.qcow2; a store of chip files is written in place. */
+    s->image = nand_image_open(dev, s->nand_path, s->nand_overlay, &geo, errp);
+    g_free(s->nand_overlay);
+    s->nand_overlay = NULL;
 }
 
 static void s5l8900_fmc_reset(DeviceState *d)
