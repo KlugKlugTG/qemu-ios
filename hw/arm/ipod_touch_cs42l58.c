@@ -91,9 +91,12 @@ static unsigned cs42l58_sample_rate(uint8_t control)
  *
  * CS42L59 (n81, 10B500): 0x1d is the headphones' volume and 0x21 the speaker's
  * (0x1f, the other output, stays muted on both routes); 7-bit two's complement
- * dB, as the family's analog headphone volume, 0x40 muted. Levels 1-16 are
- * 0x47 (-57 dB) to 0x02 (+2 dB); level 0 and an idle output write 0x40. The
- * loudest output is the one playing.
+ * in 0.5 dB steps, 0x40 muted. Levels 1-16 are 0x47 (-28.5 dB) to 0x02
+ * (+1 dB); level 0 and an idle output write 0x40. The loudest output is the
+ * one playing. Read as 1 dB steps the levels spanned 59 dB, so the middle of
+ * the slider was about 30 dB down (a few percent of full scale on a phone);
+ * 0.5 dB steps fit the same trace and give 29.5 dB, about the 2G's audible
+ * range (its WM8758 amplifier, about 25 dB).
  *
  * CS42L61 (n88, 9B206; speaker): 0x21, 8-bit two's complement in 0.5 dB
  * steps, levels 1-16 0xc4 (-30 dB) to 0x18 (+12 dB). Level 0 keeps 0xc4 and
@@ -111,10 +114,10 @@ double cs42l58_output_gain(CS42L58State *s)
             uint8_t v = s->regs[cs42l59_out[i]] & 0x7f;
 
             if (v != 0x40) {
-                db = MAX(db, (double)(int8_t)(v << 1) / 2);
+                db = MAX(db, (double)((int8_t)(v << 1) / 2) / 2);
             }
         }
-        top = 2;
+        top = 1;
         break;
     case CS42L58_VOLUME_CS42L61:
         if (!((s->regs[0x07] & 1) && s->regs[0x67] == 0x3f)) {
