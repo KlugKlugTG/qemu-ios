@@ -75,6 +75,14 @@ BlockBackend *nand_image_open_file(DeviceState *owner, const char *path,
         return NULL;
     }
 #ifdef _WIN32
+    /* Files an older engine left without the attribute: from here on an
+     * erase frees its block's clusters instead of writing zeros into them. */
+    if (writable && st.st_size != 0) {
+        DWORD returned;
+
+        DeviceIoControl((HANDLE)_get_osfhandle(fd), FSCTL_SET_SPARSE, NULL, 0,
+                        NULL, 0, &returned, NULL);
+    }
     /* Windows lacks directory fsync. Flush newly sized data/ownership files
      * before any ownership bit can be published. */
     if (writable && fsync(fd) < 0) {
