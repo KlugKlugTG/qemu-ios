@@ -256,6 +256,24 @@ int qemu_ios_portable_input_status(uint64_t id);
 int qemu_ios_portable_cancel_input(void);
 int qemu_ios_portable_motion(const QemuIosPortableMotion *sample);
 
+/* Battery and cellular, the two fake drives an app's own menu offers. Both answer
+ * false when the machine has neither the property nor the object, so a caller can
+ * leave out what cannot work here. Writes are queued on the QEMU thread; a refusal
+ * by the guest's own model is reported on stderr, not to the caller.
+ *
+ * qemu_ios_ui_battery_set: what the gas gauge / PMU reports (level 0..100) and what the
+ * charging path says: 0 auto (the board's own logic), 1 charging, 2 not charging,
+ * where the board models one ("battery-charging"; the iPad's charging is its USB
+ * port's, see qemu_ios_ui_usb_charger). The guest shows the new level on its next
+ * poll (configd's gas-gauge driver, a few seconds).
+ *
+ * qemu_ios_ui_modem_write: one property of the machine's "baseband-modem" child in its
+ * string form: incoming-call, remote-answer, remote-hangup or incoming-sms
+ * ("<number>|<text>") for the fake call and message, plus carrier, mcc-mnc,
+ * signal-dbm, registered and the rest of that object's properties. */
+bool qemu_ios_ui_battery_set(int level, int charging);
+bool qemu_ios_ui_modem_write(const char *property, const char *value);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1885,3 +1885,76 @@ int qemu_ios_portable_motion(const QemuIosPortableMotion *m)
     aio_bh_schedule_oneshot(qemu_get_aio_context(), portable_motion_bh, copy);
     return QEMU_IOS_QUEUED;
 }
+
+/* ------------------------------------------------------------- fake drives --- */
+
+/*
+ * Battery and cellular, the two things an app's own menu can drive that the guest
+ * sees as hardware. Both are the machine's own properties, so both are written
+ * through a bottom half: QOM belongs to the QEMU thread, while a caller (the app's
+ * UI thread) only announces the write and learns whether the property exists.
+ */
+struct portable_prop_write { Object *object; char *name, *value; };
+
+static void portable_prop_write_bh(void *opaque)
+{
+    struct portable_prop_write *w = opaque;
+    Error *err = NULL;
+
+    object_property_parse(w->object, w->name, w->value, &err);
+    if (err) {
+        /* This ABI answers "queued", so the guest's own refusal (a bad number, no
+         * channel to ring on) is reported here rather than to the caller. */
+        fprintf(stderr, "[fake] %s=%s: %s\n", w->name, w->value, error_get_pretty(err));
+        error_free(err);
+    }
+    g_free(w->name);
+    g_free(w->value);
+    g_free(w);
+}
+
+/* Takes ownership of value. False when the object has no such property. */
+static bool portable_prop_write(Object *object, const char *name, char *value)
+{
+    struct portable_prop_write *w;
+
+    if (!qemu_ios_ui_ready() || !object || !object_property_find(object, name)) {
+        g_free(value);
+        return false;
+    }
+    w = g_new(struct portable_prop_write, 1);
+    *w = (struct portable_prop_write){ object, g_strdup(name), value };
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), portable_prop_write_bh, w);
+    return true;
+}
+
+bool qemu_ios_ui_battery_set(int level, int charging)
+{
+    static const char *const modes[] = { "auto", "on", "off" };
+    Object *machine = qdev_get_machine();
+
+    if (!qemu_ios_ui_ready() || level < 0 || level > 100 || charging < 0 || charging > 2 ||
+        !object_property_find(machine, "battery-level")) {
+        return false;
+    }
+    if (!portable_prop_write(machine, "battery-level", g_strdup_printf("%d", level))) {
+        return false;
+    }
+    /* Only where the board models one: the iPad's charging is its USB port's
+     * (qemu_ios_ui_usb_charger), and its battery level already follows the port. */
+    if (object_property_find(machine, "battery-charging")) {
+        portable_prop_write(machine, "battery-charging", g_strdup(modes[charging]));
+    }
+    return true;
+}
+
+bool qemu_ios_ui_modem_write(const char *property, const char *value)
+{
+    Object *modem;
+
+    if (!qemu_ios_ui_ready() || !property || !*property || !value) {
+        return false;
+    }
+    modem = object_resolve_path_component(qdev_get_machine(), "baseband-modem");
+    return portable_prop_write(modem, property, g_strdup(value));
+}
