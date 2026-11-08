@@ -16,6 +16,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
+#include "qemu/thread.h"
 #include "qemu/timer.h"
 #include "qemu/seqlock.h"
 #include "qemu/cutils.h"
@@ -1894,7 +1895,30 @@ int qemu_ios_portable_motion(const QemuIosPortableMotion *m)
  * through a bottom half: QOM belongs to the QEMU thread, while a caller (the app's
  * UI thread) only announces the write and learns whether the property exists.
  */
-struct portable_prop_write { Object *object; char *name, *value; };
+struct portable_prop_write { Object *object; char *name, *value; bool modem; };
+
+/* The last modem write's refusal: the app reads it because the write itself only
+ * answers "queued". Empty means the last write was accepted. */
+static QemuMutex portable_modem_lock;
+static char *portable_modem_error;
+
+static void __attribute__((constructor)) portable_modem_lock_init(void)
+{
+    qemu_mutex_init(&portable_modem_lock);
+}
+
+void qemu_ios_ui_modem_error(char *out, unsigned capacity)
+{
+    if (!out || !capacity) {
+        return;
+    }
+    out[0] = 0;
+    qemu_mutex_lock(&portable_modem_lock);
+    if (portable_modem_error) {
+        snprintf(out, capacity, "%s", portable_modem_error);
+    }
+    qemu_mutex_unlock(&portable_modem_lock);
+}
 
 static void portable_prop_write_bh(void *opaque)
 {
@@ -1902,9 +1926,13 @@ static void portable_prop_write_bh(void *opaque)
     Error *err = NULL;
 
     object_property_parse(w->object, w->name, w->value, &err);
+    if (w->modem) {
+        qemu_mutex_lock(&portable_modem_lock);
+        g_free(portable_modem_error);
+        portable_modem_error = err ? g_strdup(error_get_pretty(err)) : NULL;
+        qemu_mutex_unlock(&portable_modem_lock);
+    }
     if (err) {
-        /* This ABI answers "queued", so the guest's own refusal (a bad number, no
-         * channel to ring on) is reported here rather than to the caller. */
         fprintf(stderr, "[fake] %s=%s: %s\n", w->name, w->value, error_get_pretty(err));
         error_free(err);
     }
@@ -1914,7 +1942,7 @@ static void portable_prop_write_bh(void *opaque)
 }
 
 /* Takes ownership of value. False when the object has no such property. */
-static bool portable_prop_write(Object *object, const char *name, char *value)
+static bool portable_prop_write(Object *object, const char *name, char *value, bool modem)
 {
     struct portable_prop_write *w;
 
@@ -1923,7 +1951,7 @@ static bool portable_prop_write(Object *object, const char *name, char *value)
         return false;
     }
     w = g_new(struct portable_prop_write, 1);
-    *w = (struct portable_prop_write){ object, g_strdup(name), value };
+    *w = (struct portable_prop_write){ object, g_strdup(name), value, modem };
     aio_bh_schedule_oneshot(qemu_get_aio_context(), portable_prop_write_bh, w);
     return true;
 }
@@ -1937,13 +1965,13 @@ bool qemu_ios_ui_battery_set(int level, int charging)
         !object_property_find(machine, "battery-level")) {
         return false;
     }
-    if (!portable_prop_write(machine, "battery-level", g_strdup_printf("%d", level))) {
+    if (!portable_prop_write(machine, "battery-level", g_strdup_printf("%d", level), false)) {
         return false;
     }
     /* Only where the board models one: the iPad's charging is its USB port's
      * (qemu_ios_ui_usb_charger), and its battery level already follows the port. */
     if (object_property_find(machine, "battery-charging")) {
-        portable_prop_write(machine, "battery-charging", g_strdup(modes[charging]));
+        portable_prop_write(machine, "battery-charging", g_strdup(modes[charging]), false);
     }
     return true;
 }
@@ -1956,5 +1984,5 @@ bool qemu_ios_ui_modem_write(const char *property, const char *value)
         return false;
     }
     modem = object_resolve_path_component(qdev_get_machine(), "baseband-modem");
-    return portable_prop_write(modem, property, g_strdup(value));
+    return portable_prop_write(modem, property, g_strdup(value), true);
 }

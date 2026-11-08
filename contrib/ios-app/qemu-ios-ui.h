@@ -273,6 +273,9 @@ int qemu_ios_portable_motion(const QemuIosPortableMotion *sample);
  * signal-dbm, registered and the rest of that object's properties. */
 bool qemu_ios_ui_battery_set(int level, int charging);
 bool qemu_ios_ui_modem_write(const char *property, const char *value);
+/* The last modem write's refusal, in the caller's buffer: "" when it was accepted.
+ * The write is queued, so read this after it has had a moment to run. */
+void qemu_ios_ui_modem_error(char *out, unsigned capacity);
 
 #ifdef __cplusplus
 }

@@ -30,6 +30,11 @@ typedef void *ObjectProperty;
 #define g_free free
 
 static char *g_strdup(const char *s) { char *c = malloc(strlen(s) + 1); strcpy(c, s); return c; }
+/* The error channel's lock: this test's single thread makes it a no-op. */
+typedef int QemuMutex;
+static void qemu_mutex_init(QemuMutex *m) { *m = 0; }
+static void qemu_mutex_lock(QemuMutex *m) { (*m)++; }
+static void qemu_mutex_unlock(QemuMutex *m) { (*m)--; }
 static char *g_strdup_printf(const char *format, ...)
 {
     char buffer[64];
