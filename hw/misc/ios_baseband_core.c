@@ -1907,6 +1907,23 @@ bool ios_bb_carrier_ok(const char *name)
     return true;
 }
 
+/* Why ios_bb_incoming_sms would refuse right now, as a phrase for the caller's error
+ * message; NULL when it would accept. The three conditions are the ones its guard
+ * tests, so a caller can say which one holds instead of "not in a state to receive". */
+const char *ios_bb_incoming_sms_blocker(const IosBbCore *bb)
+{
+    if (!bb->ch[bb->sms_ch].open) {
+        return "its SMS channel (DLCI) is not open";
+    }
+    if (!radio_ok(bb)) {
+        return "its radio is off";
+    }
+    if (sim_locked(bb)) {
+        return "its SIM is locked";
+    }
+    return NULL;
+}
+
 bool ios_bb_incoming_sms(IosBbCore *bb, const char *number, const char *text)
 {
     char pdu[400];
