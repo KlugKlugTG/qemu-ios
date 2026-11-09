@@ -6,11 +6,13 @@
  * SLICE:gles-prelude hw/arm/gles-host.c range #include <TargetConditionals.h> | /* Old guest engines retain
  * SLICE:gles-refusals hw/arm/gles-host.c range /* ---------------------------------------------------------------- refusals | /* Only expose formats our decoder accepts
  * SLICE:policy hw/arm/gles-host.c range static int gles_live_contexts; | static GLESHost gh_legacy;
+ * SLICE:ops hw/arm/gles-host.c range /* ---------------------------------------------------------- GPU memory | /*\n * Profiling and strictness
  * SLICE:ops hw/arm/gles-host.c fn gles_buffer_destroy gles_buffer_bind gles_buffer_intern gles_buffer_forget
  * SLICE:ops hw/arm/gles-host.c range static GHashTable *gles_contexts, *gles_groups; | #ifdef GLES_HOST_ANGLE\nstatic void gles_snapshot_register
  * SLICE:ops2 hw/arm/gles-host.c range /* A guest reboot cannot send destruction calls | #endif\n\nvoid gles_host_reset
  * SLICE:ops2 hw/arm/gles-host.c fn gles_host_reset
- * SLICE:guestgc contrib/it-gles/mbxshim.c range typedef struct {\n | \nextern void *calloc
+ * SLICE:queryfree hw/arm/gles-queries.h fn gles_queries_free
+ * SLICE:guestgc contrib/it-gles/mbxshim.c range typedef struct MapStorage MapStorage; | \nextern void *calloc
  * SLICE:sharegroup contrib/it-gles/mbxshim.c range static int GLESCreateSharegroup( | /*\n * The one that matters.
  * SLICE:sharegroup contrib/it-gles/mbxshim.c define GLES_N_SLOTS|GLES_N_HAND
  * SLICE:gc contrib/it-gles/mbxshim.c range static int GLESCreateGCWithAPI( | static int GLESDestroyGC(void *gc);
@@ -35,6 +37,7 @@ static void migrate_del_blocker(Error **e) { g_clear_pointer(e,g_free); }
 #include "policy.h"
 /* The CGL backend's context create. */
 #include "create.h"
+#include "queryfree.h"
 #include "ops.h"
 static void gles_snapshot_register(void) {}
 #include "ops2.h"
@@ -43,6 +46,7 @@ static void gles_snapshot_register(void) {}
 static bool older_host, reject_api;
 static long long qc(unsigned slot, void *gc, unsigned argc, const unsigned *args)
 { if(reject_api && slot==GLES_OP_NEW_CONTEXT && argc==2)return -2; if(older_host && slot==GLES_OP_NEW_CONTEXT && argc==2)return -1; return gles_context_operation(slot,gc?((GuestGC*)gc)->host:0,argc,args); }
+static void map_free(void *owner, unsigned n, const unsigned *names) { (void)owner; (void)n; (void)names; }
 #include "sharegroup.h"
 static void w(const char *s) {}
 static void gles_hand_table(void **t) {}

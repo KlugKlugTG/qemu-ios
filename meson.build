@@ -82,7 +82,7 @@ python = import('python').find_installation()
 cc = meson.get_compiler('c')
 all_languages = ['c']
 # Darwin's guest GL executor uses Imagination's reference PVRTC decoder.
-enable_cpp = host_os in ['windows', 'darwin', 'linux'] or get_option('plugins')
+enable_cpp = host_os in ['windows', 'darwin'] or get_option('plugins')
 if enable_cpp and add_languages('cpp', required: host_os == 'darwin', native: false)
   all_languages += ['cpp']
   cxx = meson.get_compiler('cpp')
@@ -854,16 +854,6 @@ elif host_os == 'darwin'
   host_dsosuf = '.dylib'
   pvg = dependency('appleframeworks', modules: ['ParavirtualizedGraphics', 'Metal'],
                    required: get_option('pvg'))
-  # qemu-ios front-end hooks, declared weak and defined only in the app library
-  # (contrib/ios-app/qemu-ios-ui.c), and the profile runtime's (system/vl.c,
-  # LT_PGO_DUMP). ELF and PE resolve a missing weak symbol to null; Apple's
-  # linker does so only for the symbols it is told may be missing.
-  foreach hook : ['qemu_ios_frame_path_event', 'qemu_ios_profile_begin',
-                  'qemu_ios_profile_gl', 'qemu_ios_profile_lock',
-                  'qemu_ios_profile_callback', '__llvm_profile_write_file',
-                  '__llvm_profile_set_filename', '__llvm_profile_reset_counters']
-    emulator_link_args += '-Wl,-U,_' + hook
-  endforeach
 elif host_os == 'sunos'
   socket = [cc.find_library('socket'),
             cc.find_library('nsl'),
@@ -1243,19 +1233,17 @@ cocoa = dependency('appleframeworks',
 # guest's GLES HLE probe fails cleanly.
 host_opengl = dependency('appleframeworks', modules: 'OpenGL',
                          required: false)
-# Windows keeps the existing fixed-function executor with hardware WGL.
-if host_os == 'windows'
-  host_opengl = declare_dependency(dependencies: [dependency('glew'),
-    cc.find_library('opengl32'), cc.find_library('gdi32'), cc.find_library('user32')],
-    compile_args: ['-DGLES_HOST_WGL=1'])
-endif
+# The experimental ANGLE renderer (gles-host-angle.c) beside CGL, chosen per boot (-M ...,gl-renderer=angle): it
+# needs ANGLE's headers to build and opens libEGL and libGLESv2 at run time, through @rpath (the app's Frameworks;
+# a development build's rpath names the prefix's out/ltm-metal), so a build without them still runs on CGL.
 angle_prefix = get_option('ltm_angle_prefix')
+host_angle = declare_dependency()
 if angle_prefix != ''
-  if host_os != 'darwin'
-    error('The experimental ANGLE backend currently requires macOS')
+  if not host_opengl.found()
+    error('The experimental ANGLE renderer is built beside the CGL one, on macOS')
   endif
-  host_opengl = declare_dependency(compile_args: ['-DGLES_HOST_ANGLE=1', '-I' + angle_prefix / 'include'],
-    link_args: ['-L' + angle_prefix / 'out/ltm-metal', '-Wl,-rpath,' + angle_prefix / 'out/ltm-metal', '-lEGL', '-lGLESv2'])
+  host_angle = declare_dependency(compile_args: ['-DGLES_HOST_WITH_ANGLE=1', '-I' + angle_prefix / 'include'],
+    link_args: ['-Wl,-rpath,' + angle_prefix / 'out/ltm-metal'])
 endif
 # IOSurface (and the CoreFoundation dictionary that configures one) is not
 # optional garnish here: it is the render target the iOS present path reads,
@@ -1266,29 +1254,6 @@ host_gles = dependency('appleframeworks',
                        modules: ['OpenGLES', 'Foundation', 'IOSurface',
                                  'CoreFoundation'],
                        required: false)
-
-# Real offscreen renderers for the portable engine. Android executes GLES1 and
-# GLES2 natively; Linux uses a Mesa compatibility context as the reference.
-host_egl = not_found
-if host_os in ['linux', 'android']
-  egl_dep = dependency('egl', required: false)
-  if not egl_dep.found()
-    egl_dep = cc.find_library('EGL', required: false)
-  endif
-  if cc.get_define('__ANDROID__') != ''
-    es1 = cc.find_library('GLESv1_CM', required: true)
-    es2 = cc.find_library('GLESv2', required: true)
-    egl_loader = cc.find_library('dl', required: true)
-    host_egl = declare_dependency(dependencies: [egl_dep, es2, es1, egl_loader],
-      compile_args: ['-DGLES_HOST_EGL=1', '-DGLES_HOST_EGL_ES=1'])
-  else
-    gl_dep = dependency('gl', required: false)
-    if egl_dep.found() and gl_dep.found()
-      host_egl = declare_dependency(dependencies: [egl_dep, gl_dep],
-        compile_args: ['-DGLES_HOST_EGL=1'])
-    endif
-  endif
-endif
 
 vmnet = dependency('appleframeworks', modules: 'vmnet', required: get_option('vmnet'))
 if vmnet.found() and not cc.has_header_symbol('vmnet/vmnet.h',
@@ -1343,8 +1308,8 @@ else
 endif
 
 slirp = not_found
-if not get_option('slirp').disabled() and (not get_option('slirp').auto() or have_system)
-  slirp = dependency('slirp', allow_fallback: false, required: false,
+if not get_option('slirp').auto() or have_system
+  slirp = dependency('slirp', required: get_option('slirp'),
                      method: 'pkg-config')
   # slirp < 4.7 is incompatible with CFI support in QEMU.  This is because
   # it passes function pointers within libslirp as callbacks for timers.
@@ -1363,12 +1328,17 @@ if not get_option('slirp').disabled() and (not get_option('slirp').auto() or hav
   # net_slirp_set_restrict() (netdev_set_restrict, qemu_ios_ui_net_restrict) flips a
   # running stack's restrict flag in place with slirp_set_restricted(), and lan=off /
   # qemu_ios_ui_net_lan refuse local-network destinations with slirp_set_local_network()
-  # (the guest's DNS through net/slirp-dns.c on macOS, slirp_set_dns_forward()),
-  # both from subprojects/packagefiles/libslirp-set-restricted.patch. A libslirp built with
-  # the patch (the app's static native root) is used as found; one without it (Homebrew's)
-  # gives way to the patched subproject, static so the binaries gain no runtime dylib.
-  if not slirp.found() or not cc.has_function('slirp_set_dns_forward', dependencies: slirp,
-                                           prefix: '#include <libslirp.h>')
+  # (the guest's DNS through net/slirp-dns.c on macOS, slirp_set_dns_forward()), and no
+  # destination on the host itself is reachable (slirp_destination_class()), all from
+  # subprojects/packagefiles/libslirp-set-restricted.patch; guestfwd's fdpass: forwards with
+  # slirp_add_guestfwd_connector() from libslirp-guestfwd-connector.patch. A libslirp built
+  # with both patches (the app's static native root) is used as found; one without them
+  # (Homebrew's, or one from older patches) gives way to the patched subproject, static so
+  # the binaries gain no runtime dylib.
+  if slirp.found() and not (cc.has_function('slirp_destination_class', dependencies: slirp,
+                                            prefix: '#include <libslirp.h>') and
+                            cc.has_function('slirp_add_guestfwd_connector', dependencies: slirp,
+                                            prefix: '#include <libslirp.h>'))
     slirp = subproject('slirp', default_options: ['default_library=static']).get_variable('libslirp_libdep')
   endif
 endif
@@ -1446,7 +1416,7 @@ endif
 spice_headers = spice.partial_dependency(compile_args: true, includes: true)
 
 rt = not_found
-if host_os != 'windows' and cc.get_define('__ANDROID__') == ''
+if host_os != 'windows'
   have_shm_open = cc.has_function('shm_open')
   if not have_shm_open
     rt = cc.find_library('rt', required: true)
@@ -1878,7 +1848,7 @@ endif
 
 coreaudio = not_found
 if not get_option('coreaudio').auto() or (host_os == 'darwin' and have_system)
-  coreaudio = dependency('appleframeworks', modules: 'CoreAudio',
+  coreaudio = dependency('appleframeworks', modules: ['CoreAudio', 'AudioToolbox'],
                          required: get_option('coreaudio'))
 endif
 
@@ -2386,20 +2356,6 @@ endif
 #################
 
 config_host_data = configuration_data()
-
-lt_dynarmic_probe = not_found
-lt_dynarmic_prefix = get_option('lt_dynarmic_probe_prefix')
-if lt_dynarmic_prefix != ''
-  if 'cpp' not in all_languages or not have_system or get_option('plugins')
-    error('Dynarmic probe requires C++, system emulation and plugins disabled')
-  endif
-  lt_dynarmic_library = cxx.find_library('dynarmic',
-    dirs: [lt_dynarmic_prefix / 'lib', lt_dynarmic_prefix / 'lib/x86_64-linux-gnu'],
-    required: true)
-  lt_dynarmic_probe = declare_dependency(dependencies: lt_dynarmic_library,
-    include_directories: include_directories(lt_dynarmic_prefix / 'include'))
-endif
-config_host_data.set('CONFIG_LT_DYNARMIC_PROBE', lt_dynarmic_probe.found())
 
 config_host_data.set('CONFIG_HAVE_RUST', have_rust)
 audio_drivers_selected = []

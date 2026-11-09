@@ -43,6 +43,7 @@
 #include "system/reset.h"
 #include "migration/vmstate.h"
 #include "hw/misc/ios_baseband.h"
+#include "trace.h"
 #include "hw/misc/ios_baseband_core.h"
 
 #define TYPE_CHARDEV_IOS_BB "chardev-ios-baseband"
@@ -180,6 +181,8 @@ static void iosbb_vibrator_update(IosBasebandState *s);
 static void iosbb_ctl(void *opaque, int n, int level)
 {
     IosBasebandState *s = opaque;
+
+    trace_ios_baseband_control(n, level, s->bb.now_ms, s->bb.camp_due_ms);
 
     if (getenv("IOS_BB_TRACE")) {
         fprintf(stderr, "%.3f ios-bb: %s %d\n", qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) / 1e6,
@@ -404,6 +407,7 @@ static void iosbb_set_mcc_mnc_reg(Object *obj, const char *value, Error **errp)
     ios_bb_operator_changed(&IOS_BASEBAND(obj)->bb);
     iosbb_arm(IOS_BASEBAND(obj), qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + IOS_BB_LATENCY_MS);
 }
+STR_PROP(smsc, sca)
 STR_PROP(voicemail, voicemail)
 STR_PROP(imei, imei)
 STR_PROP(imsi, imsi)
@@ -762,10 +766,54 @@ static int iosbb_pre_load(void *opaque)
     return 0;
 }
 
+/* A restored string must end inside its array: the core reads them with strlen and %s. */
+#define IOSBB_STR_OK(a) (memchr((a), 0, sizeof(a)) != NULL)
+/* A channel the core sends on through bb.ch[]. */
+#define IOSBB_CH_OK(c)  ((c) >= 0 && (c) < IOS_BB_MAX_CH)
+
 /* The motor line follows the restored state (off unless the vibrator subsection came). */
 static int iosbb_post_load(void *opaque, int version_id)
 {
     IosBasebandState *s = opaque;
+    IosBbCore *bb = &s->bb;
+
+    /* Every length and position against its buffer, every channel against bb.ch[]. */
+    if (s->out_len > sizeof(s->out) || s->ifx.txq_len > sizeof(s->ifx.txq) ||
+        bb->h5_rxlen > sizeof(bb->h5_rx) || bb->h5_txq_len > sizeof(bb->h5_txq) ||
+        bb->h5_nunacked > IOS_BB_H5_WINDOW || bb->ip_rxlen > sizeof(bb->ip_rx) ||
+        bb->muxrx.cnt > sizeof(bb->muxrx.buf) ||
+        !IOSBB_CH_OK(bb->creg_ch) || !IOSBB_CH_OK(bb->cgreg_ch) || !IOSBB_CH_OK(bb->xciev_ch) ||
+        !IOSBB_CH_OK(bb->xsim_ch) || !IOSBB_CH_OK(bb->call_ch) || !IOSBB_CH_OK(bb->sms_ch) ||
+        !IOSBB_CH_OK(bb->temp_ch) || (bb->gps.ch != -1 && !IOSBB_CH_OK(bb->gps.ch)) ||
+        !IOSBB_STR_OK(bb->operator_long) || !IOSBB_STR_OK(bb->operator_short) ||
+        !IOSBB_STR_OK(bb->plmn) || !IOSBB_STR_OK(bb->sca) || !IOSBB_STR_OK(bb->voicemail) ||
+        !IOSBB_STR_OK(bb->imei) || !IOSBB_STR_OK(bb->imsi) || !IOSBB_STR_OK(bb->iccid) ||
+        !IOSBB_STR_OK(bb->pin) || !IOSBB_STR_OK(bb->puk) || !IOSBB_STR_OK(bb->loci_plmn) ||
+        !IOSBB_STR_OK(bb->last_mo_num) || !IOSBB_STR_OK(bb->last_mo_text) ||
+        !IOSBB_STR_OK(bb->last_dialed)) {
+        return -EINVAL;
+    }
+    for (int i = 0; i < IOS_BB_H5_WINDOW; i++) {
+        if (bb->h5_unacked[i].len > sizeof(bb->h5_unacked[i].data)) {
+            return -EINVAL;
+        }
+    }
+    /* An AT line is terminated at len and parsed up to its NUL; the last byte is never written. */
+    for (int i = 0; i < IOS_BB_MAX_CH; i++) {
+        if (bb->ch[i].len >= sizeof(bb->ch[i].line) || bb->ch[i].line[sizeof(bb->ch[i].line) - 1]) {
+            return -EINVAL;
+        }
+    }
+    for (int i = 0; i < IOS_BB_MAX_CALLS; i++) {
+        if (!IOSBB_STR_OK(bb->calls[i].number)) {
+            return -EINVAL;
+        }
+    }
+    for (int i = 0; i < IOS_BB_SMS_STORE; i++) {
+        if (!IOSBB_STR_OK(bb->store[i].num) || !IOSBB_STR_OK(bb->store[i].pdu)) {
+            return -EINVAL;
+        }
+    }
 
     if (s->bb.camp_due_ms == -1) {
         bool reg = s->bb.last_creg == 1 || s->bb.last_creg == 5;
@@ -1045,7 +1093,7 @@ static void iosbb_instance_init(Object *obj)
 {
     IosBasebandState *s = IOS_BASEBAND(obj);
 
-    snprintf(s->bb.operator_long, sizeof(s->bb.operator_long), "Light Touch");
+    snprintf(s->bb.operator_long, sizeof(s->bb.operator_long), "AT&T");
     snprintf(s->bb.plmn, sizeof(s->bb.plmn), "00101");
     snprintf(s->bb.imei, sizeof(s->bb.imei), "000000001234569");
     snprintf(s->bb.imsi, sizeof(s->bb.imsi), "001010000000001");
@@ -1064,6 +1112,7 @@ static void iosbb_instance_init(Object *obj)
     object_property_add_str(obj, "mcc-mnc", iosbb_get_mcc_mnc, iosbb_set_mcc_mnc_reg);
     object_property_set_description(obj, "mcc-mnc",
         "PLMN digits (MCC+MNC) of the fake home network");
+    object_property_add_str(obj, "smsc", iosbb_get_smsc, iosbb_set_smsc);
     object_property_add_str(obj, "voicemail", iosbb_get_voicemail,
                             iosbb_set_voicemail);
     object_property_add_str(obj, "imei", iosbb_get_imei, iosbb_set_imei);

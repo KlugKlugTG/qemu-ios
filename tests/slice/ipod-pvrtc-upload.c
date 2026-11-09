@@ -4,6 +4,11 @@
  *
  * SLICE:types hw/arm/gles-host.c range } GLESSurface; | typedef struct {\n#if
  * SLICE hw/arm/gles-host.c range #define PVRTC_RGB_4BPP | /*\n * The paletted formats:
+ * SLICE hw/arm/gles-host.c define GLES_PRIVATE_NAME
+ * SLICE hw/arm/gles-host.c define GLES_MAX_GPU_BYTES
+ * SLICE hw/arm/gles-host.c range /* Bytes held by every buffer object | /*\n * Grow-and-keep
+ * SLICE hw/arm/gles-host.c range /* ---------------------------------------------------------- GPU memory | /*\n * Profiling and strictness
+ * SLICE hw/arm/gles-host.c fn gles_unpack_tight gles_guest_name_ok gles_guest_names
  * SLICE hw/arm/gles-host.c range static GLESPVRTC *gles_pvrtc_texture( | /* IOSurface-backed textures
  * SLICE:cases hw/arm/gles-host.c range case GLES_SLOT_COMPRESSED_TEX_SUB_IMAGE_2D: | case GLES_SLOT_ALPHA_FUNC:
  * PKG glib-2.0
@@ -18,6 +23,7 @@
 #include "powervr/pvrtc.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +36,7 @@ static uint32_t ldl_le_p(const uint8_t*p) {return p[0]|p[1]<<8|p[2]<<16|(uint32_
 #define QEMU_BUILD_BUG_ON(x)
 typedef struct { int unused;
 #include "types.h"
-typedef struct {GHashTable *pvrtc,*surfaces; GLESPVRTC default_pvrtc; GLenum error;} State;
+typedef struct {GHashTable *pvrtc,*surfaces,*charged,*own_charged; GLESPVRTC default_pvrtc; GLenum error;} State;
 static State first, second, *current=&first;
 #define gh (*current)
 static uint8_t *guest, *decoded;
@@ -103,6 +109,26 @@ int main(void) {
     assert(fetches==1); /* Reject before touching a guest pointer. */
     assert(gles_pvrtc_upload(NULL,GL_TEXTURE_3D,0,PVRTC_RGBA_4BPP,8,8,0,32,1,false)==-1);
     expect_error(GL_INVALID_ENUM);
+    /* A cube map's six faces (Epic Citadel's environment map): each takes its own picture and its own charge;
+     * replacing part of a face is refused, as only 2D levels are tracked. */
+    GLuint cube;glGenTextures(1,&cube);glBindTexture(GL_TEXTURE_CUBE_MAP,cube);
+    uint8_t faces[6][8*8*4],face_px[8*8*4];uint64_t held=gles_held_bytes;
+    for(unsigned f=0;f<6;f++) {
+        words(4);for(unsigned i=0;i<4;i++) {uint32_t c=0x80008000u|(f*5u)<<10|(31u-f*5u)<<5|(f*5u)<<21;memcpy(guest+8*i+4,&c,4);}
+        assert(!gles_pvrtc_upload(NULL,GL_TEXTURE_CUBE_MAP_POSITIVE_X+f,0,PVRTC_RGBA_4BPP,8,8,0,32,1,false));
+        memcpy(faces[f],decoded,sizeof(faces[f]));
+        assert(!f || memcmp(faces[f],faces[f-1],sizeof(faces[f])));
+    }
+    assert(gles_held_bytes-held==6*8*8*4);
+    for(unsigned f=0;f<6;f++) {
+        glGetTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_X+f,0,GL_RGBA,GL_UNSIGNED_BYTE,face_px);
+        assert(!memcmp(face_px,faces[f],sizeof(face_px)));
+    }
+    assert(gles_pvrtc_upload(NULL,GL_TEXTURE_CUBE_MAP_NEGATIVE_Z,0,PVRTC_RGBA_4BPP,8,8,0,32,1,true)==-1);
+    expect_error(GL_INVALID_ENUM);
+    assert(gles_pvrtc_upload(NULL,GL_TEXTURE_CUBE_MAP,0,PVRTC_RGBA_4BPP,8,8,0,32,1,false)==-1);
+    expect_error(GL_INVALID_ENUM);
+    glDeleteTextures(1,&cube);glBindTexture(GL_TEXTURE_2D,texture);
     uint32_t a[]={GL_TEXTURE_2D,0,0,0,8,8,PVRTC_RGBA_4BPP,32,1};
     assert(!dispatch(1,a));a[2]=1;assert(dispatch(1,a)==-1);expect_error(GL_INVALID_OPERATION);a[2]=0;
     a[4]=4;assert(dispatch(1,a)==-1);expect_error(GL_INVALID_OPERATION);a[4]=8;

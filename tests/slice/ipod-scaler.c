@@ -12,7 +12,9 @@
 typedef int SysBusDevice;
 typedef int DeviceState;
 #define ROUND_UP(n,d) (((n)+(d)-1)/(d)*(d))
-typedef int MemoryRegion;
+typedef struct { uint64_t addr; } MemoryRegion;
+#define trace_ipod_scaler_reg_write(...) ((void)0)
+#define trace_ipod_scaler_transfer(...) ((void)0)
 typedef uint64_t hwaddr;
 typedef int *qemu_irq;
 static uint8_t ram[0x100000];
@@ -31,31 +33,8 @@ static int64_t qemu_clock_get_ns(int c) { (void)c; return now; }
 static void timer_mod(QEMUTimer *t, int64_t at) { t->pending = true; t->deadline = at; }
 static void timer_del(QEMUTimer *t) { t->pending = false; }
 static bool timer_pending(QEMUTimer *t) { return t->pending; }
-/* The worker thread is not started: main sets LT_SCALER_ASYNC=off, so transfers run in the start write. */
-typedef int QemuThread, QemuMutex, QemuCond;
-#define QEMU_THREAD_DETACHED 0
-static void qemu_thread_create(QemuThread *t, const char *n, void *(*f)(void *), void *o, int m)
-{ (void)t; (void)n; (void)f; (void)o; (void)m; assert(0); }
-static void qemu_mutex_lock(QemuMutex *m) { (void)m; }
-static void qemu_mutex_unlock(QemuMutex *m) { (void)m; }
-static void qemu_cond_wait(QemuCond *c, QemuMutex *m) { (void)c; (void)m; assert(0); }
-static void qemu_cond_signal(QemuCond *c) { (void)c; }
-static void qemu_cond_broadcast(QemuCond *c) { (void)c; }
-static void qemu_cond_init(QemuCond *c) { (void)c; }
-static void rcu_register_thread(void) {}
-#define qatomic_read(p) (*(p))
-static bool bql_locked(void) { return false; }
-static void bql_lock(void) {}
-static void bql_unlock(void) {}
-static void gles_present_wait(void) {}
 #include "slice.h"
 static QEMUTimer done;
-/* A transfer reads the registers as they were at its start write (s->job). */
-static bool convert_now(IPodScalerState *s)
-{
-    memcpy(s->job, s->regs, sizeof(s->job));
-    return scaler_convert(s);
-}
 /* The clock reaches the pending end, and the timer fires. */
 static void run_to_end(IPodScalerState *s)
 {
@@ -66,7 +45,6 @@ static void run_to_end(IPodScalerState *s)
 }
 int main(void)
 {
-    setenv("LT_SCALER_ASYNC", "off", 1);
     int irq=0;IPodScalerState s={.irq=&irq,.done=&done};
     uint32_t *r=s.regs;
     /* A transfer stays busy, its done interrupt unraised, until its end: 1 ns a destination pixel, 20 us at least.
@@ -102,9 +80,14 @@ int main(void)
     scaler_write(&s,4,0x201,4);assert(!irq);
     run_to_end(&s);assert(irq);
     assert(!memcmp(ram+512,"\0\0\0\xff\xff\xff\xff\xff\0\0\xfe\xff",12));
-    r[13]=0x10000000;assert(!convert_now(&s));
-    r[13]=BASE+512;r[9]|=1;assert(!convert_now(&s));
-    r[9]&=~1u;r[16]++;assert(!convert_now(&s));
+    r[13]=0x10000000;assert(!scaler_convert(&s));
+    r[13]=BASE+512;r[9]|=1;assert(!scaler_convert(&s));
+    r[9]&=~1u;r[16]=0;assert(!scaler_convert(&s));
+    r[16]=(2<<16)|1;r[0x50/4]=r[0x54/4]=2<<16;
+    memset(ram+512,0xa5,128);
+    assert(scaler_convert(&s));
+    assert(!memcmp(ram+512,"\0\0\0\xff\0\0\xfe\xff",8));
+    for(unsigned i=520;i<640;i++)assert(ram[i]==0xa5);
     scaler_write(&s,4,2,4);assert(!irq);
     for(unsigned i=0;i<G_N_ELEMENTS(s.regs);i++) assert(!s.regs[i]);
     puts("PASS: NV12 matrix conversion, RGB565/BGRA, padding, DMA bounds, IRQ mask/ack and reset, completion after the transfer's time");

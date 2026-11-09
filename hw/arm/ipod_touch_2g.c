@@ -1792,7 +1792,7 @@ static void ipod_touch_instance_init(Object *obj)
 
     /* On by default: the emulated device is effectively tethered to the host. */
     IPOD_TOUCH_MACHINE(obj)->usb_attached = true;
-    IPOD_TOUCH_MACHINE(obj)->battery_adc = 850;
+    IPOD_TOUCH_MACHINE(obj)->battery_adc = pcf50633_adc_for_level(100);
     object_property_add(obj, "battery-adc", "int", ipod_touch_get_battery_adc,
                         ipod_touch_set_battery_adc, NULL, NULL);
     object_property_add(obj, "battery-level", "int", ipod_touch_get_battery_level,
@@ -3431,6 +3431,7 @@ static void ipod_touch_machine_init(MachineState *machine)
 
 static void ipod_touch_machine_class_init(ObjectClass *klass, const void *data)
 {
+    gles_host_class_init(klass);
     object_class_property_add(klass, "bt", "bool", ipod_touch_get_bt,
                               ipod_touch_set_bt, NULL, NULL);
     object_class_property_set_description(klass, "bt", "Emulated Bluetooth HCI controller (default on)");

@@ -82,21 +82,6 @@ void s5l8930_iop_core_stop(DeviceState *dev);
 void s5l8930_iop_core_set_iop(DeviceState *dev, DeviceState *iop);
 void s5l8930_iop_trace_rings(DeviceState *iop);
 
-/* LT_NAND_PROF=1: NAND path counters, printed by s5l8930_iop.c to stderr in 5 s blocks. */
-enum {
-    IOPROF_PREAD, IOPROF_PWRITE, IOPROF_ZERO, IOPROF_PREAD_NS, IOPROF_PWRITE_NS, IOPROF_ZERO_NS,
-    IOPROF_PG_READ, IOPROF_PG_PROG, IOPROF_ERASE, IOPROF_FMI_IRQ, IOPROF_CDMA_IRQ,
-    IOPROF_DB_AP2IOP, IOPROF_DB_IOP2AP, IOPROF_CACHECTL, IOPROF_CDMA_GO, IOPROF_IOP_NS, IOPROF_AP_NS, IOPROF_N
-};
-extern bool s5l8930_ioprof_on;
-extern uint64_t s5l8930_ioprof[IOPROF_N];
-static inline void s5l8930_ioprof_add(int i, uint64_t v)
-{
-    if (unlikely(s5l8930_ioprof_on)) {
-        qatomic_set(&s5l8930_ioprof[i], qatomic_read(&s5l8930_ioprof[i]) + v);
-    }
-}
-
 static inline hwaddr s5l8930_iop_pa(hwaddr a)
 {
     return (a & 0xf0000000) == 0xc0000000 ? a - 0xc0000000 + S5L8930_DRAM_BASE : a;
@@ -292,13 +277,6 @@ void ipod_scaler_set_version(DeviceState *scaler, uint32_t version);
 void s5l8930_cdma_set_source(DeviceState *dev, hwaddr base, hwaddr size,
                              uint32_t (*avail)(void *opaque, hwaddr addr, bool to_device),
                              void *opaque);
-/*
- * Optional, for a source registered above: move len bytes between a FIFO window at addr and buf in
- * one call, with the same effect as len / width register accesses in order. Returns the bytes moved.
- */
-void s5l8930_cdma_set_bulk(DeviceState *dev, hwaddr base,
-                           uint32_t (*xfer)(void *opaque, hwaddr addr, uint8_t *buf, uint32_t len,
-                                            bool to_device));
 void s5l8930_cdma_kick(DeviceState *dev);
 void s5l8930_cdma_sink_done(DeviceState *dev, uint32_t fifo_base, uint32_t size);
 
@@ -322,8 +300,7 @@ void s5l8930_cdma_sink_done(DeviceState *dev, uint32_t fifo_base, uint32_t size)
 unsigned s5l8930_i2s_rate(unsigned port);
 /* The same, with the port's output voice set to it while TX runs: a CDMA chain's start. */
 unsigned s5l8930_i2s_sync_rate(unsigned port);
-/* A paced CDMA chain's bytes for a TX FIFO in one go; 0 if fifo is no port's TX FIFO. */
-uint32_t s5l8930_i2s_tx_bulk(hwaddr fifo, const uint8_t *buf, uint32_t len);
+unsigned s5l8930_i2s_frame_bytes(unsigned port, bool input);
 #define S5L8930_CDMA_CHANNELS    0x26
 
 /*

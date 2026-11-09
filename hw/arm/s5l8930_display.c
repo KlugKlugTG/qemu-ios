@@ -20,11 +20,9 @@
 #include "hw/arm/s5l8930.h"
 #include "hw/arm/frame-timeline.h"
 #include "hw/arm/panel-gamma.h"
-#include "hw/arm/gles-present.h"
 #include "system/runstate.h"
 #include "ui/input.h"
 #include "qemu/cutils.h"
-#include "qemu/main-loop.h"
 #include "system/address-spaces.h"
 #include "migration/vmstate.h"
 #include "ui/console.h"
@@ -44,12 +42,14 @@
 #define DP_FIFO_COUNT       0x1044    /* polled to 0 */
 #define DP_SWAP_DONE        0x1048    /* low 16 bits: last completed swap ID */
 #define DP_UI_BASE(l)       (0x4000 + (l) * 0x1000)
-#define DP_UI_FORMAT        0x40
+#define DP_UI_FORMAT        0x40      /* bits 8-10 the pixel format, bit 0 linear (clear: tiled) */
+#define DP_UI_FORMAT_LINEAR 1u
 #define DP_UI_ADDR          0x44
 #define DP_UI_STRIDE        0x48
 #define DP_UI_UNSCALED      0x4c      /* bit0: placed at 0,0 at its source size; DST_ORIGIN and DST_END unused */
+#define DP_UI_SRC_ORIGIN    0x50      /* x << 16 | y in the source buffer */
 #define DP_UI_DST_ORIGIN    0x54      /* x << 16 | y on the panel */
-#define DP_UI_SRC_SIZE      0x60      /* w << 16 | h of the source buffer */
+#define DP_UI_SRC_END       0x60      /* x1 << 16 | y1, the source rectangle's far corner */
 #define DP_UI_DST_END       0x64      /* x1 << 16 | y1, the destination's far corner */
 
 #define DP_IRQ_VBL          0x001
@@ -58,6 +58,7 @@
 #define CLCD_CTRL           0x00      /* bit8 = soft reset, self-clearing */
 #define CLCD_IRQ_ENABLE     0x08      /* bit0: the CLCD's interrupt on */
 #define CLCD_GAMMA_CTRL     0x2c      /* bit0: the output gamma on (AppleCLCD's "Gamma Correction") */
+#define CLCD_GAMMA_UPDATE   0x40      /* H5P: table update request, cleared at frame completion */
 #define CLCD_LUT_CTRL       0x34      /* bit16 write, bits 12-14 table, bits 0-7 entry */
 #define CLCD_LUT_WDATA      0x38      /* an entry, then the next (the index steps) */
 #define CLCD_LUT_RDATA      0x3c
@@ -85,13 +86,18 @@ typedef struct {
     bool swap_pending;       /* a swap arrived since the last VBL */
     uint32_t panel;          /* pipe0: w << 16 | h of a panel= override (issue #21), 0 = none */
     uint32_t native;         /* pipe0: w << 16 | h of the board's panel, the geometry iBoot programs */
+    bool h5p;               /* configured register generation, not guest runtime state */
 } DisplayPipe;
 
 /* A UI layer's scanout: its buffer and where it lands on the panel. */
 typedef struct UILayer {
-    uint32_t fmt, base, stride;
-    unsigned sw, sh;                 /* source size */
+    uint32_t fmt, base, stride;      /* stride: bytes from one source row to the next */
+    unsigned sx, sy, sw, sh;         /* source rectangle */
     unsigned x0, y0, x1, y1;         /* destination rectangle, clipped to the panel */
+    unsigned regions;               /* H5P multi-region source coverage */
+    uint32_t region_start[4], region_end[4];
+    bool translated;
+    uint32_t page_tables[64];       /* H5P: one 4 KiB PTE table per 4 MiB segment */
 } UILayer;
 
 struct S5L8930DisplayState {
@@ -106,6 +112,7 @@ struct S5L8930DisplayState {
     uint16_t width, height;  /* properties: the board's panel, as iBoot programs it */
     uint32_t pw, ph;         /* "panel-width"/"panel-height": panel= override (issue #21), 0 = the board's */
     uint32_t refresh_hz;     /* "refresh-hz": the VBL's rate, 60 as on the devices */
+    bool h5p;
 
     DisplayPipe pipe[2];     /* 0 = DisplayPipe0 (scanned out), 1 = RGBOUT */
     uint32_t clcd[2][CLCD_WORDS];
@@ -139,7 +146,6 @@ struct S5L8930DisplayState {
     size_t front_size;
     uint32_t front_key[4];   /* w, h, fmt, stride of the latched frame */
     bool front_valid;
-    bool front_video;        /* the front was blended over a movie frame */
     /*
      * What the console surface holds, so a refresh that has nothing new skips the 3 MiB copy and the
      * update (the panel's front buffer is redrawn only by a latch, and a quiet panel relatches every
@@ -155,19 +161,6 @@ struct S5L8930DisplayState {
      */
     uint8_t *src, *src_next;
     size_t src_size, src_len;
-    GArray *fetch;           /* FbSeg: the reads layers_fetch planned, run by fetch_run */
-    GArray *vfetch;          /* FbSeg: the video layer's planes, planned by video_plan */
-    /*
-     * The last movie frame: its planes as read, the plan they were read with, and the panel-sized
-     * image video_render made of them. A movie decodes at ~30 fps and the VBL is 60 Hz, so every
-     * other latch finds the same planes and reuses the image (and skips the blend if nothing else
-     * changed either).
-     */
-    uint8_t *vprev;
-    size_t vprev_len;
-    struct VideoPlan *vprev_plan;
-    uint32_t *vbase;
-    unsigned vbase_w, vbase_h;
     UILayer src_layers[2];
     uint64_t front_gen;
     uint64_t shown_gen;
@@ -210,10 +203,17 @@ static uint32_t panel_word(const DisplayPipe *p, hwaddr addr, uint32_t v)
     if (!panel) {
         return v;
     }
+    if (p->h5p) {
+        if (addr == 0x4070 || addr == 0x4058 || addr == 0x5070 || addr == 0x5058)
+            return v == native ? panel : v;
+        if (addr == 0x4048 || addr == 0x5048)
+            return (v & ~0x7fu) == nw * 4 ? w * 4 | (v & 0x7f) : v;
+        if (addr >= 0x4000 && addr < 0x6000) return v;
+    }
     switch (addr) {
     case DP_SIZE:
-    case DP_UI_BASE(0) + DP_UI_SRC_SIZE: case DP_UI_BASE(0) + DP_UI_DST_END:
-    case DP_UI_BASE(1) + DP_UI_SRC_SIZE: case DP_UI_BASE(1) + DP_UI_DST_END:
+    case DP_UI_BASE(0) + DP_UI_SRC_END: case DP_UI_BASE(0) + DP_UI_DST_END:
+    case DP_UI_BASE(1) + DP_UI_SRC_END: case DP_UI_BASE(1) + DP_UI_DST_END:
         return v == native ? panel : v;
     case DP_UI_BASE(0) + DP_UI_STRIDE: case DP_UI_BASE(1) + DP_UI_STRIDE:
         return (v & ~0x3fu) == nw * 4 ? w * 4 | (v & 0x3f) : v;
@@ -300,7 +300,7 @@ static const MemoryRegionOps pipe_ops = {
     .impl.max_access_size = 4,
 };
 
-static void front_latch(S5L8930DisplayState *s, bool vbl);
+static void front_latch(S5L8930DisplayState *s);
 static void clcd_update_irq(S5L8930DisplayState *s);
 
 /*
@@ -325,22 +325,16 @@ static void pipe_frame_end(DisplayPipe *p)
 }
 
 /*
- * The next VBL, a period after the last deadline. Re-arming from the time the
- * tick finished added its own work (the latch, the console update: 3-4 ms) to
- * every frame: the panel ran at ~50 Hz and capped games at 48 fps on any host.
- * LT_VBL_DEADLINE=off brings that back, for A/B.
+ * The next VBL, a period after the last deadline, as the panel's timing generator runs. Re-arming from the
+ * time the tick finished added its own work (the latch, the console update) and any timer lateness to every
+ * frame, and the panel ran at about 50 Hz.
  */
 static void vbl_rearm(S5L8930DisplayState *s)
 {
-    static int deadline = -1;
     int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
-    if (deadline < 0) {
-        const char *v = getenv("LT_VBL_DEADLINE");
-        deadline = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
-    }
     s->next_vbl += VBL_PERIOD_NS(s);
-    if (!deadline || s->next_vbl <= now) {
+    if (s->next_vbl <= now) {
         /* A whole frame behind (paused, descheduled, just loaded): resynchronize
          * rather than hand the guest a burst of VBLs. */
         s->next_vbl = now + VBL_PERIOD_NS(s);
@@ -348,39 +342,16 @@ static void vbl_rearm(S5L8930DisplayState *s)
     timer_mod(s->vbl, s->next_vbl);
 }
 
-static bool vbl_irq_first(void)
+static void clcd_frame_end(S5L8930DisplayState *s)
 {
-    static int on = -1;
-
-    if (on < 0) {
-        const char *v = getenv("LT_VBL_IRQ_FIRST");
-        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    /* 11A465 AppleMobileCLCD 80e5bca0 waits for +0x2c bit 6 before
+     * uploading the next gamma table, then sets it to request the update.
+     * Retaining that request forever blocks subsequent gamma RPCs. */
+    if (s->h5p) {
+        s->clcd[0][CLCD_GAMMA_CTRL / 4] &= ~CLCD_GAMMA_UPDATE;
     }
-    return on;
-}
-
-/* LT_FRAME_COPY_UNLOCKED=off copies the latched frame to the console with the BQL held. */
-/* LT_LATCH_WAIT_UNLOCKED=off: the latch waits for the GL thread's presents with the BQL held (A/B). */
-static bool latch_wait_unlocked(void)
-{
-    static int on = -1;
-
-    if (on < 0) {
-        const char *v = getenv("LT_LATCH_WAIT_UNLOCKED");
-        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
-    }
-    return on;
-}
-
-static bool frame_copy_unlocked(void)
-{
-    static int on = -1;
-
-    if (on < 0) {
-        const char *v = getenv("LT_FRAME_COPY_UNLOCKED");
-        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
-    }
-    return on;
+    s->clcd_status |= CLCD_IRQ_FRAME;
+    clcd_update_irq(s);
 }
 
 /* One frame: the queued swaps complete and the VBLs fire. */
@@ -446,12 +417,11 @@ static void vbl_tick(void *opaque)
      * so this under-counts only that one path -- key it off front-hash if a zoom
      * animation ever needs measuring. */
     frame_timeline_record(&s->ftl, s->pipe[0].swap_id, new_frame);
-    bool latch = false;
     if (s->pipe[0].swap_pending) {
         s->pipe[0].swap_pending = false;
         s->quiet_vbls = 0;
         s->swaps++;
-        latch = true;
+        front_latch(s);
     } else if (++s->quiet_vbls >= QUIET_RELATCH_VBLS) {
         /*
          * No swap for a quarter second, yet the buffer can still change:
@@ -460,26 +430,11 @@ static void vbl_tick(void *opaque)
          * Real scanout reads memory live, so follow it: re-latch every VBL
          * while no swaps come. Swapping clients are latched on their swaps.
          */
-        latch = true;
-    }
-    /*
-     * Frame end first, then the latch (LT_VBL_IRQ_FIRST=off latches first). The latch copies and
-     * blends the new layers, 2-3 ms a frame at 640x960 (up to 7), and the guest heard of the swap's
-     * completion only after it: backboardd's next frame started that much later every vsync. The
-     * latch reads only the layers this swap brought in, which the guest leaves alone until the next
-     * swap completes, and it plans them from the registers before it drops the BQL, which a guest
-     * MMIO write needs, so the order does not change what it reads.
-     */
-    bool irq_first = vbl_irq_first();
-    if (latch && !irq_first) {
-        front_latch(s, true);
+        front_latch(s);
     }
     s->pipe[1].swap_pending = false;
     pipe_frame_end(&s->pipe[0]);
     pipe_frame_end(&s->pipe[1]);
-    if (latch && irq_first) {
-        front_latch(s, true);
-    }
     /*
      * Paint the latched frame now, at the vsync, when something shows the
      * console, as ipod_touch_lcd's refresh_timer_tick does. Left to QEMU's
@@ -491,8 +446,7 @@ static void vbl_tick(void *opaque)
         graphic_hw_update(s->con);
     }
     /* ponytail: the frame is the only CLCD source raised, the one AppleCLCD enables (its LUT and dither updates). */
-    s->clcd_status |= CLCD_IRQ_FRAME;
-    clcd_update_irq(s);
+    clcd_frame_end(s);
     vbl_rearm(s);
 }
 
@@ -629,68 +583,28 @@ hwaddr s5l8930_dart2_xlate(void *display, uint32_t va, unsigned sid)
     return s5l8930_dart_xlate(&S5L8930_DISPLAY(display)->dart, sid < S5L8930_DART_SIDS ? sid : 0, va);
 }
 
-/*
- * One planned framebuffer read: `len` bytes from guest PA `pa` (or zeros, pa -1) to byte `off` of the
- * destination. Translating through the DART reads its registers and tables, which the vCPU writes, so
- * a latch plans its reads under the BQL and runs them without it (front_latch).
- */
-typedef struct FbSeg {
-    hwaddr pa;
-    size_t off, len;
-} FbSeg;
-
-static void fb_plan_into(S5L8930DisplayState *s, GArray *plan, uint32_t va, size_t off, size_t len)
+static hwaddr h5p_ui_xlate(const uint32_t tables[64], uint32_t va)
 {
-    while (len) {
-        size_t n = MIN(len, 0x1000 - (va & 0xfff));
-        hwaddr pa = dart_xlate(s, va);
-        FbSeg *last = plan->len ? &g_array_index(plan, FbSeg, plan->len - 1) : NULL;
-
-        /* Pages contiguous in both: one read (an IOSurface is mostly physically contiguous). */
-        if (last && last->off + last->len == off &&
-            (pa == (hwaddr)-1 ? last->pa == (hwaddr)-1 : last->pa != (hwaddr)-1 && last->pa + last->len == pa)) {
-            last->len += n;
-        } else {
-            FbSeg g = { pa, off, n };
-            g_array_append_val(plan, g);
-        }
-        va += n;
-        off += n;
-        len -= n;
+    /* 11A465 AppleH5PDisplayPipe 80bb3c54 programs 64 table pointers
+     * at UI+0x98. 80bb3de0 fills 1024 physical-page|1 PTEs per table.
+     * This is per-layer translation, independent of the external DART. */
+    unsigned segment = va >> 22;
+    if (segment >= 64 || !tables[segment]) {
+        return (hwaddr)-1;
     }
-}
-
-static void fb_plan(S5L8930DisplayState *s, uint32_t va, size_t off, size_t len)
-{
-    fb_plan_into(s, s->fetch, va, off, len);
-}
-
-/* Run the planned reads into `dst`. RAM reads need no BQL; MMIO takes it in the dispatch. */
-static void plan_run(GArray *plan, uint8_t *dst)
-{
-    for (guint i = 0; i < plan->len; i++) {
-        FbSeg *g = &g_array_index(plan, FbSeg, i);
-
-        if (g->pa == (hwaddr)-1) {
-            memset(dst + g->off, 0, g->len);
-        } else {
-            address_space_read(&address_space_memory, g->pa, MEMTXATTRS_UNSPECIFIED, dst + g->off, g->len);
-        }
-    }
-    g_array_set_size(plan, 0);
-}
-
-static void fetch_run(S5L8930DisplayState *s, uint8_t *dst)
-{
-    plan_run(s->fetch, dst);
+    hwaddr table = tables[segment] & ~0xfffu;
+    uint32_t pte = address_space_ldl_le(&address_space_memory,
+        table + ((va >> 12) & 0x3ff) * 4, MEMTXATTRS_UNSPECIFIED, NULL);
+    return pte & 1 ? (pte & ~0xfffu) | (va & 0xfff) : (hwaddr)-1;
 }
 
 /* Read `len` bytes of framebuffer at IOVA `va`, page by page. */
-static void fb_read(S5L8930DisplayState *s, uint32_t va, uint8_t *dst, unsigned len)
+static void fb_read(S5L8930DisplayState *s, uint32_t va, uint8_t *dst, unsigned len,
+                    const uint32_t *tables)
 {
     while (len) {
         unsigned n = MIN(len, 0x1000 - (va & 0xfff));
-        hwaddr pa = dart_xlate(s, va);
+        hwaddr pa = tables ? h5p_ui_xlate(tables, va) : dart_xlate(s, va);
 
         if (pa == (hwaddr)-1) {
             memset(dst, 0, n);
@@ -728,8 +642,43 @@ static bool scanout_layer(S5L8930DisplayState *s, int layer, unsigned w, unsigne
                           UILayer *u)
 {
     uint32_t *r = s->pipe[0].regs, *ui = r + DP_UI_BASE(layer) / 4;
-    uint32_t org = ui[DP_UI_DST_ORIGIN / 4], sz = ui[DP_UI_SRC_SIZE / 4];
-    uint32_t end = ui[DP_UI_DST_END / 4];
+    uint32_t org = ui[DP_UI_DST_ORIGIN / 4], end = ui[DP_UI_DST_END / 4];
+    uint32_t sorg = ui[DP_UI_SRC_ORIGIN / 4], send = ui[DP_UI_SRC_END / 4];
+    u->regions = 0;
+    memset(u->region_start, 0, sizeof(u->region_start));
+    memset(u->region_end, 0, sizeof(u->region_end));
+    if (s->h5p) {
+        /* N42 11A465 AppleH5PDisplayPipe: boot adoption at 80bb0eec..0f2a
+         * reads source corners at +60/+70; programming at 80bb49b2..49e8
+         * writes destination corners at +54/+58. H3 uses +50/+60,+54/+64. */
+        sorg = ui[0x60 / 4]; send = ui[0x70 / 4]; end = ui[0x58 / 4];
+        unsigned regions = ui[0x5c / 4] & 15;
+        if (regions & (regions - 1)) {
+            /* H5P can fetch several disjoint UI regions over a video plane.
+             * +50 is the full source extent; +60..6c/+70..7c are the four
+             * region corners, enabled by +5c's low bits. Stretching region
+             * zero to the whole destination turns Camera's top bar into
+             * full-screen vertical strips (native 14G61). */
+            unsigned width = ui[0x50 / 4] >> 16 & 0x3fff;
+            unsigned height = ui[0x50 / 4] & 0x3fff;
+            if (!width || !height) return false;
+            for (unsigned i = 0; i < 4; i++) {
+                if (!(regions & (1u << i))) continue;
+                uint32_t first = ui[(0x60 + i * 4) / 4];
+                uint32_t last = ui[(0x70 + i * 4) / 4];
+                unsigned x0 = first >> 16 & 0x3fff, y0 = first & 0x3fff;
+                unsigned x1 = MIN(last >> 16 & 0x3fff, width);
+                unsigned y1 = MIN(last & 0x3fff, height);
+                if (x0 >= x1 || y0 >= y1) continue;
+                u->regions |= 1u << i;
+                u->region_start[i] = x0 << 16 | y0;
+                u->region_end[i] = x1 << 16 | y1;
+            }
+            if (!u->regions) return false;
+            sorg = 0;
+            send = width << 16 | height;
+        }
+    }
 
     /*
      * 3.2's AppleDisplayPipe (7B500 0xc058d4de) programs DST_ORIGIN and DST_END only for a layer placed off 0,0 and
@@ -738,7 +687,7 @@ static bool scanout_layer(S5L8930DisplayState *s, int layer, unsigned w, unsigne
      * them, and honoring those drew the whole Home screen into the window (LightTouchMac issue 87). 4.x writes 0 to
      * UNSCALED and both corners on every swap (8C148 0x806cf468).
      */
-    if (ui[DP_UI_UNSCALED / 4] & 1) {
+    if (!s->h5p && (ui[DP_UI_UNSCALED / 4] & 1)) {
         org = end = 0;
     }
 
@@ -747,35 +696,46 @@ static bool scanout_layer(S5L8930DisplayState *s, int layer, unsigned w, unsigne
     }
     u->base = ui[DP_UI_ADDR / 4];
     u->fmt = (ui[DP_UI_FORMAT / 4] >> 8) & 7;
-    /* Size and placement. A full-panel layer (and the boot surface, which
-     * leaves them 0) covers the panel at 0,0; 4.x CA also places partial
-     * layers, e.g. an EAGL surface as an overlay under its UI. */
-    u->sw = sz ? sz >> 16 : w;
-    u->sh = sz ? sz & 0xffff : h;
-    /* ponytail: a source over 4096 pixels wide is not scanned out. It bounds the host's row buffers
-     * (src) and no guest programs one; find the pipe's real limit if a guest ever does. */
-    if (u->sw > 4096) {
+    u->translated = s->h5p && (ui[0x90 / 4] & 1);
+    if (u->translated) {
+        memcpy(u->page_tables, ui + 0x98 / 4, sizeof(u->page_tables));
+    }
+    /*
+     * The source rectangle: SRC_ORIGIN to SRC_END, 11 bits a coordinate (5.1.1's program_hardware, 9B206
+     * 0x80878a3c). A linear layer's origin is folded into its address down to the 64 bytes the address keeps,
+     * the rest of x in SRC_ORIGIN; a tiled layer keeps the surface's address and its whole origin is there. A
+     * full-panel layer (and the boot surface, which leaves them 0) covers the panel at 0,0; 4.x CA also places
+     * partial layers, e.g. an EAGL surface as an overlay under its UI.
+     */
+    unsigned coord_mask = s->h5p ? 0x3fff : 0x7ff;
+    u->sx = sorg >> 16 & coord_mask;
+    u->sy = sorg & coord_mask;
+    if (send && ((send >> 16 & coord_mask) <= u->sx || (send & coord_mask) <= u->sy)) {
         return false;
     }
+    u->sw = send ? (send >> 16 & coord_mask) - u->sx : w;
+    u->sh = send ? (send & coord_mask) - u->sy : h;
     u->x0 = org >> 16;
     u->y0 = org & 0xffff;
     u->x1 = MIN(end ? end >> 16 : u->x0 + u->sw, w);
     u->y1 = MIN(end ? end & 0xffff : u->y0 + u->sh, h);
-    if (!u->sw || !u->sh || u->x0 >= u->x1 || u->y0 >= u->y1) {
+    if (u->x0 >= u->x1 || u->y0 >= u->y1) {
         return false;
     }
-    /* Two encodings reach this register. The 7B500 swap path writes
-     * (bytes per row << 4) | 2, e.g. (4096 << 4) | 2 for 1024x768 BGRA. The
-     * iBoot framebuffer holds plain bytes per row: AppleDisplayPipe adopts it
-     * with `stride = reg & ~0x3f` (0xc058c42a), so seeding the swap encoding
-     * gave the boot surface 64 KiB rows. A <<4 value never undershoots a row
-     * (of the layer's own width: an overlay is narrower than the panel). */
-    {
-        uint32_t v = ui[DP_UI_STRIDE / 4] & ~0x3fu;
-        unsigned row = u->sw * (u->fmt ? 2 : 4);
-        u->stride = (v >> 4) >= row ? v >> 4 : v;
+    /*
+     * FORMAT bit 0 is set for a linear layer and clear for a tiled one: program_hardware sets it from the
+     * IOSurface's tiled flag (9B206 0x80878bd6, the surface's +0x168; 7B500 0xc058d536, +0x160), and iBoot sets it
+     * for its linear framebuffer. A linear layer's STRIDE is its bytes per row; a tiled layer's is (bytes per row << 4),
+     * the bytes of a row of tiles: 16 rows, each a whole number of 256-byte tiles ("UI requires the stride to be
+     * a multiple of 256 for tiled mode"). The pipe's DART maps a tiled surface's pages contiguously (n90ap 9B206's
+     * 2560-byte rows), and its tiles hold the rows as the CPU and the GL bridge write them, so a tiled layer's row
+     * is a sixteenth of its stride from the last. The low 6 bits are flags (2).
+     */
+    u->stride = ui[DP_UI_STRIDE / 4] & ~(s->h5p ? 0x7fu : 0x3fu);
+    if (!(ui[DP_UI_FORMAT / 4] & DP_UI_FORMAT_LINEAR)) {
+        u->stride >>= 4;
     }
-    return u->base != 0;
+    return u->base != 0 || u->translated;
 }
 
 static size_t layer_row_bytes(const UILayer *u)
@@ -787,26 +747,25 @@ static size_t layer_row_bytes(const UILayer *u)
  * Read the source row of layer `u` that each of its destination rows shows, packed into `dst`; the
  * bytes read. A layer neither scaled vertically nor padded is one read.
  */
-static size_t layer_fetch(S5L8930DisplayState *s, const UILayer *u, size_t off)
+static size_t layer_fetch(S5L8930DisplayState *s, const UILayer *u, uint8_t *dst)
 {
     size_t row = layer_row_bytes(u);
     unsigned rows = u->y1 - u->y0;
+    uint32_t base = u->base + u->sy * u->stride + u->sx * (u->fmt ? 2 : 4);
 
     if (u->sh == rows && u->stride == row) {
-        fb_plan(s, u->base, off, row * rows);
+        fb_read(s, base, dst, row * rows, u->translated ? u->page_tables : NULL);
         return row * rows;
     }
     for (unsigned y = u->y0; y < u->y1; y++) {
         unsigned sy = (unsigned)((uint64_t)(y - u->y0) * u->sh / rows);
-        fb_plan(s, u->base + sy * u->stride, off + (y - u->y0) * row, row);
+        fb_read(s, base + sy * u->stride, dst + (y - u->y0) * row, row,
+                u->translated ? u->page_tables : NULL);
     }
     return row * rows;
 }
 
-/*
- * Plan the reads of every shown layer into s->src_next, layer 0 first (fetch_run reads them); the
- * bytes.
- */
+/* Fetch every shown layer into s->src_next, layer 0 first; the bytes. */
 static size_t layers_fetch(S5L8930DisplayState *s, const UILayer u[2], const bool on[2])
 {
     size_t need = 0, len = 0;
@@ -821,7 +780,7 @@ static size_t layers_fetch(S5L8930DisplayState *s, const UILayer u[2], const boo
     }
     for (int l = 0; l < 2; l++) {
         if (on[l]) {
-            len += layer_fetch(s, &u[l], len);
+            len += layer_fetch(s, &u[l], s->src_next + len);
         }
     }
     return len;
@@ -888,105 +847,68 @@ static bool layers(S5L8930DisplayState *s, unsigned w, unsigned h, UILayer u[2],
  * ponytail: nearest sampling where the pipe has polyphase taps (+0x3120 on); the blend order taken as
  * video under UI1 (+0x2044/+0x2048); low stride bits (+0x3088 = 0x142) dropped as flags.
  */
-typedef struct VideoPlan {
-    unsigned sw, sh, dw, dh, x0, y0;
-    int m[9];
-    uint8_t *planes;         /* Y (sw x sh) then CbCr (sw x sh / 2), filled by plan_run(s->vfetch) */
-} VideoPlan;
-
-/* Validate the video layer and plan its planes' reads (DART translation needs the BQL). */
-static bool video_plan(S5L8930DisplayState *s, VideoPlan *v)
-{
-    uint32_t *r = s->pipe[0].regs;
-    unsigned ys = r[0x3088 / 4] & ~0xfu, uvs = r[0x308c / 4] & ~0xfu;
-
-    v->sw = (r[0x3094 / 4] >> 16) & 0xfff, v->sh = r[0x3094 / 4] & 0xfff;
-    v->dw = (r[0x309c / 4] >> 16) & 0xfff, v->dh = r[0x309c / 4] & 0xfff;
-    v->x0 = r[0x30a0 / 4] >> 16, v->y0 = r[0x30a0 / 4] & 0xffff;
-    v->planes = NULL;
-    if (!(r[DP_LAYERS / 4] & 0x400) || !v->sw || !v->sh || !v->dw || !v->dh || v->sw > 4096 ||
-        v->sh > 4096 || ys < v->sw || uvs < v->sw || (v->sw | v->sh) & 1) {
-        return false;
-    }
-    for (int i = 0; i < 9; i++) {
-        v->m[i] = (int16_t)r[0x3024 / 4 + i];
-    }
-    v->planes = g_malloc((size_t)v->sw * v->sh * 3 / 2);
-    for (unsigned y = 0; y < v->sh; y++) {
-        fb_plan_into(s, s->vfetch, r[0x307c / 4] + y * ys, (size_t)y * v->sw, v->sw);
-        if (!(y & 1)) {
-            fb_plan_into(s, s->vfetch, r[0x3080 / 4] + y / 2 * uvs,
-                         (size_t)v->sw * v->sh + (size_t)y / 2 * v->sw, v->sw);
-        }
-    }
-    return true;
-}
-
-/*
- * The video layer onto a w x h panel (no BQL needed): nearest sampling through per-frame column and
- * row tables, then the pipe's YCbCr matrix. A divide per pixel was most of the 8 ms the VBL tick held
- * the BQL for every vsync of a movie. A source smaller than the panel (a 480x320 movie on 960x640) is
- * converted once per source pixel, then scaled as RGB.
- */
-static inline uint32_t video_px(const VideoPlan *v, int Y, int cb, int cr)
-{
-    uint32_t px = 0xff000000u;
-
-    for (int k = 0; k < 3; k++) {
-        int t = (v->m[k * 3] * (Y - 16) + v->m[k * 3 + 1] * (cb - 128) + v->m[k * 3 + 2] * (cr - 128) +
-                 2048) >> 12;
-        px |= (uint32_t)MIN(255, MAX(0, t)) << (16 - 8 * k);    /* BGRA: R in bits 16-23 */
-    }
-    return px;
-}
-
-static void video_render(const VideoPlan *v, unsigned w, unsigned h, uint32_t *out)
-{
-    const uint8_t *yp = v->planes, *uvp = v->planes + (size_t)v->sw * v->sh;
-    unsigned x1 = MIN(v->x0 + v->dw, w), y1 = MIN(v->y0 + v->dh, h);
-    g_autofree unsigned *xs = g_new(unsigned, MAX(x1, 1));
-    /* Converted once per source pixel when the picture is scaled up (a movie on the panel). */
-    g_autofree uint32_t *rgb = (size_t)v->sw * v->sh < (size_t)v->dw * v->dh ?
-                               g_new(uint32_t, (size_t)v->sw * v->sh) : NULL;
-
-    memset(out, 0, (size_t)w * h * 4);
-    for (unsigned x = v->x0; x < x1; x++) {
-        xs[x] = (unsigned)((uint64_t)(x - v->x0) * v->sw / v->dw);
-    }
-    if (rgb) {
-        for (unsigned y = 0; y < v->sh; y++) {
-            const uint8_t *yrow = yp + (size_t)y * v->sw, *crow = uvp + (size_t)(y / 2) * v->sw;
-            uint32_t *d = rgb + (size_t)y * v->sw;
-
-            for (unsigned x = 0; x < v->sw; x++) {
-                d[x] = video_px(v, yrow[x], crow[x & ~1u], crow[(x & ~1u) + 1]);
-            }
-        }
-    }
-    for (unsigned y = v->y0; y < y1; y++) {
-        unsigned sy = (unsigned)((uint64_t)(y - v->y0) * v->sh / v->dh);
-        const uint8_t *yrow = yp + (size_t)sy * v->sw, *crow = uvp + (size_t)(sy / 2) * v->sw;
-        const uint32_t *srow = rgb ? rgb + (size_t)sy * v->sw : NULL;
-        uint32_t *d = out + (size_t)y * w;
-
-        for (unsigned x = v->x0; x < x1; x++) {
-            unsigned sx = xs[x];
-            d[x] = srow ? srow[sx] : video_px(v, yrow[sx], crow[sx & ~1u], crow[(sx & ~1u) + 1]);
-        }
-    }
-}
-
-/* The video layer composed under the BQL (the live display path). */
 static bool video_compose(S5L8930DisplayState *s, unsigned w, unsigned h, uint32_t *out)
 {
-    VideoPlan v;
+    uint32_t *r = s->pipe[0].regs;
+    unsigned sw = (r[0x3094 / 4] >> 16) & 0xfff, sh = r[0x3094 / 4] & 0xfff;
+    unsigned dw = (r[0x309c / 4] >> 16) & 0xfff, dh = r[0x309c / 4] & 0xfff;
+    unsigned x0 = r[0x30a0 / 4] >> 16, y0 = r[0x30a0 / 4] & 0xffff;
+    unsigned ys = r[0x3088 / 4] & ~0xfu, uvs = r[0x308c / 4] & ~0xfu;
+    unsigned uv_width = (sw + 1) & ~1u;
+    uint32_t ybase = r[0x307c / 4], uvbase = r[0x3080 / 4];
+    const uint32_t *ytables = NULL, *uvtables = NULL;
+    int m[9];
 
-    if (!video_plan(s, &v)) {
+    if (!(r[DP_LAYERS / 4] & 0x400) || !sw || !sh || !dw || !dh || sw > 4096 || sh > 4096 ||
+        ys < sw || uvs < uv_width) {
         return false;
     }
-    plan_run(s->vfetch, v.planes);
-    video_render(&v, w, h, out);
-    g_free(v.planes);
+    if (s->h5p) {
+        /* N42 10A405 AppleH5PDisplayPipe 80ae24d8/80ae4d9e programs
+         * per-plane MMUs at 3d58/3d5c, tables 3d70/3df0. Each table
+         * maps its plane from virtual page zero; the address register's
+         * intra-page offset survives this rebasing. */
+        if (r[0x3d58 / 4] & 1) {
+            ytables = r + 0x3d70 / 4;
+            ybase &= 0xfff;
+        }
+        if (r[0x3d5c / 4] & 1) {
+            uvtables = r + 0x3df0 / 4;
+            uvbase &= 0xfff;
+        }
+    }
+    for (int i = 0; i < 9; i++) {
+        m[i] = (int16_t)r[(s->h5p ? 0x302c : 0x3024) / 4 + i];
+    }
+    /* A visible crop need not end on a chroma-pair boundary. Camera Roll
+     * animates odd widths while dragging a playing movie. Keep the final UV
+     * pair/row instead of rejecting the whole plane or packing odd UV rows
+     * with a one-byte phase error. The underlying plane strides stay aligned. */
+    g_autofree uint8_t *yp = g_malloc((size_t)sw * sh);
+    g_autofree uint8_t *uvp = g_malloc((size_t)uv_width * ((sh + 1) / 2));
+    for (unsigned y = 0; y < sh; y++) {
+        fb_read(s, ybase + y * ys, yp + (size_t)y * sw, sw, ytables);
+        if (!(y & 1)) {
+            fb_read(s, uvbase + y / 2 * uvs, uvp + (size_t)y / 2 * uv_width, uv_width, uvtables);
+        }
+    }
+    memset(out, 0, (size_t)w * h * 4);
+    for (unsigned y = y0; y < MIN(y0 + dh, h); y++) {
+        unsigned sy = (unsigned)((uint64_t)(y - y0) * sh / dh);
+        for (unsigned x = x0; x < MIN(x0 + dw, w); x++) {
+            unsigned sx = (unsigned)((uint64_t)(x - x0) * sw / dw);
+            const uint8_t *c = uvp + (size_t)(sy / 2) * uv_width + (sx & ~1u);
+            int in[3] = { /* bounded: sy < sh, sx < sw */
+                yp[(size_t)sy * sw + sx] - (s->h5p && m[0] == 4096 ? 0 : 16),
+                c[0] - 128, c[1] - 128 };
+            uint32_t px = 0xff000000u;
+            for (int k = 0; k < 3; k++) {
+                int v = (m[k * 3] * in[0] + m[k * 3 + 1] * in[1] + m[k * 3 + 2] * in[2] + 2048) >> 12;
+                px |= (uint32_t)MIN(255, MAX(0, v)) << (16 - 8 * k);    /* BGRA: R in bits 16-23 */
+            }
+            out[(size_t)y * w + x] = px;
+        }
+    }
     return true;
 }
 
@@ -1015,7 +937,7 @@ static void blend(const UILayer u[2], const bool on[2], const uint8_t *src, unsi
                 continue;
             }
             /* Unscaled BGRA that replaces what is under it: the row as it is. */
-            if ((l == 0 || !on[0]) && !base && L->fmt == 0 && L->sw == dw) {
+            if (!L->regions && (l == 0 || !on[0]) && !base && L->fmt == 0 && L->sw == dw) {
                 memcpy(d + L->x0, lsrc[l] + (y - L->y0) * layer_row_bytes(L), dw * 4);
                 continue;
             }
@@ -1023,6 +945,19 @@ static void blend(const UILayer u[2], const bool on[2], const uint8_t *src, unsi
             for (unsigned x = L->x0; x < L->x1; x++) {
                 unsigned sx = L->sw == dw ? x - L->x0
                             : (unsigned)((uint64_t)(x - L->x0) * L->sw / dw);
+                if (L->regions) {
+                    unsigned source_x = L->sx + sx;
+                    unsigned source_y = L->sy + (unsigned)((uint64_t)(y - L->y0) *
+                        L->sh / (L->y1 - L->y0));
+                    bool covered = false;
+                    for (unsigned i = 0; i < 4; i++) {
+                        if (!(L->regions & (1u << i))) continue;
+                        uint32_t first = L->region_start[i], last = L->region_end[i];
+                        covered |= source_x >= first >> 16 && source_x < last >> 16 &&
+                                   source_y >= (first & 0xffff) && source_y < (last & 0xffff);
+                    }
+                    if (!covered) continue;
+                }
                 uint32_t t = row[sx], a = t >> 24;
 
                 if ((l == 0 && !base) || a == 0xff || (!on[0] && !base)) {
@@ -1030,9 +965,7 @@ static void blend(const UILayer u[2], const bool on[2], const uint8_t *src, unsi
                 } else if (a) {
                     uint32_t b = d[x], ia = 255 - a, o = 0xff000000u;
                     for (int sh = 0; sh < 24; sh += 8) {
-                        /* (v + 127) / 255 for v up to 255 * 255, without the division */
-                        uint32_t v = ((b >> sh) & 0xff) * ia + 127;
-                        uint32_t c = ((t >> sh) & 0xff) + ((v + (v >> 8) + 1) >> 8);
+                        uint32_t c = ((t >> sh) & 0xff) + (((b >> sh) & 0xff) * ia + 127) / 255;
                         o |= MIN(c, 255u) << sh;
                     }
                     d[x] = o;
@@ -1055,28 +988,15 @@ static bool compose(S5L8930DisplayState *s, unsigned w, unsigned h, uint32_t *ou
         g_autofree uint32_t *base = g_new(uint32_t, (size_t)w * h);
         bool video = video_compose(s, w, h, base);
         layers_fetch(s, u, on);
-        fetch_run(s, s->src_next);
         blend(u, on, s->src_next, w, h, out, video ? base : NULL);
     }
     return true;
 }
-/* vbl: called from the VBL tick, which may drop the BQL for the pixel work. */
-static void front_latch(S5L8930DisplayState *s, bool vbl)
+static void front_latch(S5L8930DisplayState *s)
 {
     unsigned w, h;
     size_t need;
-    bool unlocked = vbl && bql_locked();
-    /*
-     * A layer may be a GL frame still being copied in. The wait only has to end before the pixels
-     * are read, below without the BQL; waited for here, with it held, the main loop kept the vCPU
-     * out for as long as the GL thread took to get through the game's queued calls to its present,
-     * up to 20 ms on a Poco F3 in Epic Citadel (the GL thread never takes the BQL).
-     */
-    bool wait_unlocked = unlocked && latch_wait_unlocked();
 
-    if (!wait_unlocked) {
-        gles_present_wait();
-    }
     panel_size(s, &w, &h);
     if (trace_event_get_state_backends(TRACE_S5L8930_DISPLAY_LOG)) {
         static unsigned n;
@@ -1100,59 +1020,13 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
     bool on[2];
     bool valid = layers(s, w, h, u, on, key);
     size_t len = valid ? layers_fetch(s, u, on) : 0;
-    bool movie = valid && (s->pipe[0].regs[DP_LAYERS / 4] & 0x400);
-    VideoPlan vp;
-    bool video = movie && video_plan(s, &vp);
-    bool video_same = false;
-    bool changed;
+    g_autofree uint32_t *base = g_new(uint32_t, (size_t)w * h);
+    bool video = valid && video_compose(s, w, h, base);
 
-    /*
-     * The pixel work runs without the BQL: reading ~5 MiB of layers, comparing and blending a
-     * 640x960 panel took the main loop milliseconds every swap, and the vCPU, which takes the BQL
-     * thousands of times a second, waited behind it. The reads were planned (translated) above,
-     * under the lock; the buffers are touched only by the main loop, which is running this, and the
-     * swap below is locked again. A movie frame too: composed under the lock it held the BQL ~8 ms
-     * every vsync (Asphalt 5's intro on the iPod touch 4G).
-     */
-    if (unlocked) {
-        bql_unlock();
-    }
-    if (wait_unlocked) {
-        gles_present_wait();
-    }
-    if (video) {
-        size_t vlen = (size_t)vp.sw * vp.sh * 3 / 2;
-
-        plan_run(s->vfetch, vp.planes);
-        video_same = s->vbase && s->vbase_w == w && s->vbase_h == h && s->vprev_len == vlen &&
-                     !memcmp(&vp.sw, &s->vprev_plan->sw, offsetof(VideoPlan, m) + sizeof(vp.m)) &&
-                     !memcmp(vp.planes, s->vprev, vlen);
-        if (!video_same) {
-            if (s->vbase_w != w || s->vbase_h != h || !s->vbase) {
-                g_free(s->vbase);
-                s->vbase = g_new(uint32_t, (size_t)w * h);
-                s->vbase_w = w, s->vbase_h = h;
-            }
-            video_render(&vp, w, h, s->vbase);
-            g_free(s->vprev);
-            s->vprev = vp.planes;
-            s->vprev_len = vlen;
-            if (!s->vprev_plan) {
-                s->vprev_plan = g_new(VideoPlan, 1);
-            }
-            *s->vprev_plan = vp;
-        } else {
-            g_free(vp.planes);
-        }
-    }
-    fetch_run(s, s->src_next);
-    /* The front was composed from these very layers and bytes (and the same movie frame). */
-    if (valid && (!video || video_same) && video == s->front_video && valid == s->front_valid &&
-        !memcmp(key, s->front_key, sizeof(key)) && len == s->src_len && !memcmp(u, s->src_layers, sizeof(u)) &&
+    /* The front was composed from these very layers and bytes. */
+    if (valid && !video && valid == s->front_valid && !memcmp(key, s->front_key, sizeof(key)) &&
+        len == s->src_len && !memcmp(u, s->src_layers, sizeof(u)) &&
         !memcmp(s->src_next, s->src, len)) {
-        if (unlocked) {
-            bql_lock();
-        }
         return;
     }
     if (valid) {
@@ -1161,15 +1035,11 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
         s->src_next = t;
         s->src_len = len;
         memcpy(s->src_layers, u, sizeof(u));
-        blend(u, on, s->src, w, h, (uint32_t *)s->front_next, video ? s->vbase : NULL);
-    }
-    changed = valid != s->front_valid || memcmp(key, s->front_key, sizeof(key)) ||
-              (valid && memcmp(s->front_next, s->front, need));
-    if (unlocked) {
-        bql_lock();
+        blend(u, on, s->src, w, h, (uint32_t *)s->front_next, video ? base : NULL);
     }
     /* Swap in the new picture only when it differs: an unchanged relatch leaves front_gen alone. */
-    if (changed) {
+    if (valid != s->front_valid || memcmp(key, s->front_key, sizeof(key)) ||
+        (valid && memcmp(s->front_next, s->front, need))) {
         uint8_t *t = s->front;
         s->front = s->front_next;
         s->front_next = t;
@@ -1177,7 +1047,6 @@ static void front_latch(S5L8930DisplayState *s, bool vbl)
         s->front_valid = valid;
         s->front_gen++;
     }
-    s->front_video = video;
 }
 
 /* One row of the panel through the output gamma (BGRA: B in bits 0-7, R in 16-23). */
@@ -1215,15 +1084,15 @@ static void display_update(void *opaque)
     }
 
     /*
-     * The frame completed by the last swap, while it is the panel's size; the live buffers only
-     * before the first latch (iBoot, early boot). Not the whole key: CA double-buffers UI1, so as
-     * soon as a swap latches, the next one is queued with the other buffer's base, and matching
-     * the bases sent every QEMU display refresh (30 ms) through a live compose of both layers
-     * with the BQL held (2.2 ms a time on the desktop at Doodle Jump's title). The next VBL
-     * latches whatever the queued swap shows.
+     * The frame completed by the last swap, while it has these layers at this size; the live buffers only
+     * before the first latch (iBoot, early boot) or when a layer turned on or off without a swap. Not the
+     * layers' bases (key[2..3]): CA double-buffers UI1, so once a swap latches, the next one is queued with
+     * the other buffer's base, and matching the bases sent every QEMU display refresh (30 ms) through a live
+     * compose of both layers with the BQL held. The next VBL latches whatever the queued swap shows, and a
+     * panel a quarter second without a swap relatches its buffers every VBL (QUIET_RELATCH_VBLS).
      */
     lit = compose(s, w, h, NULL, key);
-    if (lit && s->front_valid && key[0] == s->front_key[0]) {
+    if (lit && s->front_valid && !memcmp(key, s->front_key, 2 * sizeof(key[0]))) {
         img = (const uint32_t *)s->front;
         if (s->shown == 1 && s->shown_gen == s->front_gen && s->shown_surface == surface) {
             return;     /* the surface already holds this latched frame */
@@ -1246,15 +1115,6 @@ static void display_update(void *opaque)
         s->shown = 0;   /* live layers: drawn every refresh, as they may change without a swap */
     }
     s->shown_surface = surface;
-    /*
-     * The latched frame goes to the console without the BQL (2.4 MiB at 640x960, half a
-     * millisecond of a phone's main loop): both buffers belong to the main loop, which is running
-     * this. The live layers are guest memory, read under the lock.
-     */
-    bool unlocked = img && img != live && bql_locked() && frame_copy_unlocked();
-    if (unlocked) {
-        bql_unlock();
-    }
     for (unsigned y = 0; y < h; y++) {
         uint8_t *d = surface_data(surface) + y * surface_stride(surface);
 
@@ -1265,9 +1125,6 @@ static void display_update(void *opaque)
         } else {
             gamma_row(s, img + (size_t)y * w, (uint32_t *)d, w);
         }
-    }
-    if (unlocked) {
-        bql_lock();
     }
     dpy_gfx_update(s->con, 0, 0, w, h);
 }
@@ -1334,7 +1191,9 @@ static void s5l8930_display_reset(DeviceState *dev)
          * mapping. SpringBoard died with SIGBUS (KERN_PROTECTION_FAILURE)
          * and never reached reboot2, so Hold -> slide never powered off. */
         r[(DP_UI_BASE(0) + DP_UI_STRIDE) / 4] = s->width * 4 | 2;
-        r[0x4060 / 4] = s->width << 16 | s->height;
+        /* ARGB and linear, as iBoot programs its framebuffer (iBoot-931 0x5ff01bfc: format << 8 | 1). */
+        r[(DP_UI_BASE(0) + DP_UI_FORMAT) / 4] = DP_UI_FORMAT_LINEAR;
+        r[(DP_UI_BASE(0) + (s->h5p ? 0x70 : DP_UI_SRC_END)) / 4] = s->width << 16 | s->height;
     }
     pipes_update_irq(s);
     s->next_vbl = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) + VBL_PERIOD_NS(s);
@@ -1350,10 +1209,9 @@ static void s5l8930_display_realize(DeviceState *dev, Error **errp)
         return;
     }
     s->vbl = timer_new_ns(QEMU_CLOCK_VIRTUAL, vbl_tick, s);
-    s->fetch = g_array_new(false, false, sizeof(FbSeg));
-    s->vfetch = g_array_new(false, false, sizeof(FbSeg));
     s->con = graphic_console_init(dev, 0, &display_gfx_ops, s);
     s->pipe[0].native = s->width << 16 | s->height;
+    s->pipe[0].h5p = s->pipe[1].h5p = s->h5p;
     if (s->pw || s->ph) {
         if (s->pw < 64 || s->ph < 64 || s->pw > 2047 || s->ph > 2047) {
             error_setg(errp, "panel must be 64..2047 pixels each way");
@@ -1422,7 +1280,7 @@ static int s5l8930_display_post_load(void *opaque, int version_id)
 {
     /* The latched frame is host memory and was not saved: take it again
      * from the restored guest RAM so the panel resumes on a whole frame. */
-    front_latch(opaque, false);
+    front_latch(opaque);
     pipes_update_irq(opaque);
     gamma_update(opaque);
     clcd_update_irq(opaque);
@@ -1500,6 +1358,7 @@ static const VMStateDescription vmstate_s5l8930_display = {
 };
 
 static const Property s5l8930_display_properties[] = {
+    DEFINE_PROP_BOOL("h5p", S5L8930DisplayState, h5p, false),
     DEFINE_PROP_UINT64("fb-base", S5L8930DisplayState, fb_base, 0),
     DEFINE_PROP_UINT16("width", S5L8930DisplayState, width, 1024),     /* K48 */
     DEFINE_PROP_UINT16("height", S5L8930DisplayState, height, 768),

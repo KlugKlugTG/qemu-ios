@@ -780,14 +780,11 @@ void tb_flush__exclusive_or_serial(void)
            (current_cpu && cpu_in_serial_context(current_cpu)));
 
     CPU_FOREACH(cpu) {
-        TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_full_tb);
         tcg_flush_jmp_cache(cpu);
-        tcg_ras_reset(cpu);
     }
 
     qht_reset_size(&tb_ctx.htable, CODE_GEN_HTABLE_SIZE);
-    /* Hints describe discarded translations. Bound their lifetime to the code
-     * cache, rather than accumulating physical PCs across full flushes. */
+    /* The I/O insn limits describe translations that are now gone. */
     qemu_mutex_lock(&tb_ctx.io_insn_lock);
     g_hash_table_remove_all(tb_ctx.io_insn_limits);
     qemu_mutex_unlock(&tb_ctx.io_insn_lock);
@@ -913,7 +910,6 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
         }
         /* A TB may be at any virtual address */
         CPU_FOREACH(cpu) {
-            TB_CACHE_CLEAR_NOTE(cpu->tb_jmp_cache, TB_CLEAR_full_pcrel);
             tcg_flush_jmp_cache(cpu);
         }
     } else {
@@ -922,11 +918,10 @@ static void tb_jmp_cache_inval_tb(TranslationBlock *tb)
         CPU_FOREACH(cpu) {
             CPUJumpCache *jc = cpu->tb_jmp_cache;
 
-            TB_CACHE_CLEAR_NOTE(jc, TB_CLEAR_tb_check);
             for (int c = 0; c < TB_JMP_CACHE_CONTEXTS; c++) {
                 CPUJumpCache *each = &jc->bank->cache[c];
+
                 if (qatomic_read(&each->array[h].tb) == tb) {
-                    TB_CACHE_CLEAR_NOTE(jc, TB_CLEAR_tb_match);
                     qatomic_set(&each->array[h].tb, NULL);
                 }
             }
@@ -1223,25 +1218,12 @@ void tb_invalidate_phys_range(CPUState *cpu, tb_page_addr_t start,
 }
 
 /*
- * A guest kernel zeroing or copying a page that once held code (a recycled page) writes it word by
- * word, and every word takes the slow path until the last TB on the page is gone: 1024 slow writes
- * for a 4 KiB page. Once the writes have run sequentially for SMC_STREAM_RUN stores, invalidate on
- * to that end of the page in one go (more than the writes need, which is always safe), so the page
- * loses its write protection and the rest of the run is ordinary stores. LT_SMC_STREAM=off for A/B.
+ * A guest kernel zeroing or copying a page that once held code writes it word by word, and every word takes the slow
+ * path until the last TB on the page is gone: 1024 slow writes for a 4 KiB page. Once the writes have run sequentially
+ * for SMC_STREAM_RUN stores, invalidate on to that end of the page in one go (more than the writes need, which is
+ * always safe), so the page loses its write protection and the rest of the run is ordinary stores.
  */
 #define SMC_STREAM_RUN 8
-
-static bool smc_stream_enabled(void)
-{
-    static int on = -1;
-
-    if (on < 0) {
-        const char *v = getenv("LT_SMC_STREAM");
-
-        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
-    }
-    return on;
-}
 
 /*
  * len must be <= 8 and start must be a multiple of len.
@@ -1268,7 +1250,7 @@ void tb_invalidate_phys_range_fast(CPUState *cpu, ram_addr_t start,
         }
         stream_start = start;
         stream_end = start + len;
-        if (abs(stream_run) >= SMC_STREAM_RUN && smc_stream_enabled()) {
+        if (abs(stream_run) >= SMC_STREAM_RUN) {
             if (stream_run > 0) {
                 last = start | ~TARGET_PAGE_MASK;
             } else {

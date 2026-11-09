@@ -198,3 +198,68 @@ submission without desktop rewriting, API-specific FBO/state handling, then
 successful compositor, surface, snapshot and app-corpus comparisons. The
 observed failures do not justify a shipping backend switch or a code reduction
 claim.
+
+## ES 2.0 execution, 2026-10-21
+
+ANGLE moves to `3d5feae4378fee3404431223d908446041348761` (main on 2026-10-21) with depot_tools
+`9cb87e7cca51147a3b8f39033e561736f8460652`; the probes above pass on it unchanged.
+
+A guest context created with API 2 now gets its own ANGLE context created for ES 2.0 (ANGLE gives
+ES 3.0), and API 0 or 1 an ES 1.1 one: ANGLE runs no fixed function in a programmable context and
+no shaders in an ES1 one, which CGL's legacy context does in one. The ES 2.0 slots are the same
+executor code as on CGL; what differs is in `gles-host-angle.c.inc` and a few guards:
+
+- Framebuffer objects are core in an ES 2.0 context and `OES_framebuffer_object` in an ES1 one,
+  and ANGLE takes each name only in its own API, so the executor's OES names pick by the current
+  context (without this the drawable was incomplete and the context failed).
+- Guest GLSL goes to ANGLE as the guest wrote it, not through the desktop 1.20 rewrite.
+- `glTexImage2D` with the executor's RGBA storage for BGRA, RGB, alpha or luminance texels stores
+  them in their own format, as ES requires; each samples as from RGBA storage.
+- APPLE_fence is NV_fence (set to all completed); `glTestObjectAPPLE` on anything but a fence is
+  true, since the executor copies guest texels and arrays at each call.
+- The bridge's own ES1 checks of a draw, and its count of texture units to refresh, use ES 2.0's
+  names in a programmable context (`gles_fixed_host()`).
+
+`tests/ipad1/angle-executor-context.sh` and `tests/ipad1/angle-slice.sh ANGLE-CHECKOUT` (slices of
+gles-host.c built for ANGLE, as tests/slice builds them for CGL) check these. With the ES 2.0
+context, CoreAnimation composites through ANGLE on k48ap 7B500, n81ap 10B500 and n90ap 11D257 with
+no refusals (LightTouchMac `sessions single --gl`); the CGL build's gles-host.c object is
+byte-identical to before.
+
+### Rectangle textures and the other desktop-only paths
+
+2.x and 3.x CoreAnimation composites with `GL_TEXTURE_RECTANGLE` (APPLE_texture_rectangle, which
+the guest front end offers), which ES has no target for, so n72ap 7E18 did not boot on ANGLE. A
+rectangle texture is now a 2D one in `gles-host-angle.c.inc`: the rectangle binding and enable are
+the context's own per unit, an operation on the target runs on that texture bound at 2D for the
+call, a new one takes a rectangle's defaults, and a draw (ES1) samples each unit's rectangle where
+it is on with the texture matrix scaled by 1/width and 1/height, putting the matrix and the unit's
+2D state back after. gles-host.c's rectangle paths (surface binds, refresh, the queries) are open
+to ANGLE. The other desktop-only paths need nothing more: immediate mode and attribute stacks are
+only in CGL's own `gles_draw_tex` and the debug mark (ANGLE takes the ES host's native
+`glDrawTexfOES`), and fences are NV_fence (above).
+
+### One build, the renderer chosen per boot
+
+With `-Dltm_angle_prefix=ANGLE-CHECKOUT` the GL bridge is built twice: gles-host.c for CGL as
+always, and gles-host-angle.c (gles-host.c again, its entry points renamed `gles_angle_*`) for
+ANGLE. A machine's `gl-renderer` property (every board's, `gles_host_class_init`) picks one at
+boot: `angle` forwards the bridge's entry points to the ANGLE build where ANGLE opens, else the
+boot says so and stays on CGL. ANGLE's build needs only ANGLE's headers: it opens libEGL and
+libGLESv2 at run time through `@rpath` (the app's Frameworks; a development build's rpath names
+the checkout's out/ltm-metal) and calls every EGL and GL entry point through a pointer
+(`gles-host-angle-gl.h`), so the CGL build beside it keeps the system's OpenGL and a build
+without ANGLE's dylibs runs on CGL. `tests/ipad1/angle-names.sh BUILD` checks that the ANGLE
+object references no GL name directly.
+
+Snapshots stay CGL's. A boot on ANGLE holds the migration blocker while it has live GL contexts,
+so a save is refused ("Live OpenGL ES state cannot be saved") rather than written without its GL
+state. What ANGLE snapshots need: snapshot capture reads one legacy context holding both pipelines,
+where ANGLE has an ES1 or an ES 2.0 one (the ES1 one lacks `GL_BLEND_SRC_RGB`, the separate stencil
+and blend state and every program query; the ES 2.0 one all fixed-function state), so each API needs
+its own capture and replay; texture capture uses `glGetTexImage` and `glGetTexLevelParameteriv`,
+which ES lacks (ANGLE has `GL_ANGLE_get_tex_level_parameter`, and a color-renderable texture reads
+back through a framebuffer, but alpha, luminance and luminance-alpha textures don't attach, so they
+need retained copies or a draw into RGBA); replay uploads RGBA into each texture's own format,
+which ES refuses for unsized alpha and luminance storage; and the adapter's own rectangle state
+(bindings, enables and sizes) would join the blob, a new version.

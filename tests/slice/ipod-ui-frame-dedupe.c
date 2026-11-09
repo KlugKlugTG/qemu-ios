@@ -1,7 +1,5 @@
 /* An unchanged frame is not republished; a changed one is (LightTouchMac #26).
  *
- * SLICE:frame-counter-state contrib/ios-app/qemu-ios-ui.c typedef IosFrameCounters
- * SLICE:frame-counter-state contrib/ios-app/qemu-ios-ui.c fn ios_frame_count
  * SLICE contrib/ios-app/qemu-ios-ui.c fn ios_capture
  * PKG glib-2.0
  */
@@ -20,17 +18,14 @@ typedef void (*qemu_ios_frame_cb)(void *);
 #define IOS_FRAME_BUFFERS 3
 static struct {
  QemuMutex frame_lock; void *buf[3]; size_t buf_size; GSList *retired;
- int published, width, height; uint64_t serial, timestamp_ns; qemu_ios_frame_cb cb; void *cb_opaque;
+ int published, width, height; uint64_t serial; qemu_ios_frame_cb cb; void *cb_opaque;
 } ios = { .published = -1 };
-#define QEMU_CLOCK_REALTIME 0
-static uint64_t qemu_clock_get_ns(int clock) { return 1; }
 typedef struct { int w, h, stride; uint8_t *data; } DisplaySurface;
 static int surface_width(DisplaySurface *s) { return s->w; }
 static int surface_height(DisplaySurface *s) { return s->h; }
 static int surface_stride(DisplaySurface *s) { return s->stride; }
 static void *surface_data(DisplaySurface *s) { return s->data; }
-#include "frame-counter-state.h"
-static IosFrameCounters ios_frame_counters;
+static int surface_bits_per_pixel(DisplaySurface *s) { return 32; }
 #include "slice.h"
 int main(void) {
  enum { W = 4, H = 3, STRIDE = 20 };   /* padded rows: only W*4 bytes count */

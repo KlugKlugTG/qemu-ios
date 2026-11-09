@@ -4,7 +4,7 @@
  *
  * SLICE include/hw/arm/ipod_touch_fmss.h define FMSS
  * SLICE hw/arm/ipod_touch_fmss.c define FMSS_CHIP|FMSS_SCRIPT
- * SLICE hw/arm/ipod_touch_fmss.c fn fmss_var_read fmss_tx_done fmss_run_script
+ * SLICE hw/arm/ipod_touch_fmss.c fn fmss_var_read fmss_run_script
  */
 #include "ipod-fmss-script.h"
 #include "slice.h"
@@ -28,9 +28,8 @@ static IPodTouchFMSSState run_counter(const uint32_t *prog, size_t n,
     return s;
 }
 int main(void) {
-    /* The stock write program's spare transmit: FMC40 = 0xc1, then poll bit 0 until it clears. The
-     * program must go on to its end (here a store of 0x12345678 to 0x9000) instead of polling to the
-     * step limit. */
+    /* The stock write program's spare transmit: FMC40 = 0xc1, then poll bit 0 until it clears. The program must go on
+     * to its end (here a store of 0x12345678 to 0x9000) instead of polling to the step limit. */
     {
         const uint32_t tx[] = {0x01000040u,0xc1u, 0x04010040u,1u, 0x0e010000u,8u,
                                0x05020000u,0x12345678u, 0x05030000u,0x9000u, 0x11020003u,0, 0,0};

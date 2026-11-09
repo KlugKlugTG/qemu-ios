@@ -91,7 +91,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(IPodTouchMultitouchState, IPOD_TOUCH_MULTITOUCH)
 #define MT_EVENT_TOUCH_START 0x3
 #define MT_EVENT_TOUCH_MOVED 0x4
 #define MT_EVENT_TOUCH_ENDED 0x7
-#define MT_REPORT_QUEUE_SIZE 32
+
+/* Extended controller path attributes, serialized after the legacy 28 bytes. */
+#define MT_CONTACT_FROM_EDGE_TIP 0x0001
+#define MT_CONTACT_FROM_CORNER 0x0004
 
 typedef struct MTFrameLengthPacket
 {
@@ -224,6 +227,7 @@ typedef enum MTFingerPhase {
 } MTFingerPhase;
 
 typedef struct MTFingerState {
+    uint16_t contact_flags;
     MTFingerPhase phase;
     bool started;        /* TOUCH_START already reported                      */
     float x, y;          /* position, 0..1 in the guest's portrait FB space   */
@@ -244,6 +248,7 @@ typedef struct MTSensorProfile {
     uint8_t region_param[8], region_param_len;
     int frame_x0, frame_y0;             /* frame value at 0.0 */
     int frame_width, frame_height;      /* span from 0.0 to 1.0 */
+    bool contact_flags;                /* 30-byte paths with controller flags */
 } MTSensorProfile;
 
 extern const MTSensorProfile mt_profile_ipod, mt_profile_k48, mt_profile_n81, mt_profile_n88;
@@ -268,13 +273,14 @@ typedef struct IPodTouchMultitouchState {
      * sizeof(MTFrame) once it can carry more than one finger.
      */
     uint32_t next_frame_len;
-#if !defined(__APPLE__)
-    MTFrame *queued_frames[MT_REPORT_QUEUE_SIZE - 1];
-    uint32_t queued_lengths[MT_REPORT_QUEUE_SIZE - 1];
-    bool queued_motion[MT_REPORT_QUEUE_SIZE - 1];
-    uint32_t queued_count;
-    bool next_frame_motion;
-#endif
+    /*
+     * next_frame reports a contact starting or ending. The slot holds one frame and a newer one used to replace it
+     * unread, so a quick tap (press and release before the guest's next read) reached the guest as a lone
+     * TOUCH_ENDED. Such a frame is kept until the guest takes it; the frame due meanwhile is owed and goes out a report
+     * period later.
+     */
+    bool next_frame_changes;
+    bool frame_owed;
     uint8_t *n1_frame;              /* the frame an N1 length query announced */
     uint32_t n1_frame_len;
     uint32_t frame_counter;
@@ -290,6 +296,9 @@ typedef struct IPodTouchMultitouchState {
     const struct MTSensorProfile *profile;   /* NULL until realize: iPod */
 
     MTFingerState fingers[MT_MAX_FINGERS];
+    /* Transient host input, DATA must precede a contact commit. */
+    int host_mtt[MT_MAX_FINGERS][2];
+    uint8_t host_mtt_axes[MT_MAX_FINGERS];
 
     /*
      * Slot 0's position, kept as a separate field because the legacy pointer
@@ -311,6 +320,7 @@ typedef struct IPodTouchMultitouchState {
      */
     int64_t last_motion_ns;
     uint32_t report_hz;    /* "report-hz": frames a second while touched; 0, IT_MT_HZ or 60 */
+    bool hold_atn;        /* active-low attention remains asserted until frame pickup */
 } IPodTouchMultitouchState;
 
 /*
@@ -330,10 +340,9 @@ void ipod_touch_multitouch_on_motion(IPodTouchMultitouchState *s);
  */
 void ipod_touch_multitouch_set_finger(IPodTouchMultitouchState *s, int slot,
                                       float x, float y, bool down);
-/* The guest took next_frame through a reader outside the model (each calls this after clearing it). */
+void ipod_touch_multitouch_register_input(IPodTouchMultitouchState *s);
+
+/* The guest took next_frame (each read path calls this after clearing it): an owed frame goes out now. */
 void ipod_touch_multitouch_frame_taken(IPodTouchMultitouchState *s);
-/* Internal admission check; reserves room for cancellation releases. */
-bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
-                                   unsigned begins, unsigned ends, unsigned moves);
 
 #endif

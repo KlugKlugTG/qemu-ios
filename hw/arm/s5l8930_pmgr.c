@@ -83,9 +83,8 @@ struct S5L8930PMGRState {
     uint32_t regs[S5L8930_PMGR_SIZE / 4];
     uint8_t security_epoch;     /* POWER_ID[31:24] LLB would latch; 0 = measured */
     uint8_t board_id;           /* POWER_ID[23:16], the board straps */
+    uint32_t apll, mpll;        /* the board's APLL and MPLL CON0 as iBoot leaves them */
     int64_t tick_base_ns;
-    uint64_t lo_ticks;          /* the last TICKS_LO read's sample, for the TICKS_HI read right after it */
-    bool lo_pending;
     bool keep_timebase;         /* "keep-timebase": the next reset is the AP's wake, see reset */
     S5L8930EventTimer evt[2];
     QEMUTimer *wdog_timer;
@@ -94,17 +93,21 @@ struct S5L8930PMGRState {
 
 /*
  * Reset values stand in for iBoot's state, since the kernel is booted
- * without it. PLLs are iEmu's (APLL 1000 MHz, EPLL 1026 MHz, VPLL 48 MHz;
- * IEMU/s5l8930.c:388-398), except MPLL, which iEmu leaves off: 400 MHz here
- * (M=100 P=3 S=2), since the A4's memory clock comes from somewhere.
+ * without it. A PLL's CON0 is enable (31), locked (29), P (19:14), M (12:3)
+ * and S (2:0), running at 48 MHz * M / P / 2^S (iBoot's get_pll, which is
+ * what fills clock-frequencies slots 1-4). APLL (0x00) and MPLL (0x08) are
+ * the board's ("apll" and "mpll"): the iPad's clock-frequencies have APLL at
+ * 1 GHz and MPLL off (slot 2 is 0), the iPhone 4's 800 and 500 MHz. EPLL
+ * (1026 MHz) and VPLL (48 MHz) are iEmu's (IEMU/s5l8930.c:388-398), and the
+ * same on both units.
  * POWER_ID: epoch 1, board-id 2, read from a real K48AP (iEmu had epoch 2).
  */
 static const struct {
     hwaddr off;
     uint32_t val;
 } pmgr_defaults[] = {
-    { 0x00, 0xA00187D1 }, { 0x04, 0x00380960 },
-    { 0x08, 0xA000C322 }, { 0x0C, 0x00380960 },
+    { 0x04, 0x00380960 },
+    { 0x0C, 0x00380960 },
     { 0x10, 0xA0010559 }, { 0x14, 0x00380960 },
     { 0x20, 0xA0008205 }, { 0x24, 0x00380960 },
     /* Clock muxes/dividers reconstructed from the real K48 clock-frequencies
@@ -172,16 +175,11 @@ static bool pmgr_modeled(hwaddr off)
  * share of each read; splitting off the remainder keeps the same floor.
  */
 QEMU_BUILD_BUG_ON(PMGR_TIMEBASE_HZ != 24000000);
-static uint64_t pmgr_ticks_at(S5L8930PMGRState *s, int64_t now)
-{
-    uint64_t ns = now - s->tick_base_ns;
-
-    return ns / 125 * 3 + ns % 125 * 3 / 125;
-}
-
 static uint64_t pmgr_ticks(S5L8930PMGRState *s)
 {
-    return pmgr_ticks_at(s, qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL));
+    uint64_t ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL) - s->tick_base_ns;
+
+    return ns / 125 * 3 + ns % 125 * 3 / 125;
 }
 
 static uint32_t evt_remaining(S5L8930PMGRState *s, S5L8930EventTimer *t)
@@ -271,55 +269,6 @@ static void wdog_check(S5L8930PMGRState *s)
     }
 }
 
-/*
- * An event timer whose deadline the timebase has already passed, but whose
- * QEMU timer the main loop has not run yet, fires now (LT_PMGR_SYNC_EXPIRY=off
- * leaves it to the main loop). The hardware raises the line when the counter
- * gets there; waiting for the main loop instead left iOS 6's idle loop
- * polling: SetIdlePop sees the decrementer's deadline already behind it and
- * returns to the idle thread without a WFI, ~10K times a second, each pass
- * three timebase reads, until the FIQ finally arrived.
- */
-static bool pmgr_sync_expiry(void)
-{
-    static int on = -1;
-
-    if (on < 0) {
-        const char *v = getenv("LT_PMGR_SYNC_EXPIRY");
-        on = !(v && !strcmp(v, "off"));
-    }
-    return on;
-}
-
-static void pmgr_expire_due(S5L8930PMGRState *s, int64_t now)
-{
-    bool due = false;
-    int i;
-
-    for (i = 0; i < ARRAY_SIZE(s->evt); i++) {
-        int64_t at = timer_expire_time_ns(s->evt[i].timer);
-        due |= at >= 0 && at <= now;
-    }
-    /*
-     * Only if the BQL is free: when the main loop holds it, it runs the due timer itself as soon as
-     * it lets go, and a vCPU waiting here for it stalled up to 6.6 ms on a Pixel 10.
-     */
-    bool locked = bql_locked();
-    if (!due || (!locked && !bql_trylock())) {
-        return;
-    }
-    for (i = 0; i < ARRAY_SIZE(s->evt); i++) {
-        int64_t at = timer_expire_time_ns(s->evt[i].timer);
-        if (at >= 0 && at <= now) {
-            timer_del(s->evt[i].timer);
-            evt_expire(&s->evt[i]);
-        }
-    }
-    if (!locked) {
-        bql_unlock();
-    }
-}
-
 static uint64_t s5l8930_pmgr_read(void *opaque, hwaddr off, unsigned size)
 {
     S5L8930PMGRState *s = opaque;
@@ -331,28 +280,12 @@ static uint64_t s5l8930_pmgr_read(void *opaque, hwaddr off, unsigned size)
      * The kernel reads HI, LO, HI and retries on a mismatch, so both halves
      * can be sampled live.
      */
-    /*
-     * One clock sample a LO read, and the HI read right after it answers from that sample: the kernel reads HI, LO,
-     * HI and retries if the two HI differ, so the second HI is the half that goes with LO. Each sample is a host
-     * clock read, ~200 ns on a Poco F3, and there were four of them a timestamp.
-     */
     if (off == PMGR_TICKS_LO) {
-        int64_t now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-
-        if (pmgr_sync_expiry()) {
-            pmgr_expire_due(s, now);
-        }
-        s->lo_ticks = pmgr_ticks_at(s, now);
-        s->lo_pending = true;
-        return (uint32_t)s->lo_ticks;
+        return (uint32_t)pmgr_ticks(s);
     }
     if (off == PMGR_TICKS_HI) {
-        bool pending = s->lo_pending;
-
-        s->lo_pending = false;
-        return (pending ? s->lo_ticks : pmgr_ticks(s)) >> 32;
+        return pmgr_ticks(s) >> 32;
     }
-    s->lo_pending = false;
     BQL_LOCK_GUARD();
     val = s->regs[off / 4];
     if (!pmgr_modeled(off)) {
@@ -395,7 +328,6 @@ static void s5l8930_pmgr_write(void *opaque, hwaddr off, uint64_t val64,
     S5L8930PMGRState *s = opaque;
     uint32_t val = val64;
 
-    s->lo_pending = false;
     BQL_LOCK_GUARD();
     if (!pmgr_modeled(off)) {
         qemu_log_mask(LOG_UNIMP, "%s: unmodeled write 0x%04x <- 0x%08x\n",
@@ -461,11 +393,12 @@ static void s5l8930_pmgr_reset(DeviceState *dev)
     S5L8930PMGRState *s = S5L8930_PMGR(dev);
     int i;
 
-    s->lo_pending = false;
     memset(s->regs, 0, sizeof(s->regs));
     for (i = 0; i < ARRAY_SIZE(pmgr_defaults); i++) {
         s->regs[pmgr_defaults[i].off / 4] = pmgr_defaults[i].val;
     }
+    s->regs[0x00 / 4] = s->apll;
+    s->regs[0x08 / 4] = s->mpll;
     s->regs[PMGR_POWER_ID / 4] |= (uint32_t)s->board_id << 16;
     /* iboot= skips LLB, which writes the boot epoch here on hardware; the
      * machine hands over what that LLB would write (it_iboot_find_miu_epoch). */
@@ -594,6 +527,8 @@ static const VMStateDescription vmstate_s5l8930_pmgr = {
 static const Property s5l8930_pmgr_props[] = {
     DEFINE_PROP_UINT8("security-epoch", S5L8930PMGRState, security_epoch, 0),
     DEFINE_PROP_UINT8("board-id", S5L8930PMGRState, board_id, 0x02),   /* K48 */
+    DEFINE_PROP_UINT32("apll", S5L8930PMGRState, apll, 0xA00187D1),     /* K48: 1 GHz (P 6, M 250, S 1) */
+    DEFINE_PROP_UINT32("mpll", S5L8930PMGRState, mpll, 0),              /* K48: off */
 };
 
 static void s5l8930_pmgr_class_init(ObjectClass *klass, const void *data)

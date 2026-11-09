@@ -17,6 +17,7 @@
 
 #include "qemu/osdep.h"
 #include "cpu.h"
+#include "qemu/main-loop.h"
 #include "accel/tcg/probe.h"
 #include "accel/tcg/cpu-mmu-index.h"
 #include "exec/target_page.h"
@@ -25,6 +26,55 @@
 #include "hw/arm/gles-present.h"
 
 void (*gles_present_wait_hook)(void);
+
+/* The BQL protects guest access and renderer bookkeeping. Native drawing
+ * needs neither, but another GL caller must not change the active context or
+ * reuse its scratch arrays while it runs. Waiters release the BQL, allowing
+ * timers, network I/O and other vCPUs to progress during that native work.
+ * Reset and migration stop all vCPUs before touching renderer state. */
+static QemuCond gles_execution_cond;
+static bool gles_execution_initialized, gles_execution_busy;
+static __thread bool gles_execution_owner;
+
+static void gles_execution_enter(void)
+{
+    assert(bql_locked());
+    assert(!gles_execution_owner);
+    if (!gles_execution_initialized) {
+        qemu_cond_init(&gles_execution_cond);
+        gles_execution_initialized = true;
+    }
+    while (gles_execution_busy) {
+        qemu_cond_wait_bql(&gles_execution_cond);
+    }
+    gles_execution_busy = gles_execution_owner = true;
+}
+
+static void gles_execution_leave(void)
+{
+    assert(bql_locked() && gles_execution_owner);
+    gles_execution_busy = gles_execution_owner = false;
+    qemu_cond_broadcast(&gles_execution_cond);
+}
+
+bool gles_native_begin(void)
+{
+    /* Direct host-side tests do not enter through the guest executor. */
+    if (!gles_execution_owner) {
+        return false;
+    }
+    assert(bql_locked());
+    bql_unlock();
+    return true;
+}
+
+void gles_native_end(bool unlocked)
+{
+    if (unlocked) {
+        bql_lock();
+        assert(gles_execution_owner);
+    }
+}
 
 /*
  * Guest memory behind the pointers a GL call hands the host (client arrays,
@@ -111,7 +161,10 @@ int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write)
     if (len && !gf.pending && guest_rw_ram(cpu, va, buf, len, write)) {
         return 0;
     }
-    if (gf.armed && len) {
+    /* The debug access below ignores protection, so every page is probed at the
+     * caller's privilege first, armed or not: an unarmed call (a batch) fails
+     * where the guest's own access would fault rather than raise it. */
+    if (len) {
         CPUArchState *env = cpu_env(cpu);
         MMUAccessType type = write ? MMU_DATA_STORE : MMU_DATA_LOAD;
         int idx = cpu_mmu_index(cpu, false);
@@ -124,6 +177,9 @@ int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write)
         for (;;) {
             if (probe_access_flags(env, p, 0, type, idx, true, &host, 0) &
                 TLB_INVALID_MASK) {
+                if (!gf.armed) {
+                    return -1;
+                }
                 gf.pending = true;
                 gf.va = p;
                 gf.type = type;
@@ -195,7 +251,7 @@ static int64_t gles_run_batch(CPUState *cpu, qc_gles_args_t *a)
     uint32_t n = a->args[1], i = 0;
 
     if (a->argc != 2 || n > GLES_BATCH_MAX_WORDS ||
-        cpu_memory_rw_debug(cpu, a->args[0], (uint8_t *)buf, n * 4, 0) != 0) {
+        gles_guest_rw(cpu, a->args[0], (uint8_t *)buf, n * 4, 0) != 0) {
         gles_bad_slots++;
         gles_host_refuse("bad-call:batch");
         return -1;
@@ -220,7 +276,7 @@ static int64_t gles_run_batch(CPUState *cpu, qc_gles_args_t *a)
     return 0;
 }
 
-int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a)
+static int64_t gles_handle_call(CPUState *cpu, qc_gles_args_t *a)
 {
     if (a->slot == GLES_OP_BATCH) {
         return gles_run_batch(cpu, a);
@@ -271,7 +327,6 @@ int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a)
             if (!gf.pending) {
                 gles_host_refuse("guest-read:spill:%u", a->slot);
             }
-            gles_guest_fault_in(cpu);
             return -1;
         }
     }
@@ -296,8 +351,20 @@ int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a)
     }
 
     int64_t r = gles_host_call(cpu, a->slot, a->ctx, argc, args);
-    gles_guest_fault_in(cpu);
     return r;
+}
+
+int64_t qc_handle_gles(CPUState *cpu, qc_gles_args_t *a)
+{
+    gles_execution_enter();
+    gf.armed = gf.pending = false;
+    int64_t result = gles_handle_call(cpu, a);
+    gles_execution_leave();
+    /* A guest data abort can longjmp out of this helper. Release the renderer
+     * gate first, while still holding the BQL, so that fault retries cannot
+     * strand the gate or let another caller overwrite the pending fault. */
+    gles_guest_fault_in(cpu);
+    return result;
 }
 
 void qc_gles_dump_stats(void)

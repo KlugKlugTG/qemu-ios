@@ -20,6 +20,7 @@
  */
 
 #include "qemu/osdep.h"
+#include "hw/arm/ios-boot-args.h"
 #include "hw/arm/machines-qom.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -94,6 +95,7 @@ typedef struct A4Board {
     uint64_t dram_size;                  /* also mirrored right above itself (iBoot) */
     uint32_t chipid[2];                  /* ChipID fuse words 0-1 */
     uint8_t board_id;                    /* PMGR POWER_ID[23:16] */
+    uint32_t apll, mpll;                 /* PMGR APLL and MPLL CON0 as iBoot leaves them; 0, 0: the iPad's (N81 too) */
     const uint8_t *product_id;           /* /product product-id (20 bytes) as iBoot fills it; NULL: left zero */
     /* Panel: scan-out size, the DSI ID read, lanes. */
     uint16_t width, height;
@@ -248,7 +250,7 @@ static const A4Board a4_n81 = {
     .i2c = {
         { 0, 0x74, TYPE_S5L8930_D1815, 0x0d },
         /* CS42L59 (audio0): the same MAP register file the CS42L61 driver saw. */
-        { 0, 0x4a, TYPE_CS42L59, 0x0b },
+        { 0, 0x4a, TYPE_CS42L59 },
         { 2, 0x19, TYPE_LIS302DL },
         { 2, 0x49, TYPE_S5L8930_TSL2581, 0x25 },     /* DT als interrupt */
         { 2, 0x68, TYPE_S5L8930_L3G4200D, 0x21, 0x05 },   /* gyro,ap3gdl: INT1, INT2 */
@@ -288,6 +290,8 @@ static const A4Board a4_n90 = {
     .dram_size = 0x20000000,
     .chipid = { 0x31800387, 0x80758000 },    /* same die as K48 */
     .board_id = 0x00,
+    /* The real unit's clock-frequencies: APLL 800 MHz (P 6, M 200, S 1), MPLL 500 MHz (P 3, M 125, S 2). */
+    .apll = 0xA0018641, .mpll = 0xA000C3EA,
     .product_id = a4_n90_product_id,
     .width = 640, .height = 960,
     .panel_id = 0x0969e5a1,                  /* ponytail: K48's, as N81's */
@@ -371,8 +375,8 @@ struct IPad1MachineState {
     char *usb_tcp_addr;                  /* host bridge, empty = no link */
     bool usb_cable;                      /* cable present; runtime qom-set */
     bool wifi;                           /* BCM4329 behind the IOP's SDIO ring */
-    bool headphones;                     /* a plain headphone in the jack (boards whose codec models it) */
     uint64_t rtc_epoch;                  /* rtc-epoch: the PMU clock at power-on (Unix seconds), 0 = the host's */
+    bool quiet_boot;                    /* omit -v in the RAM boot handoff */
     bool baseband;                       /* leave the kboot DT's baseband node matchable (default off) */
     DeviceState *bb_modem;               /* the ios-baseband behind spi2 (baseband=on, radio boards) */
     DeviceState *dart1;
@@ -380,6 +384,7 @@ struct IPad1MachineState {
     bool ring_silent;                    /* ring-switch: the side switch at silent (default off: ring) */
     uint8_t wifi_mac[6];                 /* BCM4329 CIS MAC (wifi-mac) */
     bool wifi_mac_explicit;
+    char *wifi_country;                  /* the access point's 802.11d country (wifi-country), NULL = the card's */
     bool iop_core;                       /* run the IOP firmware on a second core (default; off: the HLE) */
     DeviceState *iopcore;
     bool resume_boot;                    /* the next reset is the AP's power-on out of hibernate */
@@ -423,6 +428,11 @@ static void ipad1_amc_port_kick(void *cdma)
     s5l8930_cdma_kick(cdma);
 }
 
+static void ipad1_amc_port_sink(void *cdma)
+{
+    s5l8930_cdma_sink_done(cdma, S5L8930_AMC_PORT_BASE, AMC_PORT_SIZE);
+}
+
 static hwaddr ipad1_dart1_xlate(void *dart, unsigned sid, uint32_t va)
 {
     return s5l8930_dart_dev_xlate(dart, sid, va);
@@ -458,15 +468,6 @@ static qemu_irq ipad1_irq(IPad1MachineState *s, int irq)
  * keyboard services are replaced by the USB keyboard here
  * (docs/ipad1/guest-services.md).
  */
-static int ipad1_agent_copy(void *opaque, uint32_t address, uint8_t *data,
-                            size_t length, bool write)
-{
-    if (length && length - 1 > UINT32_MAX - address) {
-        return -1;
-    }
-    return cpu_memory_rw_debug(opaque, address, data, length, write);
-}
-
 static void ipad1_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
                             uint64_t value)
 {
@@ -474,14 +475,9 @@ static void ipad1_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
     IPad1MachineState *s = IPAD1_MACHINE(qdev_get_machine());
     qemu_call_t q;
     int32_t err = 0;
-    bool bql;
 
     if (qemu_call_rw(cs, value, &q, false)) {
         return;
-    }
-    bql = qemu_call_needs_bql(&q) && !bql_locked();
-    if (bql) {
-        bql_lock();
     }
     switch (q.call_number) {
     case QC_GLES:
@@ -509,29 +505,24 @@ static void ipad1_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
                                    q.args.ag.buffer_guest_ptr, q.args.ag.offset,
                                    q.args.ag.length,
                                    qemu_clock_get_ms(QEMU_CLOCK_REALTIME),
-                                   candidate, ipad1_agent_copy, cs);
+                                   candidate, guest_copy, cs);
         err = q.retval < 0 ? EINVAL : 0;
         break;
     }
     default:
         if (!guest_pb_call(&s->pb, cs, &q, &err) &&
             !guest_pkg_call(&s->pkg, cs, &q, &err)) {
-            goto out;
+            return;
         }
     }
     q.error = err;
     qemu_call_rw(cs, value, &q, true);
-out:
-    if (bql) {
-        bql_unlock();
-    }
 }
 
 static const ARMCPRegInfo ipad1_cp_reginfo[] = {
     { .name = "QEMU_CALL", .cp = 15, .opc1 = 3, .crn = 15, .crm = 15,
       .opc2 = 0, .access = PL0_RW, .state = ARM_CP_STATE_AA32,
-      /* Not ARM_CP_IO: the handler takes the BQL for the calls that need it. */
-      .type = ARM_CP_NO_RAW | ARM_CP_RAISES_EXC, /* gles_guest_rw */
+      .type = ARM_CP_IO | ARM_CP_NO_RAW | ARM_CP_RAISES_EXC, /* gles_guest_rw */
       .readfn = qemu_call_status,
       .writefn = ipad1_qemu_call },
 };
@@ -769,6 +760,11 @@ static void ipad1_cpu_reset(void *opaque)
         (uint64_t)load_pa + image_len > S5L8930_DRAM_BASE + s->board->dram_size) {
         error_report("ipad1: kboot bundle does not fit in DRAM "
                      "(load 0x%x len 0x%x)", load_pa, image_len);
+        exit(1);
+    }
+    if (s->quiet_boot && !ios_boot_args_quiet((uint8_t *)data, image_len,
+                                             load_pa, bootargs_pa)) {
+        error_report("quiet-boot: invalid ARM32 boot command line");
         exit(1);
     }
     /*
@@ -1071,9 +1067,23 @@ static void ipad1_pwroff_tick(void *opaque)
 static void ipad1_powerdown_req(Notifier *n, void *opaque)
 {
     IPad1MachineState *s = IPAD1_MACHINE(qdev_get_machine());
+    static uint64_t sequence;
 
     if (s->pwroff_phase != PWROFF_IDLE && s->pwroff_phase != PWROFF_WATCH) {
         return;
+    }
+    /* Prepared guests expose the existing launchd reboot2(RB_HALT) RPC.
+     * Completion still comes from the PMU, never from the RPC reply. Keep
+     * the hardware gesture below for older guests without a live agent. */
+    if (!strcmp(ipod_agent_status(s->agent,
+                                  qemu_clock_get_ms(QEMU_CLOCK_REALTIME)), "alive")) {
+        g_autofree char *request = g_strdup_printf("qemu-powerdown-%" PRIu64 " halt\n",
+                                                  ++sequence);
+        if (!ipod_agent_submit(s->agent, request)) {
+            timer_del(s->pwroff_timer);
+            s->pwroff_phase = PWROFF_IDLE;
+            return;
+        }
     }
     /*
      * The sheet follows the interface orientation, which follows the
@@ -1214,12 +1224,6 @@ static void ipad1_i2c_create(IPad1MachineState *s, int n)
                 s->accel->motion = true;
             }
         }
-        if (!strcmp(d->type, TYPE_CS42L59)) {
-            /* LT_HEADPHONES=1/0 overrides the machine option, for A/B runs */
-            const char *e = getenv("LT_HEADPHONES");
-
-            qdev_prop_set_bit(dev, "headphones", e ? strcmp(e, "0") != 0 : s->headphones);
-        }
         if (!strcmp(d->type, TYPE_S5L8930_D1815)) {
             /* the PMU's clock and the agent's time sync agree on a pinned date */
             qdev_prop_set_uint64(dev, "rtc-epoch", s->rtc_epoch);
@@ -1291,8 +1295,6 @@ static void ipad1_init(MachineState *machine)
     }
 
     cpuobj = object_new(machine->cpu_type);
-    /* The only CPU that runs the AP's code; the IOP core shares no atomics with it (tcg_unshared). */
-    CPU(cpuobj)->tcg_unshared = true;
     s->cpu = ARM_CPU(cpuobj);
     object_property_set_link(cpuobj, "memory", OBJECT(sysmem), &error_abort);
     object_property_set_bool(cpuobj, "has_el3", false, NULL);
@@ -1443,6 +1445,10 @@ static void ipad1_init(MachineState *machine)
         }
     }
     qdev_prop_set_uint8(dev, "board-id", s->board->board_id);
+    if (s->board->apll) {
+        qdev_prop_set_uint32(dev, "apll", s->board->apll);
+        qdev_prop_set_uint32(dev, "mpll", s->board->mpll);
+    }
     sysbus_realize_and_unref(sbd, &error_fatal);
     sysbus_mmio_map(sbd, 0, S5L8930_PMGR_BASE);
     sysbus_connect_irq(sbd, 0, ipad1_irq(s, S5L8930_IRQ_TIMER0));
@@ -1527,6 +1533,9 @@ static void ipad1_init(MachineState *machine)
         /* qom-set /machine wifi-bssid aa:bb:..: a new access point for
          * locationd, which caches a position per BSSID (location.md). */
         object_property_add_alias(OBJECT(machine), "wifi-bssid", OBJECT(card), "bssid");
+        if (s->wifi_country) {
+            object_property_set_str(OBJECT(card), "country", s->wifi_country, &error_fatal);
+        }
         card->card_present = true;
         sysbus_realize_and_unref(SYS_BUS_DEVICE(card), &error_fatal);
         /* The soldered combo chip exists even with host networking disabled.
@@ -1859,6 +1868,7 @@ static void ipad1_init(MachineState *machine)
     /* Its output port, which CDMA channel 0x17 drains (amc dma-channels). */
     sysbus_mmio_map(sbd, 1, S5L8930_AMC_PORT_BASE);
     IPOD_TOUCH_AMC(dev)->port_kick = ipad1_amc_port_kick;
+    IPOD_TOUCH_AMC(dev)->port_sink = ipad1_amc_port_sink;
     IPOD_TOUCH_AMC(dev)->port_opaque = s->cdma;
     s5l8930_cdma_set_source(s->cdma, S5L8930_AMC_PORT_BASE, AMC_PORT_SIZE,
                             ipod_touch_amc_port_avail, dev);
@@ -1929,6 +1939,19 @@ static void ipad1_set_wifi_mac(Object *obj, const char *value, Error **errp)
     }
     memcpy(s->wifi_mac, mac, sizeof(mac));
     s->wifi_mac_explicit = true;
+}
+
+static char *ipad1_get_wifi_country(Object *obj, Error **errp)
+{
+    return g_strdup(IPAD1_MACHINE(obj)->wifi_country ?: "");
+}
+
+static void ipad1_set_wifi_country(Object *obj, const char *value, Error **errp)
+{
+    IPad1MachineState *s = IPAD1_MACHINE(obj);
+
+    g_free(s->wifi_country);
+    s->wifi_country = g_strdup(value);
 }
 
 static char *ipad1_get_kboot(Object *obj, Error **errp)
@@ -2333,22 +2356,6 @@ static void ipad1_set_ring_switch(Object *obj, bool value, Error **errp)
     ipad1_apply_ring_switch(IPAD1_MACHINE(obj));
 }
 
-static bool ipad1_get_headphones(Object *obj, Error **errp)
-{
-    return IPAD1_MACHINE(obj)->headphones;
-}
-
-static void ipad1_set_headphones(Object *obj, bool value, Error **errp)
-{
-    IPad1MachineState *s = IPAD1_MACHINE(obj);
-
-    if (s->cpu) {
-        error_setg(errp, "headphones must be set before the machine starts");
-        return;
-    }
-    s->headphones = value;
-}
-
 static bool ipad1_get_wifi(Object *obj, Error **errp)
 {
     return IPAD1_MACHINE(obj)->wifi;
@@ -2412,8 +2419,20 @@ static char *ipad1_get_agent_status(Object *obj, Error **errp)
                                       qemu_clock_get_ms(QEMU_CLOCK_REALTIME)));
 }
 
+static bool ipad1_get_quiet_boot(Object *obj, Error **errp)
+{
+    return IPAD1_MACHINE(obj)->quiet_boot;
+}
+
+static void ipad1_set_quiet_boot(Object *obj, bool value, Error **errp)
+{
+    IPAD1_MACHINE(obj)->quiet_boot = value;
+}
+
 static void ipad1_instance_init(Object *obj)
 {
+    object_property_add_bool(obj, "quiet-boot", ipad1_get_quiet_boot,
+                             ipad1_set_quiet_boot);
     IPAD1_MACHINE(obj)->usb_cable = true;
     IPAD1_MACHINE(obj)->iop_core = true;
     IPAD1_MACHINE(obj)->wifi = true;
@@ -2434,7 +2453,7 @@ static void ipad1_instance_init(Object *obj)
     object_property_add_str(obj, "gles-rejects", ipad1_get_gles_rejects, NULL);
     object_property_set_description(obj, "gles-rejects",
         "Every refusal the GL bridge made so far, one NAME<tab>COUNT per line");
-    IPAD1_MACHINE(obj)->battery_level = 80;
+    IPAD1_MACHINE(obj)->battery_level = 100;
     IPAD1_MACHINE(obj)->usb_charger = true;
 }
 
@@ -2505,6 +2524,10 @@ static void ipad1_class_init(ObjectClass *klass, const void *data)
                                   ipad1_set_wifi_mac);
     object_class_property_set_description(klass, "wifi-mac",
         "BCM4329 card MAC (unset keeps the board's placeholder)");
+    object_class_property_add_str(klass, "wifi-country", ipad1_get_wifi_country,
+                                  ipad1_set_wifi_country);
+    object_class_property_set_description(klass, "wifi-country",
+        "The access point's 802.11d country, two letters (unset: US)");
     object_class_property_add_str(klass, "kboot", ipad1_get_kboot,
                                   ipad1_set_kboot);
     object_class_property_set_description(klass, "kboot",
@@ -2568,10 +2591,7 @@ static void ipad1_class_init(ObjectClass *klass, const void *data)
     object_class_property_set_description(klass, "wifi",
         "Host bridge for the soldered BCM4329 (default on). Frames go to "
         "-netdev id=wifi0, or to user networking when none is given; off leaves the card present");
-    object_class_property_add_bool(klass, "headphones", ipad1_get_headphones, ipad1_set_headphones);
-    object_class_property_set_description(klass, "headphones",
-        "Report a plain headphone plugged in, so iOS routes audio to Headphones and skips the speaker "
-        "protection DSP (default off; the n81ap only, other boards ignore it)");
+    gles_host_class_init(klass);
     object_class_property_add_bool(klass, "gles-debug", ipad1_get_gles_debug, ipad1_set_gles_debug);
     object_class_property_set_description(klass, "gles-debug",
         "Paint what the GL bridge refuses magenta instead of black (default off; tests turn it on)");

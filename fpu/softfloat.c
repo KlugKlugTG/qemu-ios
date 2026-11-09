@@ -334,39 +334,6 @@ static inline bool f64_is_inf(union_float64 a)
     return float64_is_infinity(a.s);
 }
 
-
-/*
- * The hardfloat shortcut assumes the inexact flag is already raised, so a result that rounds raises nothing
- * new. A guest that does exact arithmetic (zeros, small integers: silent audio buffers, identity transforms)
- * never raises it, and every one of its operations fell to softfloat. When the flag is clear, test the
- * result for exactness instead (the host's own flag costs a status-register write per operation) and raise
- * inexact ourselves if it rounded; from then on the flag is set and the check is skipped.
- * LT_HARDFLOAT_EXACT=off restores the old rule for A/B.
- */
-static float hard_f32_sub(float a, float b);
-static float hard_f32_mul(float a, float b);
-
-static bool lt_hardfloat_exact = true;
-
-static void __attribute__((constructor)) lt_hardfloat_exact_init(void)
-{
-    const char *v = getenv("LT_HARDFLOAT_EXACT");
-
-    lt_hardfloat_exact = !v || strcmp(v, "off");
-}
-
-/* r = a op b, finite and normal or zero: did it round? */
-static inline bool f32_hard_exact(float a, float b, float r, float (*hard)(float, float))
-{
-    if (hard == hard_f32_mul) {
-        return (double)a * (double)b == (double)r;  /* 24 x 24 bits fit a double */
-    } else {                                        /* Knuth's TwoSum: the rounding error, exactly */
-        float bb = hard == hard_f32_sub ? -b : b, v = r - a;
-
-        return (a - (r - v)) + (bb - v) == 0.0f;
-    }
-}
-
 /* What float32/64_gen2 may keep in hardfloat beyond normal results. */
 enum gen2_exact {
     GEN2_NONE,      /* only normal results */
@@ -380,20 +347,16 @@ float32_gen2(float32 xa, float32 xb, float_status *s,
              f32_check_fn pre, f32_check_fn post, enum gen2_exact exact)
 {
     union_float32 ua, ub, ur;
-    bool check_exact = false;
 
     ua.s = xa;
     ub.s = xb;
 
     if (unlikely(!can_use_fpu(s))) {
-        if (exact == GEN2_NONE) {
+        if (exact == GEN2_NONE || QEMU_NO_HARDFLOAT) {
             goto soft;
         }
-        if (QEMU_NO_HARDFLOAT || !lt_hardfloat_exact || s->float_rounding_mode != float_round_nearest_even) {
-            float32_input_flush2(&ua.s, &ub.s, s);
-            goto special;
-        }
-        check_exact = true;                 /* inexact not raised: test the result */
+        float32_input_flush2(&ua.s, &ub.s, s);
+        goto special;
     }
 
     float32_input_flush2(&ua.s, &ub.s, s);
@@ -403,7 +366,7 @@ float32_gen2(float32 xa, float32 xb, float_status *s,
 
     ur.h = hard(ua.h, ub.h);
     if (unlikely(f32_is_inf(ur))) {
-        float_raise(float_flag_overflow | (check_exact ? float_flag_inexact : 0), s);
+        float_raise(float_flag_overflow, s);
     } else if (unlikely(fabsf(ur.h) <= FLT_MIN)) {
         /* Zero from a zero factor, or an exact cancellation: exact, no flags. */
         if (exact != GEN2_NONE && float32_is_zero(ur.s) &&
@@ -413,8 +376,6 @@ float32_gen2(float32 xa, float32 xb, float_status *s,
         if (post(ua, ub)) {
             goto soft;
         }
-    } else if (unlikely(check_exact) && !f32_hard_exact(ua.h, ub.h, ur.h, hard)) {
-        float_raise(float_flag_inexact, s);
     }
     return ur.s;
 
@@ -462,7 +423,7 @@ float64_gen2(float64 xa, float64 xb, float_status *s,
     ub.s = xb;
 
     if (unlikely(!can_use_fpu(s))) {
-        if (exact == GEN2_NONE) {
+        if (exact == GEN2_NONE || QEMU_NO_HARDFLOAT) {
             goto soft;
         }
         float64_input_flush2(&ua.s, &ub.s, s);
