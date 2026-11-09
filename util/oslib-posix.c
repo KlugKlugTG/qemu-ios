@@ -234,6 +234,21 @@ void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment, bool shared,
         *alignment = align;
     }
 
+    /*
+     * The guest's RAM is the data side of nearly every translated access, and a 128 MiB guest is
+     * 32K host pages: the translated code's loads and stores then spend dTLB misses on memory the
+     * guest touches in every block. Ask the kernel to back the region with huge pages -- where
+     * transparent huge pages are unavailable, or the kernel only collapses on request, this is a
+     * no-op. Framebuffers and the command FIFO are not on this path.
+     */
+    if (size >= 2 * MiB) {
+        const char *huge = getenv("LT_RAM_HUGEPAGE");
+
+        if (!(huge && (!strcmp(huge, "off") || !strcmp(huge, "0")))) {
+            qemu_madvise(ptr, size, QEMU_MADV_HUGEPAGE);
+        }
+    }
+
     trace_qemu_anon_ram_alloc(size, ptr);
     return ptr;
 }
