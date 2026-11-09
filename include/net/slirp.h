@@ -37,8 +37,9 @@ int net_slirp_set_restrict(const char *id, bool restricted);
 /* Allow or refuse the guest's traffic to the host's local networks in place;
  * id NULL: every user netdev. */
 int net_slirp_set_lan(const char *id, bool allowed);
-#ifdef CONFIG_DARWIN
-/* The loopback resolver lan=off sends the guest's DNS to (net/slirp-dns.c). */
+#if defined(CONFIG_DARWIN) || defined(__ANDROID__)
+/* The loopback resolver lan=off sends the guest's DNS to (net/slirp-dns.c):
+ * the Mac's system resolver there, getaddrinfo on Android (which has no resolv.conf). */
 bool net_slirp_dns_forward(struct sockaddr_in *addr);
 #endif
 

@@ -138,6 +138,24 @@ static int aio_worker(void *arg)
             return -EIO;
         }
         break;
+    case QEMU_AIO_WRITE_ZEROES:
+    case QEMU_AIO_DISCARD: {
+        /*
+         * Frees the range's whole clusters in a sparse file (and writes zeros
+         * in one that isn't), as a hole punch does elsewhere. Without it the
+         * block layer writes a buffer of zeros, which allocates the range.
+         */
+        FILE_ZERO_DATA_INFORMATION zero;
+        DWORD returned;
+
+        zero.FileOffset.QuadPart = aiocb->aio_offset;
+        zero.BeyondFinalZero.QuadPart = aiocb->aio_offset + aiocb->aio_nbytes;
+        if (!DeviceIoControl(aiocb->hfile, FSCTL_SET_ZERO_DATA, &zero,
+                             sizeof(zero), NULL, 0, &returned, NULL)) {
+            ret = -EIO;
+        }
+        break;
+    }
     default:
         fprintf(stderr, "invalid aio request (0x%x)\n", aiocb->aio_type);
         ret = -EINVAL;
@@ -492,6 +510,38 @@ static int coroutine_fn raw_co_truncate(BlockDriverState *bs, int64_t offset,
     return 0;
 }
 
+static int coroutine_fn raw_co_zero_range(BlockDriverState *bs, int64_t offset,
+                                          int64_t bytes, int type)
+{
+    BDRVRawState *s = bs->opaque;
+    RawWin32AIOData *acb;
+
+    if (s->aio) {
+        /* An overlapped handle: DeviceIoControl would need an OVERLAPPED. */
+        return -ENOTSUP;
+    }
+    acb = g_new0(RawWin32AIOData, 1);
+    acb->bs = bs;
+    acb->hfile = s->hfile;
+    acb->aio_type = type;
+    acb->aio_offset = offset;
+    acb->aio_nbytes = bytes;
+    return thread_pool_submit_co(aio_worker, acb);
+}
+
+static int coroutine_fn raw_co_pwrite_zeroes(BlockDriverState *bs,
+                                             int64_t offset, int64_t bytes,
+                                             BdrvRequestFlags flags)
+{
+    return raw_co_zero_range(bs, offset, bytes, QEMU_AIO_WRITE_ZEROES);
+}
+
+static int coroutine_fn raw_co_pdiscard(BlockDriverState *bs, int64_t offset,
+                                        int64_t bytes)
+{
+    return raw_co_zero_range(bs, offset, bytes, QEMU_AIO_DISCARD);
+}
+
 static int64_t coroutine_fn raw_co_getlength(BlockDriverState *bs)
 {
     BDRVRawState *s = bs->opaque;
@@ -728,6 +778,8 @@ BlockDriver bdrv_file = {
     .bdrv_aio_pwritev   = raw_aio_pwritev,
     .bdrv_aio_flush     = raw_aio_flush,
 
+    .bdrv_co_pwrite_zeroes = raw_co_pwrite_zeroes,
+    .bdrv_co_pdiscard   = raw_co_pdiscard,
     .bdrv_co_truncate   = raw_co_truncate,
     .bdrv_co_getlength  = raw_co_getlength,
     .bdrv_co_get_allocated_file_size

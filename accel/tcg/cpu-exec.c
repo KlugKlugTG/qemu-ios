@@ -494,12 +494,20 @@ void tcg_indirect_l2_init(bool enabled, bool profile)
     }
 }
 
+/*
+ * The slots live in the TranslationBlock, inside the code buffer: on macOS
+ * that is MAP_JIT memory, write-protected while this thread runs generated
+ * code (which is where these helpers are called from), so a plain store
+ * faults there. The toggles are no-ops elsewhere.
+ */
 static inline void indirect_site_fill(TCGIndirectSlot *site, uint64_t key,
                                       const void *host)
 {
+    qemu_thread_jit_write();
     site->e[1] = site->e[0];
     site->e[0].host = host;
     site->e[0].key = key;
+    qemu_thread_jit_execute();
 }
 
 /**
@@ -665,9 +673,11 @@ const void *HELPER(lookup_tb_ptr_ras)(CPUArchState *env, void *site, uint64_t ke
     if (slot != &tcg_ras_dummy && host != tcg_code_gen_epilogue &&
         (uint32_t)(key >> 32) == qatomic_read(&cpu->neg.ibtc_ctx) && (uint32_t)(key >> 32) != 0 &&
         QTAILQ_EMPTY(&cpu->breakpoints)) {
+        qemu_thread_jit_write();
         slot->key = key;
         slot->sig = sig;
         slot->host = host;
+        qemu_thread_jit_execute();
     }
     return host;
 }

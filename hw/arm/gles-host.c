@@ -221,7 +221,7 @@ void gles_eagl_iosurface_unlock(void);
 #include "gles-host-fence.c.inc"
 #endif
 
-/* gles-host-queue.c.inc (every backend): fn on the thread that holds the host contexts. */
+/* gles-host-queue.c.inc (every backend, CGL too): fn on the thread that holds the host contexts. */
 static void gles_queue_run(void (*fn)(void *), void *opaque);
 static void gles_queue_forget(void);
 #ifdef GLES_HOST_EGL_ES

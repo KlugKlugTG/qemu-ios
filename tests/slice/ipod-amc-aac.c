@@ -44,6 +44,7 @@ typedef struct {
     uint32_t dram_base, dram_size; bool rev21; uint32_t result_offset, dma_done;
     uint32_t xfers, xfer[AMC_XFER_QUEUE * 3], e0_resume; uint8_t port[AMC_PORT_BYTES];
     uint32_t port_len; void (*port_kick)(void *); void *port_opaque;
+    bool decoding; int decode_lock, decode_idle; bool decode_running;
 } IPodTouchAMCState;
 static void ipod_touch_amc_write(void *opaque, hwaddr addr, uint64_t val, unsigned size);
 #define IPOD_TOUCH_AMC(s) ((IPodTouchAMCState *)(s))
@@ -86,6 +87,21 @@ static int address_space_write(void *as, hwaddr a, int attrs, const void *src, s
     void *p = memory(a,n); if (!p) return -1; memcpy(p,src,n); return 0;
 }
 static void word(unsigned offset, uint32_t v) { v = GUINT32_TO_LE(v); memcpy(dram+offset,&v,4); }
+/* The decode drops the BQL; close_on_unlock has the guest restart its stream right then. */
+static void amc_decoder_close(IPodTouchAMCState *s);
+static IPodTouchAMCState *close_on_unlock;
+static bool bql_held = true;
+static unsigned bql_drops;
+static bool bql_locked(void) { return bql_held; }
+static void bql_unlock(void) {
+    assert(bql_held); bql_held = false; bql_drops++;
+    if (close_on_unlock) { bql_held = true; amc_decoder_close(close_on_unlock); bql_held = false; close_on_unlock = NULL; }
+}
+static void bql_lock(void) { assert(!bql_held); bql_held = true; }
+static void qemu_mutex_lock(int *m) {}
+static void qemu_mutex_unlock(int *m) {}
+static void qemu_cond_broadcast(int *c) {}
+static void qemu_cond_wait(int *c, int *m) { assert(!"no decode runs while a snapshot is taken here"); }
 #include "amc.h"
 static AMCDecoder *snapshot_decoder(AMCDecoder *d)
 {
@@ -534,7 +550,20 @@ int main(void) {
     d=b.decoder; assert(d && d->pcm->len && (b.pending & 4) && !b.port_len);
     assert(lduw_le_p(aperture+0x18000+0xa) == 1 && lduw_le_p(aperture+0x18000+0xc));
     amc_decoder_close(&b);
-    puts("PASS: iOS 6's AAC program by its parameter block, 32-bit samples in slots of its jobs' size; 3.1's AMC 2.1 collection");
+    /* The guest restarts the stream while the decode runs without the BQL: the decode frees the old one. */
+    IPodTouchAMCState c = {.buf_base = AMC_BUF_BASE, .dram_base = 0x08000000, .dram_size = 0x08000000,
+                           .result_offset = AMC_RESULT_OFFSET, .dma_done = AMC_DMA_DONE};
+    c.regs[0x940/4]=0x84006e00; c.regs[0x960/4]=0xc600b800; c.regs[0x964/4]=0x848cba5d; c.regs[0x968/4]=0xc013f7fb;
+    memset(aperture,0,sizeof(aperture)); stw_le_p(aperture+0x2ff00,7); stw_le_p(aperture+0x2ff06,4);
+    for (unsigned i=0;i<1000;i++) memcpy(dram+0x1000+i*7,silence,7);
+    word(0,0); word(4,7000u<<16); word(8,0x08001000);
+    assert(amc_decode_dma(&c,0x08000001));
+    unsigned drops = bql_drops;
+    close_on_unlock = &c;
+    amc_decode_drain(&c);
+    assert(bql_drops == drops + 1 && !c.decoder && !c.decoding && bql_held);
+    puts("PASS: the decode runs without the BQL; a stream restarted meanwhile is freed by the decode");
+    puts("PASS: iOS 6\'s AAC program by its parameter block, 32-bit samples in slots of its jobs' size; 3.1's AMC 2.1 collection");
     puts("PASS: AMC 2.1 layout, engine-local input and engine 0 collection into the output port");
     puts("PASS: exact AMC replay, pending frames/PCM/slot/completion and bounded history");
     puts("PASS: AAC-LC/HE-AAC/MP3/ALAC, PCM layout/backpressure, DMA bounds and stream restart");

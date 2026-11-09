@@ -4,6 +4,7 @@
 #include "hw/arm/ipod_touch_cs42l58.h"
 #include "trace.h"
 #include "hw/trace-printf.h"
+#include <math.h>
 
 /*
  * Cirrus CS42L58 stereo audio codec, I2C address 0x4A (device tree:
@@ -76,6 +77,87 @@ static unsigned cs42l58_sample_rate(uint8_t control)
     case 0x1d: return 8000;
     default: return 0;
     }
+}
+
+/*
+ * Output volume. iOS sets the volume buttons' level in the codec (on the
+ * CS42L59, with headphones), not in the PCM, so the host hears it only if it
+ * is applied here. The top level plays at unity (the PCM as sent, what the
+ * host heard before this was modelled) and the rest keep their distance from
+ * it: the codec's positive gains drive the analog side, and applied to the
+ * full-scale PCM they would only clip.
+ * ponytail: both maps inferred from what the drivers write as the volume steps
+ * through its 16 levels with media playing (codec register trace), not from a
+ * datasheet.
+ *
+ * CS42L59 (n81, 10B500): 7-bit two's complement in 0.5 dB steps, 0x40 muted;
+ * 0x1d is the headphones' output, 0x21 the speaker's. The host hears the
+ * jack's output: the headphones' with a headphone plugged in, else the
+ * speaker's, each at unity at its own route's top level. Only while that one
+ * is muted does the loudest other output, relative to its top, play instead
+ * (a speaker forced on with the headphones in).
+ * - Headphones: iOS sets the volume here. Levels 1-16 are 0x47 (-28.5 dB) to
+ *   0x02 (+1 dB); level 0 and an idle output write 0x40. Read as 1 dB steps
+ *   the levels spanned 59 dB, so the middle of the slider was about 30 dB down
+ *   (a few percent of full scale on a phone); 0.5 dB steps fit the same trace
+ *   and give 29.5 dB, about the 2G's audible range (its WM8758 amplifier,
+ *   about 25 dB).
+ * - Speaker: iOS scales the PCM itself (speaker processing; level 1 is about
+ *   35 dB under level 16) and parks 0x21 at 0x78 (-4 dB) for every level from
+ *   1 to 16, 0x40 at level 0 and idle. Read against the headphones' top, that
+ *   fixed -5 dB was all the host heard of the speaker's volume, so 0x78 is the
+ *   speaker's unity.
+ * - Alerts and system sounds play at Settings > Sounds > Ringer and Alerts,
+ *   which the volume buttons leave alone ("Change with Buttons", off by
+ *   default). With the headphones in, lock sounds use 0x1d only (0x5c at the
+ *   default level) and ringtones both outputs, 0x21 5 dB over 0x1d (0x1d 0x6e,
+ *   -10 dB from the top, at the slider's top). So they keep their level at any
+ *   volume, muted included, as on the device.
+ * ponytail: from 16 -> 0 -> 16 traces with media and a game playing on each
+ * route, and the ringer slider dragged with the headphones in. 0x1f was never
+ * seen unmuted (with USB services, alerts and Settings too) and takes the
+ * headphones' top.
+ *
+ * CS42L61 (n88, 9B206; speaker): 0x21, 8-bit two's complement in 0.5 dB
+ * steps, levels 1-16 0xc4 (-30 dB) to 0x18 (+12 dB). Level 0 keeps 0xc4 and
+ * mutes: 0x07 bit 0 set and 0x67 0x3f (0x1b bit 5 too), all cleared again for
+ * any other level and for a system sound.
+ */
+double cs42l58_output_gain(CS42L58State *s)
+{
+    /* output register, and its top level in 0.5 dB steps; the speaker's last */
+    static const struct { uint8_t reg; int8_t top; } cs42l59_out[] = {
+        { 0x1d, 2 }, { 0x1f, 2 }, { 0x21, -8 },
+    };
+    double db = -INFINITY;
+
+    switch (s->volume) {
+    case CS42L58_VOLUME_CS42L59: {
+        unsigned jack = s->hp ? 0 : ARRAY_SIZE(cs42l59_out) - 1;
+
+        for (unsigned i = 0; i < ARRAY_SIZE(cs42l59_out); i++) {
+            uint8_t v = s->regs[cs42l59_out[i].reg] & 0x7f;
+
+            if (v != 0x40) {
+                double out = (double)((int8_t)(v << 1) / 2 - cs42l59_out[i].top) / 2;
+
+                if (i == jack) {
+                    return pow(10.0, out / 20.0);
+                }
+                db = MAX(db, out);
+            }
+        }
+        break;
+    }
+    case CS42L58_VOLUME_CS42L61:
+        if (!((s->regs[0x07] & 1) && s->regs[0x67] == 0x3f)) {
+            db = (double)(int8_t)s->regs[0x21] / 2 - 12;
+        }
+        break;
+    default:
+        return 1.0;
+    }
+    return db == -INFINITY ? 0.0 : pow(10.0, db / 20.0);
 }
 
 static int cs42l58_event(I2CSlave *i2c, enum i2c_event event)
@@ -239,6 +321,7 @@ static void cs42l59_init(Object *obj)
     qdev_init_gpio_out(DEVICE(obj), &CS42L58(obj)->irq, 1);
     CS42L58(obj)->pdn_status = true;
     CS42L58(obj)->rate_reg = 0x0a;
+    CS42L58(obj)->volume = CS42L58_VOLUME_CS42L59;
 }
 
 static const TypeInfo cs42l59_info = {
@@ -247,10 +330,22 @@ static const TypeInfo cs42l59_info = {
     .instance_init = cs42l59_init,
 };
 
+static void cs42l61_init(Object *obj)
+{
+    CS42L58(obj)->volume = CS42L58_VOLUME_CS42L61;
+}
+
+static const TypeInfo cs42l61_info = {
+    .name          = TYPE_CS42L61,
+    .parent        = TYPE_CS42L58,
+    .instance_init = cs42l61_init,
+};
+
 static void cs42l58_register_types(void)
 {
     type_register_static(&cs42l58_info);
     type_register_static(&cs42l59_info);
+    type_register_static(&cs42l61_info);
 }
 
 type_init(cs42l58_register_types)

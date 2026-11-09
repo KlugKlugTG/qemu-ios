@@ -40,12 +40,29 @@ enum IOSFramePathEvent {
     IOS_FP_BT_STATE,
 };
 
-void qemu_ios_native_wait_init(void) __attribute__((weak));
-void qemu_ios_native_wait_finish(void) __attribute__((weak));
-void qemu_ios_bql_spin_finish(void) __attribute__((weak));
+/*
+ * Weak so a host may leave them out (Android defines them in its own library). On Windows a weak definition
+ * is not enough: PE weak externals give every referencing object its own null default and ld may pick one
+ * over a weak definition, so calls jump to address zero. A unit that defines hooks says which before
+ * including this header, and its definitions are strong there; references elsewhere stay weak.
+ */
+#if defined(_WIN32) && defined(IOS_FRAME_PATH_DEFINES_EVENT)
+#define IOS_FRAME_PATH_EVENT_HOOK
+#else
+#define IOS_FRAME_PATH_EVENT_HOOK __attribute__((weak))
+#endif
+#if defined(_WIN32) && defined(IOS_FRAME_PATH_DEFINES_WAIT)
+#define IOS_FRAME_PATH_WAIT_HOOK
+#else
+#define IOS_FRAME_PATH_WAIT_HOOK __attribute__((weak))
+#endif
+
+void qemu_ios_native_wait_init(void) IOS_FRAME_PATH_WAIT_HOOK;
+void qemu_ios_native_wait_finish(void) IOS_FRAME_PATH_WAIT_HOOK;
+void qemu_ios_bql_spin_finish(void) IOS_FRAME_PATH_WAIT_HOOK;
 
 void qemu_ios_frame_path_event(unsigned event, uint64_t a, uint64_t b,
-                               uint64_t c) __attribute__((weak));
+                               uint64_t c) IOS_FRAME_PATH_EVENT_HOOK;
 
 static inline void ios_frame_path(unsigned event, uint64_t a, uint64_t b,
                                    uint64_t c)

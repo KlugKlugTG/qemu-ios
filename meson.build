@@ -1343,8 +1343,8 @@ else
 endif
 
 slirp = not_found
-if not get_option('slirp').auto() or have_system
-  slirp = dependency('slirp', required: get_option('slirp'),
+if not get_option('slirp').disabled() and (not get_option('slirp').auto() or have_system)
+  slirp = dependency('slirp', allow_fallback: false, required: false,
                      method: 'pkg-config')
   # slirp < 4.7 is incompatible with CFI support in QEMU.  This is because
   # it passes function pointers within libslirp as callbacks for timers.
@@ -1367,7 +1367,7 @@ if not get_option('slirp').auto() or have_system
   # both from subprojects/packagefiles/libslirp-set-restricted.patch. A libslirp built with
   # the patch (the app's static native root) is used as found; one without it (Homebrew's)
   # gives way to the patched subproject, static so the binaries gain no runtime dylib.
-  if slirp.found() and not cc.has_function('slirp_set_dns_forward', dependencies: slirp,
+  if not slirp.found() or not cc.has_function('slirp_set_dns_forward', dependencies: slirp,
                                            prefix: '#include <libslirp.h>')
     slirp = subproject('slirp', default_options: ['default_library=static']).get_variable('libslirp_libdep')
   endif
