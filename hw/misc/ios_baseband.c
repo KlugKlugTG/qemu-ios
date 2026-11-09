@@ -542,10 +542,7 @@ static void iosbb_set_incoming_sms(Object *obj, const char *value, Error **errp)
         return;
     }
     if (!ios_bb_incoming_sms(&s->bb, num, bar + 1)) {
-        const char *blocker = ios_bb_incoming_sms_blocker(&s->bb);
-
-        error_setg(errp, "the modem is not in a state to receive SMS: %s",
-                   blocker ? blocker : "the message was refused");
+        error_setg(errp, "the modem is not in a state to receive SMS");
         return;
     }
     iosbb_arm(s, qemu_clock_get_ms(QEMU_CLOCK_VIRTUAL) + IOS_BB_LATENCY_MS);

@@ -242,9 +242,6 @@ bool ios_bb_carrier_ok(const char *name);
 
 /* Network-side SMS: deliver a 23.040 SMS-DELIVER as +CMT on DLCI 3. */
 bool ios_bb_incoming_sms(IosBbCore *bb, const char *number, const char *text);
-/* Why that call would refuse right now (NULL when it would accept), for a message that
- * names the condition: no SMS DLCI open, radio off, SIM locked. */
-const char *ios_bb_incoming_sms_blocker(const IosBbCore *bb);
 const char *ios_bb_last_mo_sms_number(const IosBbCore *bb);
 const char *ios_bb_last_mo_sms_text(const IosBbCore *bb);
 
