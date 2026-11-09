@@ -5317,44 +5317,6 @@ static bool ldm_pair(DisasContext *s, int n)
     return on && n > 1 && !s->sctlr_b;
 }
 
-/*
- * A misaligned LDM/STM faults on an ARM1176 whatever the guest's SCTLR.A says, and iOS's handler
- * then performs the transfer itself, one word at a time. A CoreAudio converter whose output lands
- * at 2 mod 4 pays ~420 us a call against 25 us aligned, and those calls run in front of most of
- * the >30 ms gaps in Jetpack on the Poco (PERFORMANCE.md, "Hitches in Jetpack's title").
- *
- * With SCTLR.A clear -- iOS 3 through 6 never set it -- the bytes a split access produces are the
- * bytes that handler writes, so let the softmmu do the transfer and keep the check for the pages
- * that need it (MO_ALIGN_TLB_ONLY: Device memory). Android runs it by default; IT_LDM_UNALIGNED=off
- * restores the fault for an A/B run, and a guest with SCTLR.A set keeps the fault either way.
- */
-static int ldm_unaligned_enabled(void)
-{
-    static int enabled = -1;
-
-    if (enabled < 0) {
-        const char *v = getenv("IT_LDM_UNALIGNED");
-#ifdef __ANDROID__
-        const bool fallback = true;
-#else
-        const bool fallback = false;
-#endif
-        enabled = v ? !(!strcmp(v, "off") || !strcmp(v, "0")) : fallback;
-    }
-    return enabled;
-}
-
-static MemOp ldm_align(DisasContext *s)
-{
-    return ldm_unaligned_enabled() && !s->align_mem ? MO_ALIGN_TLB_ONLY : MO_ALIGN;
-}
-
-static MemOp ldm_pair_align(DisasContext *s)
-{
-    return ldm_unaligned_enabled() && !s->align_mem
-           ? (MO_ALIGN_4 | MO_ALIGN_TLB_ONLY) : MO_ALIGN_4;
-}
-
 static bool op_stm(DisasContext *s, arg_ldst_block *a)
 {
     int i, j, n, list, mem_idx;
@@ -5408,7 +5370,7 @@ static bool op_stm(DisasContext *s, arg_ldst_block *a)
 
             tcg_gen_addi_i32(a1, addr, j * 4);
             if (j + 1 < n) {
-                MemOp opc = MO_64 | ldm_pair_align(s) | MO_ATOM_IFALIGN_PAIR | s->be_data;
+                MemOp opc = MO_64 | MO_ALIGN_4 | MO_ATOM_IFALIGN_PAIR | s->be_data;
                 TCGv_i64 t64 = tcg_temp_new_i64();
 
                 if (s->be_data == MO_BE) {
@@ -5433,7 +5395,7 @@ static bool op_stm(DisasContext *s, arg_ldst_block *a)
         } else {
             tmp = load_reg(s, i);
         }
-        gen_aa32_st_i32(s, tmp, addr, mem_idx, MO_UL | ldm_align(s));
+        gen_aa32_st_i32(s, tmp, addr, mem_idx, MO_UL | MO_ALIGN);
 
         /* No need to add after the last transfer.  */
         if (++j != n) {
@@ -5521,7 +5483,7 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
             tmp = pair_hi;                  /* the second word of the last pair */
             pair_hi = NULL;
         } else if (pair && j + 1 < n) {
-            MemOp opc = MO_64 | ldm_pair_align(s) | MO_ATOM_IFALIGN_PAIR | s->be_data;
+            MemOp opc = MO_64 | MO_ALIGN_4 | MO_ATOM_IFALIGN_PAIR | s->be_data;
             TCGv_i64 t64 = tcg_temp_new_i64();
             TCGv_i32 a1 = tcg_temp_new_i32();
 
@@ -5539,10 +5501,10 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
 
             tmp = tcg_temp_new_i32();
             tcg_gen_addi_i32(a1, addr, j * 4);
-            gen_aa32_ld_i32(s, tmp, a1, mem_idx, MO_UL | ldm_align(s));
+            gen_aa32_ld_i32(s, tmp, a1, mem_idx, MO_UL | MO_ALIGN);
         } else {
             tmp = tcg_temp_new_i32();
-            gen_aa32_ld_i32(s, tmp, addr, mem_idx, MO_UL | ldm_align(s));
+            gen_aa32_ld_i32(s, tmp, addr, mem_idx, MO_UL | MO_ALIGN);
         }
         if (user) {
             gen_helper_set_user_reg(tcg_env, tcg_constant_i32(i), tmp);

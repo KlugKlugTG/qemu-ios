@@ -112,23 +112,9 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
     TCGState *s = TCG_STATE(as);
     unsigned max_threads = 1;
 
-    /*
-     * Both fast paths were experiments that had to be enabled by hand. Each was ahead in every
-     * interleaved pair measured on the phones (PERFORMANCE.md: the inlined TB lookup hit 6 of 6,
-     * the indirect side table +2.2% in 3 of 3, LT Bench icall 29.7 -> 13.4 ns and runloop
-     * 9.4 -> 8.0 us), and a vCPU-bound guest -- every game on the iPod touch 4G -- pays for the
-     * lookup on every block exit. Android runs them by default now; the same names with "off"
-     * remain the A/B arm on every host, and the inlined lookup still makes the vCPU accounting
-     * use its legacy path.
-     */
-#ifdef __ANDROID__
-    const bool fast_path_default = true;
-#else
-    const bool fast_path_default = false;
-#endif
     const char *inline_lookup = getenv("LT_TB_LOOKUP_INLINE");
-    tcg_inline_tb_lookup = inline_lookup ? strcmp(inline_lookup, "off") && strcmp(inline_lookup, "0")
-                                         : fast_path_default;
+    tcg_inline_tb_lookup = inline_lookup && strcmp(inline_lookup, "off") &&
+                           strcmp(inline_lookup, "0");
     /* LT_MASKED_IRQ_FAST=off: take the BQL for every pending-interrupt check (A/B). */
     const char *masked_irq = getenv("LT_MASKED_IRQ_FAST");
     tcg_masked_irq_fast = !(masked_irq && (!strcmp(masked_irq, "off") || !strcmp(masked_irq, "0")));
@@ -138,16 +124,13 @@ static int tcg_init_machine(AccelState *as, MachineState *ms)
 
     const char *indirect_l2 = getenv("LT_IBTC_L2");
     const char *indirect_prof = getenv("LT_IBTC_L2_PROF");
-    bool l2_on = indirect_l2 ? strcmp(indirect_l2, "off") && strcmp(indirect_l2, "0")
-                             : fast_path_default;
+    bool l2_on = indirect_l2 && strcmp(indirect_l2, "off") &&
+                 strcmp(indirect_l2, "0");
     bool l2_prof = indirect_prof && strcmp(indirect_prof, "off") &&
                    strcmp(indirect_prof, "0");
     /* The generated site cache and this side table share single-vCPU rules. */
     bool single_vcpu = ms->smp.cpus == 1 && ms->smp.max_cpus == 1;
     tcg_indirect_l2_init(l2_on && single_vcpu, l2_prof && single_vcpu);
-    if (l2_on && single_vcpu) {
-        fprintf(stderr, "[tcg] indirect-l2=on\n");
-    }
 
 #ifndef CONFIG_USER_ONLY
     CPUClass *cc = CPU_CLASS(object_class_by_name(target_cpu_type()));

@@ -23,14 +23,12 @@
 typedef struct GLESAhb {
     AHardwareBuffer *buffer;
     EGLImageKHR image;
-    size_t stride;      /* row pitch in bytes, asked once at attach */
     bool rgba;          /* R8G8B8A8 storage: rows need a byte swap for BGRA */
 } GLESAhb;
 
 /* Optional bounded frame-path markers, separate from user profiling. Off adds
  * no clock reads; enabled producers only append to the existing memory trace.
- * Stages: 1 GPU completion, 2 row pitch, 3 CPU map, 4 CPU unmap. Stage 1
- * reports whether it waited on a fence (1) or drained the pipeline (0). */
+ * Stages: 1 GPU completion, 2 description, 3 CPU map, 4 CPU unmap. */
 static bool gles_ahb_path_on;
 
 static inline void gles_ahb_path(unsigned event, GLESAhb *a, unsigned stage,
@@ -147,11 +145,6 @@ static bool gles_ahb_attach(GLESAhb *a, uint32_t width, uint32_t height)
             a->buffer = NULL;
             continue;
         }
-        /* The surface's description is fixed for its lifetime, and gralloc may pad
-         * the rows the allocation was asked for, so ask once here rather than once a
-         * present -- on the vCPU in the synchronous path. */
-        gles_ahb_api.describe(a->buffer, &desc);
-        a->stride = (size_t)desc.stride * 4;
         a->image = gles_ahb_api.create_image(gles_egl_display, EGL_NO_CONTEXT,
                                              EGL_NATIVE_BUFFER_ANDROID,
                                              gles_ahb_api.client_buffer(a->buffer),
@@ -168,96 +161,28 @@ static bool gles_ahb_attach(GLESAhb *a, uint32_t width, uint32_t height)
     return false;
 }
 
-/*
- * A native fence for the frame the GPU is drawing, for the lock below to wait on -- the same sync
- * the asynchronous present hands to AHardwareBuffer_lock. A CPU lock has no implicit sync with GPU
- * writes, and without a fence the only way to wait was glFinish(), which drains every queue in the
- * context; the wait then also happens on the vCPU instead of in the kernel's fence wait. This is
- * the synchronous present's path: a driver with no eglDupNativeFenceFDANDROID, LT_PRESENT_ASYNC=off,
- * a present that has to finish here, and every run with the frame metrics on (they read the frame
- * on the vCPU), so it is also part of what a profile capture costs.
- */
-static struct {
-    int state;                  /* -1 not asked yet, 0 no fences, 1 fences */
-    EGLSyncKHR (*create)(EGLDisplay, EGLenum, const EGLint *);
-    int (*dup_fd)(EGLDisplay, EGLSyncKHR);
-    EGLBoolean (*destroy)(EGLDisplay, EGLSyncKHR);
-} gles_ahb_fence_api = { .state = -1 };
-
-static int gles_ahb_frame_fence(void)
-{
-    static const EGLint attrs[] = {
-        EGL_SYNC_NATIVE_FENCE_FD_ANDROID, EGL_NO_NATIVE_FENCE_FD_ANDROID, EGL_NONE,
-    };
-    const char *mode;
-    EGLSyncKHR sync;
-    int fd;
-
-    if (gles_ahb_fence_api.state < 0) {
-        mode = getenv("LT_AHB_FENCE");
-        if (mode && (!strcmp(mode, "off") || !strcmp(mode, "0"))) {
-            gles_ahb_fence_api.state = 0;
-        } else if (gles_egl_display == EGL_NO_DISPLAY) {
-            return -1;          /* no context yet: ask again next time */
-        } else {
-            gles_ahb_fence_api.create = (EGLSyncKHR (*)(EGLDisplay, EGLenum, const EGLint *))
-                eglGetProcAddress("eglCreateSyncKHR");
-            gles_ahb_fence_api.dup_fd = (int (*)(EGLDisplay, EGLSyncKHR))
-                eglGetProcAddress("eglDupNativeFenceFDANDROID");
-            gles_ahb_fence_api.destroy = (EGLBoolean (*)(EGLDisplay, EGLSyncKHR))
-                eglGetProcAddress("eglDestroySyncKHR");
-            gles_ahb_fence_api.state = gles_ahb_fence_api.create && gles_ahb_fence_api.dup_fd &&
-                                       gles_ahb_fence_api.destroy;
-            if (!gles_ahb_fence_api.state) {
-                fprintf(stderr, "[gles-ahb] no native fence; the present waits with glFinish\n");
-            }
-        }
-    }
-    if (gles_ahb_fence_api.state <= 0) {
-        return -1;
-    }
-    sync = gles_ahb_fence_api.create(gles_egl_display, EGL_SYNC_NATIVE_FENCE_ANDROID, attrs);
-    if (sync == EGL_NO_SYNC_KHR) {
-        return -1;
-    }
-    glFlush();                  /* the fence is only reached once the frame is submitted */
-    fd = gles_ahb_fence_api.dup_fd(gles_egl_display, sync);
-    gles_ahb_fence_api.destroy(gles_egl_display, sync);
-    return fd;
-}
-
 /* The rendered rows, bottom row first as GL draws them; NULL on failure. */
 static const uint8_t *gles_ahb_lock(GLESAhb *a, size_t *stride)
 {
-    size_t pitch = a->stride;
+    AHardwareBuffer_Desc desc;
     void *p = NULL;
-    int fence;
 
     /* No implicit sync between GPU writes and a CPU lock: wait for the frame. */
     gles_ahb_path(IOS_FP_AHB_STAGE_BEGIN, a, 1, 0);
-    fence = gles_ahb_frame_fence();
-    if (fence < 0) {
-        glFinish();             /* no fence: wait for the whole pipeline here, as before */
-    }
-    gles_ahb_path(IOS_FP_AHB_STAGE_END, a, 1, fence >= 0);
+    glFinish();
+    gles_ahb_path(IOS_FP_AHB_STAGE_END, a, 1, 0);
     gles_ahb_path(IOS_FP_AHB_STAGE_BEGIN, a, 2, 0);
-    if (!pitch) {               /* the description could not be read at attach */
-        AHardwareBuffer_Desc desc;
-
-        gles_ahb_api.describe(a->buffer, &desc);
-        pitch = (size_t)desc.stride * 4;
-        a->stride = pitch;
-    }
-    gles_ahb_path(IOS_FP_AHB_STAGE_END, a, 2, pitch != 0);
+    gles_ahb_api.describe(a->buffer, &desc);
+    gles_ahb_path(IOS_FP_AHB_STAGE_END, a, 2, 0);
     gles_ahb_path(IOS_FP_AHB_STAGE_BEGIN, a, 3, 0);
     int result = gles_ahb_api.lock(a->buffer,
-                                 AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, fence,
+                                 AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1,
                                  NULL, &p);
     gles_ahb_path(IOS_FP_AHB_STAGE_END, a, 3, result);
-    if (result != 0 || !pitch) {
+    if (result != 0) {
         return NULL;
     }
-    *stride = pitch;
+    *stride = (size_t)desc.stride * 4;
     return p;
 }
 
