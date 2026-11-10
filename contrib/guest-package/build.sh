@@ -38,7 +38,9 @@ for c in $COMPONENTS; do
     # armv6; ipad1-guest builds its armv7 helpers independently. The older
     # linker mode also reserves r9, which 2.x uses as its thread pointer.
     legacy=0
-    case "$c" in it-agent|it-instprogress|it-gles) legacy=1 ;; esac
+    # gles-public's hooks/OpenGLES lands on the n72 family too (an iPod touch 2G is 2.x), and a
+    # payload mkpkg refuses (LC_DYLD_INFO_ONLY) fails the whole build: it is legacy-linked as well.
+    case "$c" in it-agent|it-instprogress|it-gles|gles-public) legacy=1 ;; esac
     if ! LEGACY_LINK="$legacy" bash "$OUT/src/contrib/$c/build.sh" >"$OUT/logs/$c.log" 2>&1; then
         echo "guest-package: warning: $c/build.sh failed (log: $OUT/logs/$c.log)" >&2
     fi
