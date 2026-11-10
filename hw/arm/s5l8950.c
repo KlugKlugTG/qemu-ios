@@ -319,6 +319,15 @@ static void a6_wlan_reset(void *opaque, int pin, int level)
  * Graphics uses the common host executor and request validation. The optional
  * factory-imaging transport supplies one read-only stream only when explicitly
  * configured; its writes use the guest's native block/FTL drivers. */
+static bool trace_s5l8950_restore(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        on = getenv("LT_TRACE_RESTORE") != NULL;
+    }
+    return on;
+}
+
 static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
                          uint64_t value)
 {
@@ -350,6 +359,13 @@ static void a6_qemu_call(CPUARMState *env, const ARMCPRegInfo *ri,
             guest_pkg_call(&s->pkg, cpu, &q, &err)) {
             q.error = err;
         }
+    }
+    /* The install boot's tool asks for the prepared image a record at a time; -trace helps when a
+     * preparation does not reach its markers. */
+    if (q.call_number == 0x500 && trace_s5l8950_restore()) {
+        fprintf(stderr, "[a6-restore] call 0x500 n=%u off=%llu image=%s fd=%d\n",
+                q.args.ag.length, (unsigned long long)q.args.ag.token,
+                s->restore_image ? s->restore_image : "(none)", s->restore_fd);
     }
     if (s->restore_image && s->restore_fd >= 0 && q.call_number == 0x500) {
         uint32_t n = q.args.ag.length;
@@ -1383,6 +1399,10 @@ static void a6_init(MachineState *machine)
     MemoryRegion *memory = get_system_memory();
     DeviceState *modem_uart = NULL;
     s->restore_fd = -1;
+    if (getenv("LT_TRACE_RESTORE")) {
+        fprintf(stderr, "[a6] ppn=%d baseband=%d camera=%d restore=%s\n",
+                s->ppn, s->baseband, s->camera, s->restore_image ? s->restore_image : "(none)");
+    }
     if (s->restore_image) {
         struct stat st;
         s->restore_fd = open(s->restore_image, O_RDONLY | O_CLOEXEC);
