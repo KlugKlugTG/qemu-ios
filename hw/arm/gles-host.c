@@ -64,7 +64,14 @@
  * glOrtho/glFrustum/glClearDepth take doubles on the desktop and floats in ES.
  * Nothing here is a reimplementation; each shim below is a rename.
  */
+#ifdef __APPLE__
 #include <TargetConditionals.h>
+#else
+/* Every host but Apple's: the target test below then takes the not-iOS path,
+ * and the renderer the platform chose (EGL here) drives everything. Apple's
+ * own SDKs keep the header; no other toolchain carries it. */
+#define TARGET_OS_IPHONE 0
+#endif
 
 #if TARGET_OS_IPHONE || defined(GLES_HOST_ANGLE)
 #define GLES_HOST_EAGL 1
