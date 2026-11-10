@@ -13,6 +13,7 @@
 #else
 /* The 32-bit iOS SDKs this builds against (the CI's iPhoneOS6.1, say) ship no sys/disk.h. The three
  * ioctls the tool asks a disk are Darwin's own, unchanged since 10.x. */
+#include <stdint.h>
 #include <sys/ioccom.h>
 #define DKIOCGETBLOCKSIZE     _IOR('d', 24, uint32_t)
 #define DKIOCGETBLOCKCOUNT    _IOR('d', 25, uint64_t)
