@@ -1419,7 +1419,9 @@ rt = not_found
 if host_os != 'windows'
   have_shm_open = cc.has_function('shm_open')
   if not have_shm_open
-    rt = cc.find_library('rt', required: true)
+    # Optional, because Android has no librt at all: bionic keeps shm_open in libc, and the portable
+    # build this fork ships targets Android only, where a required lookup fails the whole configure.
+    rt = cc.find_library('rt', required: false)
   endif
 endif
 
