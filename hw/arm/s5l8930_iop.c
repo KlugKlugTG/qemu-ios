@@ -418,6 +418,10 @@ void s5l8930_iop_nand_info(DeviceState *dev, uint32_t *id, uint8_t *ce_mask,
 {
     S5L8930IOPState *s = S5L8930_IOP(dev);
 
+    if (getenv("LT_TRACE_RESTORE")) {
+        fprintf(stderr, "[iop] nand_info dev=%p id=0x%08x mask=0x%x page=%u\n",
+                (void *)dev, s->nand_id, s->nand_ce_mask, s->nand_dir ? s->store_page_bytes : 0);
+    }
     *id = s->nand_id;
     *ce_mask = s->nand_ce_mask;
     *page_bytes = s->nand_dir ? s->store_page_bytes : 0;
