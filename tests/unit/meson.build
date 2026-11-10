@@ -9,6 +9,7 @@ tests = {
   'check-qlist': [],
   'check-qnull': [],
   'check-qobject': [],
+  'test-s5l8930-isp-camera': [],
   'check-qjson': [],
   'check-qlit': [],
   'test-error-report': [],

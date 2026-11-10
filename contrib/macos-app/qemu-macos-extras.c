@@ -38,6 +38,8 @@
 
 #include "qemu-macos-extras.h"
 #include "hw/misc/ios_vibrator.h"
+#include "hw/arm/host-mic.h"
+#include "hw/arm/host-camera.h"
 
 /*
  * system/main.c (replaced by qemu-ios-entry.c) defined this; ui/cocoa.m still
@@ -1068,4 +1070,83 @@ void qemu_ios_audio_capture_stop(uint64_t generation)
     uint64_t *request = g_new(uint64_t, 1);
     *request = generation;
     aio_bh_schedule_oneshot(qemu_get_aio_context(), recording_audio_stop_bh, request);
+}
+
+/*
+ * The microphone is the one entry point here that is not a bottom half. The
+ * capture tap below has to schedule its work on the QEMU thread because it
+ * registers a voice with the audio backend; this is a bounded ring the app
+ * writes and a capture port reads on the vCPU thread, so a recorder thread can
+ * push from where it already is. Pushing before a machine exists is harmless:
+ * the frames wait, and a port that never starts lets them drop.
+ */
+int qemu_ios_microphone_write(const void *frames, int bytes)
+{
+    if (!frames || bytes < 4) {
+        return 0;
+    }
+    return (int)host_mic_push(frames, (size_t)(bytes / 4) * 4);
+}
+
+void qemu_ios_microphone_flush(void)
+{
+    host_mic_flush();
+}
+
+int qemu_ios_microphone_state(uint32_t *rate, uint32_t *queued, uint64_t *pushed, uint64_t *dropped)
+{
+    HostMicState state;
+
+    host_mic_state(&state);
+    if (rate) {
+        *rate = state.rate;
+    }
+    if (queued) {
+        *queued = state.queued;
+    }
+    if (pushed) {
+        *pushed = state.pushed;
+    }
+    if (dropped) {
+        *dropped = state.dropped;
+    }
+    return state.capturing ? 1 : 0;
+}
+
+/*
+ * The phone's camera into the emulated device's ISP.
+ *
+ * The bridge is the engine's, not a device's: the app writes a frame whenever its camera has one,
+ * the ISP takes the newest when it draws the next one, and neither waits for the other. Nothing
+ * here touches guest memory or the device state, so it is safe to call from any thread, including
+ * before a machine exists -- a frame written early is just the first viewfinder picture.
+ */
+int qemu_ios_camera_write(int sensor, const void *nv12, uint32_t width, uint32_t height)
+{
+    return host_camera_write(sensor, nv12, width, height);
+}
+
+void qemu_ios_camera_flush(void)
+{
+    host_camera_flush();
+}
+
+int32_t qemu_ios_camera_sensor(void)
+{
+    return host_camera_active();
+}
+
+void qemu_ios_camera_state(int sensor, uint64_t *pushed, uint64_t *taken, uint64_t *replaced,
+                           uint32_t *width, uint32_t *height)
+{
+    unsigned w = 0, h = 0;
+
+    (void)sensor;   /* one mailbox serves whichever camera the guest is on */
+    host_camera_counts(pushed, taken, replaced, &w, &h);
+    if (width) {
+        *width = w;
+    }
+    if (height) {
+        *height = h;
+    }
 }
