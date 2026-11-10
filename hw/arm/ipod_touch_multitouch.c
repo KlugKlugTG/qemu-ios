@@ -1339,6 +1339,20 @@ static void touch_end_timer_tick(void *opaque)
     }
 }
 
+/*
+ * This fork's host-side admission check (contrib/ios-app/qemu-ios-ui.c asks it before handing a
+ * batch of begins, ends and moves over). The contribution line's controller keeps one pending frame
+ * instead of this fork's 32-deep report queue -- set_finger() folds a whole batch into that frame,
+ * and a finger arriving cancels a pending end-of-gesture -- so there is no bound to size a batch
+ * against: the batch is accepted, exactly as this line's own hosts hand theirs over.
+ */
+bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
+                                     unsigned begins, unsigned ends, unsigned moves)
+{
+    (void)s; (void)begins; (void)ends; (void)moves;
+    return true;
+}
+
 void ipod_touch_multitouch_frame_taken(IPodTouchMultitouchState *s)
 {
     if (s->hold_atn) {

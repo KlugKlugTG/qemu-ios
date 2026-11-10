@@ -345,4 +345,8 @@ void ipod_touch_multitouch_register_input(IPodTouchMultitouchState *s);
 /* The guest took next_frame (each read path calls this after clearing it): an owed frame goes out now. */
 void ipod_touch_multitouch_frame_taken(IPodTouchMultitouchState *s);
 
+
+/* Whether a batch of begins, ends and moves may be queued now (this fork's host admission check). */
+bool ipod_touch_multitouch_can_queue(IPodTouchMultitouchState *s,
+                                     unsigned begins, unsigned ends, unsigned moves);
 #endif
