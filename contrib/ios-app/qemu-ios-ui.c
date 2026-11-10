@@ -1003,6 +1003,9 @@ void qemu_ios_ui_vm_started(void)
  */
 #define CLCD_PANEL 64, 1024, 511, 2, 0
 #define A4_PANEL   64, 2047, 2047, 16, 0x900000 / 4
+/* The A6 pipe's video layer takes the full 1136-row panel: its limits are the iPad's ROTATED
+ * shape (an even width like the A4's) with the height's 640..2047 columns beside it. */
+#define A6_PANEL   64, 1136, 2047, 2, 0x900000 / 4
 static const QemuIosDeviceInfo ios_devices[] = {
     /* machine          board    w     h    scale orient cell   usbhost compass charger panel */
     { "iPod-Touch",    "n72ap",  320,  480, 1, 0, false, false, false, false, CLCD_PANEL },
@@ -1014,6 +1017,8 @@ static const QemuIosDeviceInfo ios_devices[] = {
     { "ipad1",         "k48ap", 1024,  768, 1, 1, false, true,  true,  true,  A4_PANEL },
     { "iPod-Touch-4G", "n81ap",  640,  960, 2, 0, false, true,  false, false, A4_PANEL },
     { "iPhone-4",      "n90ap",  640,  960, 2, 0, true,  true,  true,  false, A4_PANEL },
+    /* the A6 machine: 640x1136 at scale 2, its USB host and GPS through the baseband, its panel native */
+    { "iPhone-5",      "n42ap",  640, 1136, 2, 0, true,  true,  true,  false, A6_PANEL },
 };
 
 const QemuIosDeviceInfo *qemu_ios_device_info(const char *machine)
