@@ -8543,3 +8543,26 @@ void gles_host_prof(uint64_t *call_ns, uint64_t *present_ns)
     *call_ns = qatomic_read(&gles_prof_call_ns);
     *present_ns = qatomic_read(&gles_prof_present_ns);
 }
+
+/* The boards' class init calls this (include/hw/arm/guest-services/gles.h): the machine's
+ * gl-renderer property. The contribution line's hosts choose between cgl and angle; this
+ * platform's renderer is EGL itself, so the property names it and nothing else.
+ */
+static char *gles_get_renderer(Object *obj, Error **errp)
+{
+    return g_strdup("egl");
+}
+
+static void gles_set_renderer(Object *obj, const char *value, Error **errp)
+{
+    if (strcmp(value, "egl")) {
+        error_setg(errp, "gl-renderer is egl, not '%s'", value);
+    }
+}
+
+void gles_host_class_init(ObjectClass *oc)
+{
+    object_class_property_add_str(oc, "gl-renderer", gles_get_renderer, gles_set_renderer);
+    object_class_property_set_description(oc, "gl-renderer",
+        "The GL bridge's host renderer (egl on this platform)");
+}
