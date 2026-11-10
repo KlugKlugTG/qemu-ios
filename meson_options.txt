@@ -393,4 +393,6 @@ option('rust', type: 'feature', value: 'disabled',
 option('strict_rust_lints', type: 'boolean', value: false,
        description: 'Enable stricter set of Rust warnings')
 
+option('lt_dynarmic_probe_prefix', type: 'string', value: '',
+       description: 'Default-off asset-free ARM1176 Dynarmic bridge probe dependency prefix')
 option('ltm_angle_prefix', type: 'string', value: '', description: 'ANGLE checkout to build the experimental ANGLE renderer against, beside CGL (no snapshots)')

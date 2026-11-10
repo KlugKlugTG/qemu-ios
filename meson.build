@@ -2386,6 +2386,24 @@ endif
 
 config_host_data = configuration_data()
 
+# The dynamically-linked Dynarmic probe (target/arm/tcg/meson.build reads it): built only when a
+# prefix names it, and its declaration belongs to this fork's builds -- the contribution line
+# carries the references but never the variable, so configure below it would stop with Unknown
+# variable 'lt_dynarmic_probe'.
+lt_dynarmic_probe = not_found
+if get_option('lt_dynarmic_probe_prefix') != ''
+  if 'cpp' not in all_languages or not have_system or get_option('plugins')
+    error('Dynarmic probe requires C++, system emulation and plugins disabled')
+  endif
+  lt_dynarmic_library = cxx.find_library('dynarmic',
+    dirs: [get_option('lt_dynarmic_probe_prefix') / 'lib',
+           get_option('lt_dynarmic_probe_prefix') / 'lib/x86_64-linux-gnu'],
+    required: true)
+  lt_dynarmic_probe = declare_dependency(dependencies: lt_dynarmic_library,
+    include_directories: include_directories(get_option('lt_dynarmic_probe_prefix') / 'include'))
+endif
+config_host_data.set('CONFIG_LT_DYNARMIC_PROBE', lt_dynarmic_probe.found())
+
 config_host_data.set('CONFIG_HAVE_RUST', have_rust)
 audio_drivers_selected = []
 if have_system
