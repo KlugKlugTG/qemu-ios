@@ -54,6 +54,18 @@ fi
 if ! LEGACY_LINK=1 bash "$OUT/src/contrib/it-prefs/build-ipod.sh" >"$OUT/logs/it-prefs-ipod.log" 2>&1; then
     echo "guest-package: warning: it-prefs/build-ipod.sh failed (log: $OUT/logs/it-prefs-ipod.log)" >&2
 fi
+# The A6 restore tools (contrib/it-restore): the initializer an N42 install boot runs. They build
+# with a 32-bit SDK's headers; IPHONE6_SDK names an iOS 6 one (the CI fetches 6.1), and without it
+# the component is skipped so a build for the older boards still runs.
+if [ -n "${IPHONE6_SDK:-}" ]; then
+    if ! ARMV6_SDK="$IPHONE6_SDK" bash "$OUT/src/contrib/it-restore/build.sh" "$OUT/src/build/it-restore" \
+            >"$OUT/logs/it-restore.log" 2>&1; then
+        echo "guest-package: warning: it-restore/build.sh failed (log: $OUT/logs/it-restore.log)" >&2
+    fi
+else
+    echo "guest-package: no IPHONE6_SDK: the A6 restore tools are not built" >&2
+fi
+
 # mkpkg (mkpkg.c), a host tool built here for this build
 mkdir -p "$OUT/tools"
 xcrun clang -O2 -Wall -Werror -o "$OUT/tools/mkpkg" "$HERE/mkpkg.c" -lz -framework CoreFoundation
