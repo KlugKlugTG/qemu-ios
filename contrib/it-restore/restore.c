@@ -8,7 +8,16 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
+#if __has_include(<sys/disk.h>)
 #include <sys/disk.h>
+#else
+/* The 32-bit iOS SDKs this builds against (the CI's iPhoneOS6.1, say) ship no sys/disk.h. The three
+ * ioctls the tool asks a disk are Darwin's own, unchanged since 10.x. */
+#include <sys/ioccom.h>
+#define DKIOCGETBLOCKSIZE     _IOR('d', 24, uint32_t)
+#define DKIOCGETBLOCKCOUNT    _IOR('d', 25, uint64_t)
+#define DKIOCSYNCHRONIZECACHE _IO('d', 26)
+#endif
 #include "../armv6-toolchain/qemu-call.h"
 #ifdef IT_INITIAL_PREPARE
 #include "data.h"
