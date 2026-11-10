@@ -80,18 +80,6 @@ int qemu_ios_audio_capture_read(uint64_t generation, void *buffer, int capacity,
 double qemu_ios_audio_capture_time(uint64_t generation);
 void qemu_ios_audio_capture_stop(uint64_t generation);
 
-/* The host's microphone into the guest's capture port (hw/arm/host-mic.h): interleaved stereo S16 at
- * HOST_MIC_RATE (44100), mono sources duplicated by the caller, `bytes` a multiple of 4. Returns the
- * frames accepted; a shorter count means the guest was not reading and the ring dropped the rest. The
- * guest hears silence while nothing is pushed, and a stopped capture leaves nothing for the next one.
- * Any thread. API 2.4. */
-int qemu_ios_microphone_write(const void *frames, int bytes);
-void qemu_ios_microphone_flush(void);
-/* 1 while a capture port has asked for input since the last flush, else 0. rate is the port's rate
- * (0 before one starts), queued the frames waiting, pushed/dropped the totals since the process
- * began; every out pointer may be NULL. */
-int qemu_ios_microphone_state(uint32_t *rate, uint32_t *queued, uint64_t *pushed, uint64_t *dropped);
-
 /* Queue UTF-8 text for the guest pasteboard (machine property "pasteboard"). */
 void qemu_ios_ui_paste(const char *utf8);
 /* The text last copied inside the guest (UTF-8, at most 64 KiB - 1 bytes: the guest agent's cap), when the
@@ -127,27 +115,8 @@ const char *qemu_ios_build_id(void);
 /* This C API's version, major << 16 | minor. A minor bump only adds entry points;
  * a major bump removes or changes one, and a host built for another major refuses
  * the dylib. */
-#define QEMU_IOS_API_VERSION ((2u << 16) | 5u)
+#define QEMU_IOS_API_VERSION ((2u << 16) | 3u)
 uint32_t qemu_ios_api_version(void);
-
-/*
- * The phone's camera into the emulated device. sensor is 0 for the back one and 1 for the front;
- * nv12 is one frame, luma then interleaved chroma, no padding, at width x height, and it is
- * copied, so the caller keeps its buffer. 1 when accepted, 0 when this engine has no A4 ISP, and
- * -1 for something that is not a frame.
- *
- * The newest frame wins: a write over a frame nobody has drawn replaces it, which is what a
- * viewfinder does and why a slow guest costs a drop rather than a delay. qemu_ios_camera_sensor is
- * the camera the guest's driver last named.
- */
-int qemu_ios_camera_write(int sensor, const void *nv12, uint32_t width, uint32_t height);
-/* Drop the held frame; the ISP's own test pattern resumes until the next write. */
-void qemu_ios_camera_flush(void);
-int32_t qemu_ios_camera_sensor(void);
-/* Frames written, frames the ISP drew, frames replaced before anything drew them, and the size of
- * the picture being held. Every out pointer may be NULL. */
-void qemu_ios_camera_state(int sensor, uint64_t *pushed, uint64_t *taken, uint64_t *replaced,
-                           uint32_t *width, uint32_t *height);
 
 /* Machine controls. */
 void qemu_ios_ui_pause(void);

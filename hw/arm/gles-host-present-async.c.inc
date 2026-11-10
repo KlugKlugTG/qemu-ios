@@ -240,6 +240,7 @@ static bool gles_present_async_submit(CPUState *cpu, uint32_t base, uint32_t str
     GlesPresentPrep *prep = gpa_prep;
     uint64_t first = base & TARGET_PAGE_MASK, end = (uint64_t)base + (uint64_t)(rh - 1) * stride + rw * 4;
     size_t npages = (end - first + TARGET_PAGE_SIZE - 1) >> TARGET_PAGE_BITS;
+    AHardwareBuffer_Desc desc;
     EGLSyncKHR sync;
     uint64_t seq;
     int fence = -1;
@@ -285,6 +286,7 @@ static bool gles_present_async_submit(CPUState *cpu, uint32_t base, uint32_t str
     if (!prep) {
         qatomic_set(&gpa.issued, seq);
     }
+    gles_ahb_api.describe(gh.ahb.buffer, &desc);
     if (gh.ahb.rgba && gpa.row_len < (size_t)rw * 4) {
         g_free(gpa.row);
         gpa.row = g_malloc((size_t)rw * 4);
@@ -296,7 +298,7 @@ static bool gles_present_async_submit(CPUState *cpu, uint32_t base, uint32_t str
     gpa.fence = fence;
     gpa.buffer = gh.ahb.buffer;
     gpa.rgba = gh.ahb.rgba;
-    gpa.src_stride = gh.ahb.stride;
+    gpa.src_stride = (size_t)desc.stride * 4;
     gpa.rw = rw;
     gpa.rh = rh;
     gpa.stride = stride;
@@ -334,7 +336,7 @@ static GlesPresentPrep *gles_present_async_prepare(CPUState *cpu, uint32_t ctx, 
     size_t npages;
 
     if (qatomic_load_acquire(&gpa.state) <= 0 || !qatomic_read(&gpa.queue) || !h ||
-        !h->ahb.buffer || !h->ahb.stride || !h->iosurface || gles_swizzle || a[4] != GLES_SURFACE_BGRA32 || !base || !w || !rh ||
+        !h->ahb.buffer || !h->iosurface || gles_swizzle || a[4] != GLES_SURFACE_BGRA32 || !base || !w || !rh ||
         !h->drawable_announced || w != h->drawable_width || rh != h->drawable_height ||
         stride < w * 4 || end > UINT32_MAX) {
         return NULL;
