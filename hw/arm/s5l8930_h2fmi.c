@@ -636,6 +636,10 @@ static void h2fmi_transfer(H2FMIBus *b, int ce, bool queued)
         b->data_off = 0; b->data_len = bytes;
     } else if (b->mode == MODE_ID) {
         uint8_t idb[8] = { 0 };
+        if (getenv("LT_TRACE_RESTORE")) {
+            fprintf(stderr, "[h2fmi] id read ce=%d mask=0x%x ppn=%d id=0x%08x\n",
+                    ce, ce_mask, s->ppn, id);
+        }
         if (ce >= 0 && (ce_mask & (1u << ce))) {
             stl_le_p(idb, id);
         }

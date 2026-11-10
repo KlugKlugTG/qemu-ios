@@ -639,6 +639,10 @@ static uint32_t fmi_reset_everything(S5L8930IOPState *s, int bus, uint8_t *cmd)
     uint8_t ids[FMI_ID_CES * FMI_ID_BYTES] = { 0 };
     int ce;
 
+    if (getenv("LT_TRACE_RESTORE")) {
+        fprintf(stderr, "[iop] reset_everything bus=%d nand_id=0x%08x mask=0x%x\n",
+                bus, s->nand_id, s->nand_ce_mask);
+    }
     for (ce = 0; ce < 8; ce++) {
         if (s->nand_ce_mask & (1u << ce)) {
             stl_le_p(&ids[ce * FMI_ID_BYTES], s->nand_id);
