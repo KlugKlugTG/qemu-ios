@@ -87,6 +87,14 @@ typedef struct {
  * firmware's dispatch layout at load (contrib/it-gles/gles_dispatch.c), so no hook is per build.
  * builds: exact ids or "<major>*" for every build of that iOS major (2.x = 5*, 3.x = 7*, 4.x = 8*, 5.x = 9*), so a
  * new point release needs no row here (LightTouchMac docs/matrix.md). The order is the itpacks' entry order. */
+/* N42 (A6, iPhone 5): the armv7 payloads this package already carries, and no GL front end yet -- the
+ * framework it replaces is armv7s on these firmwares, and contrib/gles-public builds armv6/armv7 against
+ * the 3.1.3 SDK, which an iOS 6 dyld refuses (firmwarekit's fit check says so before a device is made).
+ * The families are here so the rest of the guest package reaches an N42 device; the front end lands with
+ * the armv7s build. */
+#define N42_HOOKS ((const Hook[]){{"build/ipad1-guest/it_msmquiet.dylib", "/usr/local/lib/it_msmquiet.dylib", 0}, \
+    {"build/appsync/libappsync.dylib", "/usr/lib/libappsync.dylib", 0}, {0}})
+
 static const Family FAMILIES[] = {
     /* 1.x builds are 3A* and 3B* (1.1-1.1.2) and 4A* and 4B* (1.1.3-1.1.5), and the iPhone's 1A* and 1C* (1.0-1.0.2): no agent
      * or helpers yet, the GL front end only; the legacy-linked it_boot runs there (armv6-toolchain crt1old.c/legacy.h:
@@ -122,6 +130,14 @@ static const Family FAMILIES[] = {
     /* 7.x (the iPhone 4 only): a read-only root (its launchd cannot `mount -uw /`), so the package is baked at
      * prepare time (seed) and changes only on a re-prepare; it_boot installs, swaps hooks and writes state nowhere. */
     {"k48-ios7", "armv7", L("n90ap"), L("11*"), IPAD_BIN, IPAD_JOBS, K48_HOOKS},
+    /* N42 (A6): iOS 6 through 10, the builds the engine's iPhone-5 machine is qualified on. A board that
+     * runs a major gets that major's row, as the A4 boards do; the payloads read board and firmware alike
+     * at load. */
+    {"n42-ios6", "armv7", L("n42ap"), L("10*"), IPAD_BIN, IPAD_JOBS, N42_HOOKS},
+    {"n42-ios7", "armv7", L("n42ap"), L("11*"), IPAD_BIN, IPAD_JOBS, N42_HOOKS},
+    {"n42-ios8", "armv7", L("n42ap"), L("12*"), IPAD_BIN, IPAD_JOBS, N42_HOOKS},
+    {"n42-ios9", "armv7", L("n42ap"), L("13*"), IPAD_BIN, IPAD_JOBS, N42_HOOKS},
+    {"n42-ios10", "armv7", L("n42ap"), L("14*"), IPAD_BIN, IPAD_JOBS, N42_HOOKS},
 };
 #define NFAM (sizeof(FAMILIES) / sizeof(FAMILIES[0]))
 /* 1.x/2.x dyld refuses LC_DYLD_INFO_ONLY; everything the loader runs on it must be legacy-linked */
