@@ -650,6 +650,10 @@ static void h2fmi_transfer(H2FMIBus *b, int ce, bool queued)
         memcpy(b->data, idb, sizeof(idb));
         b->data_len = sizeof(idb);
         b->data_off = 0;
+        if (getenv("LT_TRACE_RESTORE")) {
+            fprintf(stderr, "[h2fmi] MODE_ID ce=%d -> %02x %02x %02x %02x\n",
+                    ce, idb[0], idb[1], idb[2], idb[3]);
+        }
     } else if (b->mode == MODE_PAGE && page_bytes && !queued &&
                (b->pending_n || !h2fmi_room(b, transfer_bytes))) {
         /* No room, or older transfers still waiting: this one queues behind them
