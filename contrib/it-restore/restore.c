@@ -3,6 +3,7 @@
  * bytes from one explicitly configured, read-only image stream. */
 #include <unistd.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
@@ -93,9 +94,40 @@ int main(void)
      * emulation that is minutes, not seconds: the engine this runs on is TCG, and the first boot of a
      * factory-blank part is the slowest one there is. Wait long enough for it, and say so once a
      * minute so a log shows what it is waiting for. */
+    /* What the guest's devfs actually holds, once, before waiting: on this engine the media is
+     * published by the FTL and the node's name is the one thing not yet observed. */
+    {
+        DIR *d = opendir("/dev");
+        struct dirent *e;
+        unsigned n = 0;
+        if (d) {
+            printf("A6RESTORE /dev:");
+            while ((e = readdir(d)) && n < 40) {
+                if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                printf(" %s", e->d_name);
+                n++;
+            }
+            printf("\n");
+            fflush(stdout);
+            closedir(d);
+        } else {
+            printf("A6RESTORE FAIL opendir /dev errno=%d\n", errno);
+            fflush(stdout);
+        }
+    }
+    static const char *const nodes[] = { "/dev/rdisk0", "/dev/disk0", "/dev/rdisk0s1",
+                                         "/dev/disk0s1", "/dev/rdisk0s1s1", "/dev/disk0s1s1" };
     int fd = -1;
     for (i = 0; i < 900 && fd < 0; i++) {
-        fd = open("/dev/rdisk0", O_RDWR);
+        for (unsigned k = 0; k < sizeof nodes / sizeof nodes[0]; k++) {
+            fd = open(nodes[k], O_RDWR);
+            if (fd >= 0) {
+                printf("A6RESTORE OPENED %s\n", nodes[k]);
+                fflush(stdout);
+                break;
+            }
+        }
+        if (fd >= 0) break;
         if (fd < 0) {
             if (!(i % 60) && i) {
                 printf("A6RESTORE WAITING for /dev/rdisk0 (%u s)\n", i);
