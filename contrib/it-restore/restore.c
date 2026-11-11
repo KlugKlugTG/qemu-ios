@@ -89,11 +89,20 @@ int main(void)
         h.records > 1000000 || (h.reserved & ~1U))
         die("stream header");
     unsigned verify_only = h.reserved & 1;
+    /* The FTL publishes the block device only after it has initialized this media, and under
+     * emulation that is minutes, not seconds: the engine this runs on is TCG, and the first boot of a
+     * factory-blank part is the slowest one there is. Wait long enough for it, and say so once a
+     * minute so a log shows what it is waiting for. */
     int fd = -1;
-    for (i = 0; i < 60 && fd < 0; i++) {
+    for (i = 0; i < 900 && fd < 0; i++) {
         fd = open("/dev/rdisk0", O_RDWR);
-        if (fd < 0)
+        if (fd < 0) {
+            if (!(i % 60) && i) {
+                printf("A6RESTORE WAITING for /dev/rdisk0 (%u s)\n", i);
+                fflush(stdout);
+            }
             sleep(1);
+        }
     }
     if (fd < 0)
         die("open /dev/rdisk0");
