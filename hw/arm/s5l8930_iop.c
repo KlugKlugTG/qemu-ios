@@ -213,6 +213,7 @@ struct S5L8930IOPState {
     uint32_t page_stride;       /* store geometry: page + spare bytes */
     uint32_t store_page_bytes;
     uint32_t store_ppb;
+    uint32_t store_blocks_per_ce;
     uint32_t pages_per_ce;
     bool nand_xor_ff;       /* explicit v2: sparse zero encodes erased FF */
     uint32_t snapshot_format; /* migration certificate; not storage state */
@@ -413,6 +414,14 @@ uint32_t s5l8930_iop_nand_erase(DeviceState *dev, int bus, uint32_t ce, uint32_t
     return nand_erase_block(s, bus, ce, s->store_ppb ? page / s->store_ppb : 0);
 }
 
+/* The store's blocks per chip enable, for the PPN device info the FTL reads: 0 when no store is open. */
+uint32_t s5l8930_iop_nand_blocks_per_ce(DeviceState *dev)
+{
+    S5L8930IOPState *s = S5L8930_IOP(dev);
+
+    return s->store_blocks_per_ce;
+}
+
 void s5l8930_iop_nand_info(DeviceState *dev, uint32_t *id, uint8_t *ce_mask,
                            uint32_t *page_bytes)
 {
@@ -421,6 +430,9 @@ void s5l8930_iop_nand_info(DeviceState *dev, uint32_t *id, uint8_t *ce_mask,
     if (getenv("LT_TRACE_RESTORE")) {
         fprintf(stderr, "[iop] nand_info dev=%p id=0x%08x mask=0x%x page=%u\n",
                 (void *)dev, s->nand_id, s->nand_ce_mask, s->nand_dir ? s->store_page_bytes : 0);
+    }
+    if (getenv("LT_TRACE_RESTORE")) {
+        fprintf(stderr, "[iop] nand_info RETURN id=0x%08x mask=0x%x\n", s->nand_id, s->nand_ce_mask);
     }
     *id = s->nand_id;
     *ce_mask = s->nand_ce_mask;
@@ -1600,6 +1612,7 @@ static void s5l8930_iop_realize(DeviceState *dev, Error **errp)
     s->page_stride = page_bytes + spare_bytes;
     s->store_page_bytes = page_bytes;
     s->store_ppb = ppb;
+    s->store_blocks_per_ce = (uint32_t)blocks;
     s->pages_per_ce = blocks * ppb;
     size = (size_t)s->pages_per_ce * s->page_stride;
 

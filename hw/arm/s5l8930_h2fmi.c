@@ -241,6 +241,10 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
 {
     S5L8930H2FMIState *s = b->s;
 
+    if (getenv("LT_TRACE_RESTORE")) {
+        fprintf(stderr, "[h2fmi] fmc cmd=0x%02x bus=%d ppn=%d\n", cmd, b->n, s->ppn);
+    }
+
     /*
      * Any other command ends READ ID: the byte reads that follow are the
      * status or data again. Left in ID mode, a status poll (go 0x50) read an
@@ -326,6 +330,9 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
         qemu_log_mask(LOG_UNIMP, "h2fmi: SET_FEATURE on non-PPN part\n");
         break;
     case 0x90:
+        if (getenv("LT_TRACE_RESTORE")) {
+            fprintf(stderr, "[h2fmi] cmd 0x90 (read id) bus=%d\n", b->n);
+        }
         b->mode = MODE_ID;
         b->id_pos = 0;
         /* The ID goes through the FIFO on the next control 3 even if control is already 3: 3.1.3's
@@ -599,7 +606,19 @@ static void h2fmi_transfer(H2FMIBus *b, int ce, bool queued)
         uint32_t bytes = MIN((h2fmi_format(b) >> 8) & 0xffff, sizeof(payload));
         if (b->ppn_opcode == 0x92) {
             memcpy(payload, "PPN Device Info", 15);
-            const uint32_t info[] = {2, 4, 1064, 11, 256, 128, 8, 1, 2, 16448};
+            /* The part's own numbers: blocks per chip enable and page bytes come from the store this
+             * machine opened, not from a fixed 8 GB part -- the FTL sizes itself from these, and a
+             * store twice that size would not agree with them. */
+            uint32_t blocks_per_ce = s5l8930_iop_nand_blocks_per_ce(s->iop);
+            uint32_t page_bytes = 16448;
+            s5l8930_iop_nand_info(s->iop, &(uint32_t){0}, &(uint8_t){0}, &page_bytes);
+            if (!blocks_per_ce) {
+                blocks_per_ce = 1064;
+            }
+            if (!page_bytes) {
+                page_bytes = 16448;
+            }
+            const uint32_t info[] = {2, 4, blocks_per_ce, 11, 256, 128, 8, 1, 2, page_bytes};
             for (unsigned i = 0; i < ARRAY_SIZE(info); i++) stl_le_p(payload + 0x10 + 4 * i, info[i]);
             const uint8_t timings[] = {50, 20, 10, 15, 60, 15, 25, 0, 50, 15, 25};
             memcpy(payload + 0xa0, timings, sizeof(timings));
