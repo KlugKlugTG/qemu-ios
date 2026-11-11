@@ -249,3 +249,30 @@ For each prepared build, verify:
 6. CoreLocation receives successive fixes and handles fix removal.
 7. Front/rear photos, flash modes, movie capture and playback work.
 8. Native shutdown persists changes through a subsequent cold boot.
+
+## Where preparation stands on this tree (2026-11-11)
+
+The engine boots the N42 kernel from a kboot this fork's firmwarekit writes, and the IOP and NAND
+paths come up as far as the guest's own logs show:
+
+* `AppleIOPFMI::start` and one chip-ID read per CE (FMI0:CE0..CE3, FMI1:CE8..CE11);
+* `IOFlashStorageDevice` opens, `IOFlashPartitionScheme` probes with score 4 and **publishes the whole
+  table** (Boot Block, Effaceable, NVRAM, Firmware, Filesystem, System Config, Diagnostic Data, Bad
+  Block Table) -- so the factory media this fork writes is read exactly as intended;
+* the FMI answers every command the guest issues (`0x00`, `0x30`, `0x70`) and reports the PPN part
+  (`s5l8930_iop_nand_info`: id `0x014e5050`, one CE per bus, 16384-byte pages);
+* the A6's IOP core is started by the AP (`a6_iop_write` doorbell, firmware base in DRAM).
+
+What does not happen is `AppleNANDFTL`'s own start. The panic is
+`IOFlashPartitionScheme`'s wait for it ("AppleNANDFTL did not appear"), and **none** of the FTL's own
+failure strings reach the console -- neither "provider is not an IOFlashStorageDevice" nor "unable to
+open IOFlashStorageDevice" nor "waiting for AppleNANDFactoryBBT" -- so the kext never matches its
+provider rather than failing inside it. Traces in `hw/arm/s5l8930_h2fmi.c`, `hw/arm/s5l8930_iop.c` and
+`hw/arm/s5l8950.c` are gated on `LT_TRACE_RESTORE=1`.
+
+The store this tree reads is the Swift A6NAND one (16 KiB pages, 64-byte spare, 2128 blocks per CE,
+`ppn-factory`, `nand-xor-ff-v2`), one `bus<N>-ce<M>.pages` file per chip select: the engine's
+`s5l8930_iop.c` opens no container, which is why firmwarekit's N42 board keeps its store raw instead of
+packing it into `nand.qcow2`. The store's *size* is validated against the geometry
+("NAND file size differs from geometry"), so a half-sized store cannot be used to test a different
+`blocks_per_ce`.
