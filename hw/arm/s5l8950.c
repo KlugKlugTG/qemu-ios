@@ -818,6 +818,15 @@ static const MemoryRegionOps a6_unimplemented_ops = {
 
 static uint64_t a6_iop_read(void *opaque, hwaddr off, unsigned size)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static int n;
+        S5L8950State *st = opaque;
+        if (n++ < 40) {
+            fprintf(stderr, "[a6] iop_read off=0x%03x from=%s\n", (unsigned)off,
+                    current_cpu == CPU(st->iop_cpu) ? "core" : "AP");
+        }
+    }
+
     S5L8950State *s = opaque;
     uint32_t value = s->iop_regs[off / 4];
     qemu_log_mask(LOG_UNIMP, "A6 IOP %s read +%03x = %08x PC=%08x\n",
@@ -858,6 +867,10 @@ static void a6_iop_write(void *opaque, hwaddr off, uint64_t value,
         memory_region_add_subregion_overlap(&s->iop_mem, 0, &s->iop_fw, 1);
         s->iop_fw_mapped = true;
         CPUState *cs = CPU(s->iop_cpu);
+        if (getenv("LT_TRACE_RESTORE")) {
+            fprintf(stderr, "[a6] IOP start: fw base=0x%08x (regs %08x %08x %08x)\n", base,
+                    s->iop_regs[0], s->iop_regs[1], s->iop_regs[2]);
+        }
         cpu_reset(cs);
         s->iop_cpu->power_state = PSCI_ON;
         s->iop_cpu->env.halt_reason = NOT_HALTED;

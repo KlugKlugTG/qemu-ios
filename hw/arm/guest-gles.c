@@ -153,6 +153,65 @@ bool guest_rw_ram(CPUState *cpu, uint64_t va, uint8_t *buf, size_t len, bool wri
     return true;
 }
 
+/*
+ * A presented frame's destination pages, resolved once for the whole frame.
+ *
+ * The copy wrote each row with its own gles_guest_rw: a 960x640 frame made 640 of them, each probing
+ * its page, looking up the current mmu index and splitting the row at the page boundary, to write
+ * 2.4 MB through pointers that are the same for every row. Nothing runs in the guest while a present
+ * copies, so the mapping cannot change under it. Only pages the caller's TLB resolves to plain RAM
+ * are taken; a page that needs the full path (a fault to be raised, MMIO, dirty tracking) fails the
+ * whole map and the caller keeps its row-at-a-time loop, which is what reissues the present.
+ */
+static uint8_t **gles_pages_host;
+static size_t gles_pages_cap;
+
+bool gles_guest_pages_map(GlesGuestPages *pages, CPUState *cpu, uint64_t va, uint64_t end)
+{
+    CPUArchState *env = cpu_env(cpu);
+    int idx = cpu_mmu_index(cpu, false);
+    uint64_t first = va & ~((uint64_t)TARGET_PAGE_SIZE - 1);
+    size_t npages;
+
+    if (end < va || end > UINT32_MAX) {
+        return false;
+    }
+    npages = (end - first + TARGET_PAGE_SIZE - 1) >> TARGET_PAGE_BITS;
+    if (gles_pages_cap < npages) {
+        gles_pages_host = g_renew(uint8_t *, gles_pages_host, npages);
+        gles_pages_cap = npages;
+    }
+    for (size_t i = 0; i < npages; i++) {
+        void *host;
+
+        if (probe_access_flags(env, first + i * TARGET_PAGE_SIZE, 0, MMU_DATA_STORE, idx,
+                               true, &host, 0) || !host) {
+            return false;
+        }
+        gles_pages_host[i] = host;
+    }
+    pages->first = first;
+    pages->npages = npages;
+    pages->page = gles_pages_host;
+    return true;
+}
+
+void gles_guest_pages_write(const GlesGuestPages *pages, uint64_t va,
+                            const void *buf, size_t len)
+{
+    uint64_t off = va - pages->first;
+    size_t done = 0;
+
+    while (done < len) {
+        size_t in = (off + done) & (TARGET_PAGE_SIZE - 1);
+        size_t n = MIN(len - done, TARGET_PAGE_SIZE - in);
+
+        memcpy(pages->page[(off + done) >> TARGET_PAGE_BITS] + in,
+               (const uint8_t *)buf + done, n);
+        done += n;
+    }
+}
+
 int gles_guest_rw(CPUState *cpu, vaddr va, void *buf, size_t len, bool write)
 {
     if (gles_guest_rw_hook) {
