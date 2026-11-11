@@ -25,13 +25,6 @@
  * "tone-hz" property replaces the input with a synthetic stereo sine at the
  * port's frame rate, so capture can be checked headless.
  *
- * A phone's engine runs the audio backend as `driver=none`, whose input voice
- * opens and then hands out silence, so the FIFO asks the frontend's own
- * microphone first (hw/arm/host-mic.c): what it recorded, resampled to the
- * port's rate, and -- when it pushed nothing, which is every case on the Mac --
- * the voice's ring, then silence. That is the phone's capture path: the guest
- * reaches the same CDMA chains and the same RX FIFO either way.
- *
  * Use `-audio driver=wav,path=out.wav` (or coreaudio): the card resolves
  * its backend from the default audiodev list, as the iPod's I2S does.
  */
@@ -47,7 +40,6 @@
 #include "hw/core/qdev-clock.h"
 #include "hw/arm/s5l8930.h"
 #include "hw/arm/ipod_touch_cs42l58.h"
-#include "hw/arm/host-mic.h"
 #include "qemu/audio.h"
 #include "migration/vmstate.h"
 
@@ -110,7 +102,6 @@ struct S5L8930I2SState {
     bool mca;                      /* A6 MCA register layout, shared PCM backend */
     uint32_t frame_rate;            /* virtual external frame clock for MCA */
     unsigned out_channels, out_bytes;
-    bool host_mic;                  /* property: the frontend's microphone is this port's input */
     uint8_t port;                   /* property: i2s<port>, selects its NCO */
     Clock *lrclk;                   /* in: the codec's frame clock, followed while the port is the slave */
     CS42L58State *codec;            /* link: the codec this port feeds, whose output volume the host hears */
@@ -244,11 +235,6 @@ static void i2s_set_in_rate(S5L8930I2SState *s, unsigned rate)
         .freq = rate, .nchannels = 2, .fmt = AUDIO_FORMAT_S16, .big_endian = false,
     };
 
-    if (!s->tone_hz && s->host_mic) {
-        /* The frontend resamples what it recorded to this rate, and is told even where a host
-         * input voice exists: it is the port's rate that decides which frames it hands out. */
-        host_mic_set_rate(rate);
-    }
     if (rate == s->in_rate || s->tone_hz) {
         s->in_rate = rate;
         return;
@@ -272,11 +258,6 @@ static void i2s_next_frame(S5L8930I2SState *s)
 
         stw_le_p(stereo, v);
         stw_le_p(stereo + 2, v);
-    } else if (s->host_mic && host_mic_read_frame(stereo)) {
-        /* The frontend's microphone is the input, not a fallback: a phone's engine runs the audio
-         * backend as driver=none, whose input voice still opens and hands out silence paced at the
-         * port's rate, so a capture that reads the voice's ring below would only ever hear that. */
-        /* the frontend recorded this frame */
     } else if (s->in_level >= 4) {
         for (int i = 0; i < 4; i++) {
             stereo[i] = s->in_ring[s->in_tail];
@@ -517,12 +498,6 @@ static void i2s_write(void *opaque, hwaddr offset, uint64_t value,
         if (run) {
             i2s_set_in_rate(s, s5l8930_i2s_rate(s->port));
             s->rx_pos = 0;
-        } else {
-            /* A stopped recording's unread frames would play back as a burst at the head of the
-             * next one, a second or a day later. */
-            if (s->host_mic) {
-                host_mic_flush();
-            }
         }
         if (s->voice_in) {
             audio_be_set_active_in(s->audio_be, s->voice_in, run);
@@ -646,7 +621,6 @@ static const Property s5l8930_i2s_properties[] = {
     DEFINE_PROP_BOOL("ctrl-run", S5L8930I2SState, ctrl_run, false),
     DEFINE_PROP_BOOL("mca", S5L8930I2SState, mca, false),
     DEFINE_PROP_UINT32("frame-rate", S5L8930I2SState, frame_rate, 48000),
-    DEFINE_PROP_BOOL("host-mic", S5L8930I2SState, host_mic, false),
     DEFINE_PROP_UINT8("port", S5L8930I2SState, port, 0),
     DEFINE_PROP_UINT64("nco-base", S5L8930I2SState, nco_base, 0),
     DEFINE_PROP_UINT32("nco-ref-hz", S5L8930I2SState, nco_ref_hz, 0),

@@ -28,8 +28,6 @@
 #include "migration/vmstate.h"
 #include "system/address-spaces.h"
 #include "qemu/bswap.h"
-#include "hw/arm/host-camera.h"
-#include "hw/arm/s5l8930-isp-camera.h"
 
 #define ISP_CPU_SIZE    0x1000
 #define ISP_SIZE        0xd6000
@@ -74,10 +72,6 @@ struct S5L8930ISPState {
     uint8_t strobe;                 /* the flagged frame's strobe capture count */
     uint8_t *pic;                   /* one frame, host side */
     size_t pic_size;
-    uint8_t *camera;                /* the phone's frame, copied out of its mailbox */
-    size_t camera_size;
-    unsigned camera_width, camera_height;
-    bool camera_frame;              /* the phone has a picture to draw */
 
     FILE *trace;
 };
@@ -134,13 +128,6 @@ static void isp_command(S5L8930ISPState *s, uint8_t cat, uint8_t reg)
     if (cat == 0x00 && reg == 0x00) {
         s->file[0x00][0x91] = s->file[0x00][0x00];      /* requested sensor mode -> current mode */
         return;
-    }
-    if ((cat == 0x03 || cat == 0x04) && reg == 0x00) {
-        /* Sensor recognition: 03 is the back sensor (MIPI), 04 the front (SMIA). The picture itself
-         * does not depend on it -- the phone's newest frame serves whichever camera the guest is
-         * on, the same way a real sensor reports what is in front of it -- but it is the one place
-         * the guest says which camera that is, so the app can show it. */
-        host_camera_select(cat == 0x04 ? HOST_CAMERA_FRONT : HOST_CAMERA_BACK);
     }
     for (unsigned i = 0; i < ARRAY_SIZE(isp_commands); i++) {
         if (isp_commands[i].cat == cat && isp_commands[i].reg == reg) {
@@ -300,26 +287,6 @@ static void isp_metadata(S5L8930ISPState *s, uint32_t va)
     }
 }
 
-/* The phone's picture, taken out of its mailbox once per ISP frame. */
-static void isp_camera_snapshot(S5L8930ISPState *s)
-{
-    HostCameraFrame frame;
-
-    host_camera_snapshot(&frame);
-    if (!frame.data) {
-        s->camera_frame = false;
-        return;
-    }
-    if (s->camera_size < frame.size) {
-        s->camera = g_realloc(s->camera, frame.size);
-        s->camera_size = frame.size;
-    }
-    memcpy(s->camera, frame.data, frame.size);
-    s->camera_width = frame.width;
-    s->camera_height = frame.height;
-    s->camera_frame = true;
-}
-
 static void isp_frame(void *opaque)
 {
     S5L8930ISPState *s = opaque;
@@ -333,28 +300,16 @@ static void isp_frame(void *opaque)
     const uint8_t *m = &s->file[0x00][(s->frames & 1) ? 0xcf : 0xcb];
     size_t need = (size_t)w * h * 2;
 
-    /* Taken before the checks below, so a frame the guest has not started to look at yet is
-     * waiting for it rather than dropped. */
-    isp_camera_snapshot(s);
     if (!r[ISP_OUT_ENABLE / 4] || !y) {
         return;     /* stopped: no buffer, no frame */
     }
-    /* The sizes come from the guest's own register file, and a size no sensor ever had -- odd, or
-     * past what the model draws -- is not a frame: drawing it would mean allocating and DMAing past
-     * the guest's buffer (this fork's check, in the incoming side's own spelling). */
-    if (w && h && w <= ISP_OUT_MAX && h <= ISP_OUT_MAX && !(w & 1) && !(h & 1) && y > 0x1000) {
+    /* The size is mailbox bytes the guest wrote: no larger than a sensor (5 MP) makes. */
+    if (w && h && w <= ISP_OUT_MAX && h <= ISP_OUT_MAX && y > 0x1000) {
         if (need > s->pic_size) {
             s->pic = g_realloc(s->pic, need);
             s->pic_size = need;
         }
-        if (s->camera_frame) {
-            s5l8930_isp_camera_convert(s->camera, s->camera_width, s->camera_height, s->pic, w, h,
-                                       nv12);
-        } else {
-            /* Nothing from the phone: a host without a camera still shows a viewfinder, so a check
-             * boot and a desktop are not staring at an empty buffer. */
-            isp_pattern(s, w, h, nv12);
-        }
+        isp_pattern(s, w, h, nv12);
         if (nv12) {
             isp_dma_write(s, y, s->pic, (size_t)w * h);
             if (c > 0x1000) {
@@ -416,7 +371,6 @@ static void isp_init(Object *obj)
     SysBusDevice *sbd = SYS_BUS_DEVICE(obj);
     const char *trace = getenv("IT_ISP_TRACE");
 
-    host_camera_attach();
     s->isp = g_new0(uint32_t, ISP_SIZE / 4);
     s->frame_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, isp_frame, s);
     memory_region_init_io(&s->isp_mr, obj, &isp_ops, s, "s5l8930.isp", ISP_SIZE);
@@ -443,8 +397,6 @@ static void isp_reset(DeviceState *dev)
     timer_del(s->frame_timer);
     s->frames = 0;
     s->shutter = s->strobe = 0;
-    s->camera_frame = false;
-    host_camera_flush();
 }
 
 static const VMStateDescription isp_vmstate = {
