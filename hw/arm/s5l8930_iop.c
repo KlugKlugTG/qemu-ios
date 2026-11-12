@@ -337,6 +337,7 @@ static uint32_t nand_io_error(int result, int bus, uint32_t ce,
 static uint32_t nand_read_page(S5L8930IOPState *s, int bus, uint32_t ce,
                                uint32_t page, uint8_t *data, uint8_t *meta)
 {
+
     uint32_t len = s->page_stride;
     g_autofree uint8_t *p = NULL;
     BlockBackend *blk;
@@ -388,6 +389,13 @@ static uint32_t nand_read_page(S5L8930IOPState *s, int bus, uint32_t ce,
 bool s5l8930_iop_nand_read(DeviceState *dev, int bus, uint32_t ce,
                            uint32_t page, uint8_t *buf, uint32_t *stride)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n;
+        if (n++ < 80) {
+            fprintf(stderr, "[store] read bus=%d ce=%u page=%u\n", bus, ce, page);
+        }
+    }
+
     S5L8930IOPState *s = S5L8930_IOP(dev);
     uint8_t meta[FMI_META_BYTES];
 
@@ -673,6 +681,13 @@ static uint32_t fmi_reset_everything(S5L8930IOPState *s, int bus, uint8_t *cmd)
 static uint32_t fmi_read_single(S5L8930IOPState *s, int bus, uint8_t *cmd,
                                 uint8_t *page, uint8_t *meta)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n_fmi_read_single;
+        if (n_fmi_read_single++ < 40) {
+            fprintf(stderr, "[hle] fmi_read_single bus=%d ce=%u row=0x%08x\n", bus, ARG_CE(0x10), ARG(0x14));
+        }
+    }
+
     uint32_t st = nand_read_page(s, bus, ARG_CE(0x10), ARG(0x14), page, meta);
 
     iop_write(ARG(0x18), page, s->bytes_per_page[bus]);
@@ -684,6 +699,13 @@ static uint32_t fmi_read_single(S5L8930IOPState *s, int bus, uint8_t *cmd,
 static uint32_t fmi_read_raw(S5L8930IOPState *s, int bus, uint8_t *cmd,
                              uint8_t *page, uint8_t *meta)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n_fmi_read_raw;
+        if (n_fmi_read_raw++ < 40) {
+            fprintf(stderr, "[hle] fmi_read_raw bus=%d ce=%u row=0x%08x\n", bus, ARG_CE(0x10), ARG(0x14));
+        }
+    }
+
     uint32_t st = nand_read_page(s, bus, ARG_CE(0x10), ARG(0x14), page, meta);
     if (st == FMI_STATUS_PARAM) {
         return st;
@@ -697,6 +719,13 @@ static uint32_t fmi_read_raw(S5L8930IOPState *s, int bus, uint8_t *cmd,
 static uint32_t fmi_read_bootpage(S5L8930IOPState *s, int bus, uint8_t *cmd,
                                   uint8_t *page, uint8_t *meta)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n_fmi_read_bootpage;
+        if (n_fmi_read_bootpage++ < 40) {
+            fprintf(stderr, "[hle] fmi_read_bootpage bus=%d ce=%u row=0x%08x\n", bus, ARG_CE(0x10), ARG(0x14));
+        }
+    }
+
     uint32_t st = nand_read_page(s, bus, ARG_CE(0x10), ARG(0x14), page, meta);
 
     iop_write(ARG(0x18), page,
@@ -714,6 +743,13 @@ static uint32_t fmi_read_bootpage(S5L8930IOPState *s, int bus, uint8_t *cmd,
 static uint32_t fmi_multi(S5L8930IOPState *s, int bus, uint8_t *cmd, bool write,
                           uint8_t *page, uint8_t *meta)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n_fmi_multi;
+        if (n_fmi_multi++ < 40) {
+            fprintf(stderr, "[hle] fmi_multi bus=%d ce=%u row=0x%08x\n", bus, ARG_CE(0x10), ARG(0x14));
+        }
+    }
+
     uint32_t n = ARG(0x10);
     hwaddr ces = ARG(0x14), pages = ARG(0x18);
     uint32_t blank = 0, uecc = 0, st = FMI_STATUS_OK;

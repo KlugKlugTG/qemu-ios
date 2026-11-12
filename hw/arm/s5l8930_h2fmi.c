@@ -92,6 +92,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(S5L8930H2FMIState, S5L8930_H2FMI)
 #define ECC_BLANK       (1u << 1)
 #define NAND_FAIL       1u              /* chip status: program/erase failed */
 #define NAND_READY      0xe0            /* ready, ready, not write-protected */
+/* A PPN part answers with its own status byte: bit 6 ready, bit 7 not write-protected. Clearing bit
+ * 7 makes the FTL treat the media as write-protected (its own bWPDisabled assert), and a media that
+ * is never written never appears: no format, no block device. */
+#define PPN_STATUS_READY 0xc0
 #define META_BYTES      10              /* what the store keeps per page */
 
 typedef enum { MODE_NONE, MODE_ID, MODE_PAGE, MODE_PPN_FEATURE_WRITE, MODE_PPN_AUX_READ } H2FMIMode;
@@ -267,7 +271,7 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
     case 0x92:
         if (s->ppn) {
             b->ppn_opcode = cmd;
-            b->ppn_status = 0x40;
+            b->ppn_status = PPN_STATUS_READY;
             b->ppn_aux_off = 0;
             b->mode = MODE_PPN_AUX_READ;
             break;
@@ -316,13 +320,13 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
     case 0xb0: /* PPN sequenced management-data input; B8 commits it. */
         if (!s->ppn) break;
         b->seq_page_off = 0;
-        b->ppn_status = 0x40;
+        b->ppn_status = PPN_STATUS_READY;
         b->mode = MODE_PPN_FEATURE_WRITE;
         /* CDMA may prefill this command's bytes before the sequencer issues it. */
         break;
     case 0xef:
         if (s->ppn) {
-            b->ppn_status = 0x40;
+            b->ppn_status = PPN_STATUS_READY;
             b->mode = MODE_PPN_FEATURE_WRITE;
             b->wdata_len = b->wmeta_len = 0;
             break;
@@ -341,7 +345,7 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
         break;
     case 0xff:
         memset(b->ppn_read_count, 0, sizeof(b->ppn_read_count));
-        b->ppn_status = 0x40;
+        b->ppn_status = PPN_STATUS_READY;
         b->fmc[FMC_NAND_STATUS / 4] = NAND_READY;
         b->mode = MODE_NONE;
         b->read_pending = false;
@@ -387,7 +391,7 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
             b->wpage_len[ce & 7] = 0;
         }
         b->writing = false;
-        b->fmc[FMC_NAND_STATUS / 4] = (s->ppn ? 0x40 : NAND_READY) | (result == 1 ? 0 : NAND_FAIL);
+        b->fmc[FMC_NAND_STATUS / 4] = (s->ppn ? PPN_STATUS_READY : NAND_READY) | (result == 1 ? 0 : NAND_FAIL);
         if (s->ppn) b->ppn_status = b->fmc[FMC_NAND_STATUS / 4];
         break;
     }
@@ -413,7 +417,7 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
             int cs = (ce & 7) * H2FMI_BUSES + b->n;
             result = s5l8930_iop_nand_erase(s->iop, cs / per_bus, cs % per_bus, b->row);
         }
-        b->fmc[FMC_NAND_STATUS / 4] = (s->ppn ? 0x40 : NAND_READY) | (result == 1 ? 0 : NAND_FAIL);
+        b->fmc[FMC_NAND_STATUS / 4] = (s->ppn ? PPN_STATUS_READY : NAND_READY) | (result == 1 ? 0 : NAND_FAIL);
         if (s->ppn) b->ppn_status = b->fmc[FMC_NAND_STATUS / 4];
         break;
     }
@@ -459,7 +463,7 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
                                                &b->stride);
         }
         if (s->ppn) {
-            b->ppn_status = ce >= 0 && b->page_ok[ce & 7] ? 0x40 : 0x49;
+            b->ppn_status = ce >= 0 && b->page_ok[ce & 7] ? PPN_STATUS_READY : 0x49;
             b->fmc[FMC_NAND_STATUS / 4] = b->ppn_status;
             if (b->seq_running && ce >= 0) {
                 unsigned c = ce & 7, n = b->ppn_read_count[c];
@@ -520,6 +524,12 @@ static void h2fmi_go(H2FMIBus *b, uint32_t go)
     }
     if (go & 2) {
         h2fmi_command(b, (cmds >> 8) & 0xff);
+    }
+    if (getenv("LT_TRACE_RESTORE") && b->mode == MODE_PAGE) {
+        static unsigned n;
+        if (n++ < 60) {
+            fprintf(stderr, "[h2fmi] page read row=0x%08x\n", b->row);
+        }
     }
     if ((go & 0x10) && b->mode == MODE_ID) {
         /*
@@ -606,19 +616,16 @@ static void h2fmi_transfer(H2FMIBus *b, int ce, bool queued)
         uint32_t bytes = MIN((h2fmi_format(b) >> 8) & 0xffff, sizeof(payload));
         if (b->ppn_opcode == 0x92) {
             memcpy(payload, "PPN Device Info", 15);
-            /* The part's own numbers: blocks per chip enable and page bytes come from the store this
-             * machine opened, not from a fixed 8 GB part -- the FTL sizes itself from these, and a
-             * store twice that size would not agree with them. */
-            uint32_t blocks_per_ce = s5l8930_iop_nand_blocks_per_ce(s->iop);
+            /* Blocks per CAU, not per chip enable: a row is addressed as
+             * (cau * blocks_per_cau + block) * pages_per_block + page below, so a 2128-block CE with
+             * two CAUs advertises 1064 here. Reporting the per-CE count made the FTL size itself
+             * against a media twice the one the model serves. */
             uint32_t page_bytes = 16448;
             s5l8930_iop_nand_info(s->iop, &(uint32_t){0}, &(uint8_t){0}, &page_bytes);
-            if (!blocks_per_ce) {
-                blocks_per_ce = 1064;
-            }
             if (!page_bytes) {
                 page_bytes = 16448;
             }
-            const uint32_t info[] = {2, 4, blocks_per_ce, 11, 256, 128, 8, 1, 2, page_bytes};
+            const uint32_t info[] = {2, 4, 1064, 11, 256, 128, 8, 1, 2, page_bytes};
             for (unsigned i = 0; i < ARRAY_SIZE(info); i++) stl_le_p(payload + 0x10 + 4 * i, info[i]);
             const uint8_t timings[] = {50, 20, 10, 15, 60, 15, 25, 0, 50, 15, 25};
             memcpy(payload + 0xa0, timings, sizeof(timings));
@@ -1278,7 +1285,7 @@ static void s5l8930_h2fmi_reset(DeviceState *dev)
         b->seq_page_off = 0;
         b->seq_running = false;
         b->ppn_queries = 0;
-        b->ppn_status = 0x40;
+        b->ppn_status = PPN_STATUS_READY;
         b->ppn_aux_off = b->ppn_column = 0;
         memset(b->ppn_read_count, 0, sizeof(b->ppn_read_count));
         b->read_pending = false;
