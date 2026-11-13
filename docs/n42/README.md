@@ -334,3 +334,32 @@ programming block 0x427.
 Two things follow, in order: teach 0xb0/0xb8 what its payload actually carries per use (feature,
 factory BBT entry, read-queue row), and only then judge the address decode -- the PPN read decode
 (0x00/0x30 through the packed row) is now correct but inert on this path.
+
+### The write path works, and the format runs (2026-11-13, late)
+
+Three fixes took the install boot past every earlier wall:
+
+1. **The CDMA's direction.** A channel whose direction bit (`settings` bit 1) is clear and whose
+   target is a device FIFO now asks that FIFO which way it goes: room to take means the transfer is
+   *into* the device, bytes to give means out of it. The A6's NAND channels carry the bit clear while
+   they program the media, so their page data was being read *from* the FMI instead of written to it:
+   the program buffer stayed empty and every program stored zeros. With this the trace shows the
+   write buffer filling (`wdata` in the thousands) and pages landing in the store.
+2. **Who may say it has room.** The FMI reports write-room only while it is armed to take data
+   (control 5); without that a read's channel looked like a write and the boot tore.
+3. **A blank page is a successful read.** `page_ok` means "the page has data", not "the read worked",
+   and a fresh part is blank nearly everywhere -- its factory BBT among them. 0x49 for blank made the
+   format die on the bad-block table it had just asked for (`Unable to get PPN feature 0x0184`).
+
+With those, the format runs for real: `Starting VFL Format`, the media's pages are written (the store
+file's mtime moves, qemu sits at 230% CPU), the special-block test passes and the read queue serves the
+guest's own postings -- and then the guest panics in the AIC instead:
+
+```
+panic(cpu 1 caller 0x80a7868f): "AppleInterruptController::callPlatformFunction:
+                                   unexepcted other vector number: 0x00000002"
+```
+
+That is a *new* wall, past the NAND: an interrupt the guest's controller does not expect, most likely
+the CDMA's or the FMI's own line raised while the media is mid-format. Next: trace which line fires
+with vector 2 (the AIC's log and the deliver path), and keep the model from raising it in that state.

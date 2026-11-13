@@ -279,6 +279,13 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
         break;
     case 0xee:
     case 0x92:
+        if (getenv("LT_TRACE_CMD")) {
+            static unsigned n;
+            if (n++ < 20) {
+                fprintf(stderr, "[aux] cmd=0x%02x addr0=0x%08x count=%u\n", cmd, b->fmc[FMC_ADDR0 / 4],
+                        b->fmc[0x20 / 4] & 0xf);
+            }
+        }
         if (s->ppn) {
             b->ppn_opcode = cmd;
             b->ppn_status = PPN_STATUS_READY;
@@ -323,6 +330,13 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
             if (cmd == 0x7d && ce >= 0 && b->ppn_read_count[ce & 7])
                 b->ppn_status = b->ppn_read_status[(ce & 7) * 128];
             b->fmc[FMC_NAND_STATUS / 4] = b->ppn_status;
+            if (getenv("LT_TRACE_CMD") && cmd != 0x77 && cmd != 0x7d) {
+                static unsigned n;
+                if (n++ < 300) {
+                    fprintf(stderr, "[feat] cmd=0x%02x addr0=0x%08x status=0x%02x aux?%d\n", cmd,
+                            b->fmc[FMC_ADDR0 / 4], b->ppn_status, b->mode);
+                }
+            }
             break;
         }
         qemu_log_mask(LOG_UNIMP, "h2fmi: PPN operation on non-PPN part\n");
@@ -473,7 +487,12 @@ static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
                                                &b->stride);
         }
         if (s->ppn) {
-            b->ppn_status = ce >= 0 && b->page_ok[ce & 7] ? PPN_STATUS_READY : 0x49;
+            /* A blank page is a read that succeeded: page_ok is "the page has data", not "the read
+             * worked", and a fresh part is blank nearly everywhere -- its factory BBT and its FTL
+             * areas among them. 0x49 (which a failed operation leaves behind) made the FTL's own
+             * format fail on the bad-block table it had just asked for: "Unable to get PPN feature
+             * 0x0184: status = 0x49", then ReadCAUBBT fail. */
+            b->ppn_status = ce >= 0 ? PPN_STATUS_READY : 0x49;
             b->fmc[FMC_NAND_STATUS / 4] = b->ppn_status;
             if (b->seq_running && ce >= 0) {
                 unsigned c = ce & 7, n = b->ppn_read_count[c];
@@ -530,8 +549,24 @@ static void h2fmi_go(H2FMIBus *b, uint32_t go)
             uint32_t block = (row >> 8) & 0x7ff;
             uint32_t cau = (row >> 19) & 0xf;
             b->row = (cau * 1064 + block) * 256 + page;
-            if ((cmds & 0xff) == 0x0a || (cmds & 0xff) == 0x07)
+            if ((cmds & 0xff) == 0x0a || (cmds & 0xff) == 0x07) {
                 b->ppn_column = b->fmc[0x20 / 4] == 7 ? b->fmc[FMC_ADDR0 / 4] >> 16 : 0;
+                /* The multi-read's own row is what the guest means by the reads it asks for later:
+                 * it is a posting, not a read. This is where the queue gets the guest's rows -- the
+                 * 0x30 case adds them only for the model's own reads, which is why a format verified
+                 * a block it had never programmed. */
+                int ce = h2fmi_ce(b);
+                if (ce >= 0) {
+                    unsigned c = ce & 7, n = b->ppn_read_count[c];
+                    if (n < 128) {
+                        unsigned slot = c * 128 + n;
+                        b->ppn_read_row[slot] = b->row;
+                        b->ppn_read_column[slot] = b->ppn_column;
+                        b->ppn_read_status[slot] = PPN_STATUS_READY;
+                        b->ppn_read_count[c]++;
+                    } else qemu_log_mask(LOG_GUEST_ERROR, "PPN read queue overflow\n");
+                }
+            }
             if ((cmds & 0xff) == 0x67) h2fmi_command(b, 0xd7);
         } else {
             b->row = (b->fmc[FMC_ADDR0 / 4] >> 16) |
@@ -670,6 +705,11 @@ static void h2fmi_transfer(H2FMIBus *b, int ce, bool queued)
             }
             else stl_le_p(payload, b->ppn_features[feature]);
         }
+        /* A feature answer is a completed operation: the status byte must say ready, or the guest
+         * reads it as a failed query ("Unable to get PPN feature 0x0184: status = 0x49") even though
+         * the payload is there -- 0x49 is what a failed *page read* leaves behind. */
+        b->ppn_status = PPN_STATUS_READY;
+        b->fmc[FMC_NAND_STATUS / 4] = b->ppn_status;
         uint32_t offset = MIN(b->ppn_aux_off, sizeof(payload));
         uint32_t available = MIN(bytes, sizeof(payload) - offset);
         memset(b->data, 0xff, bytes);
@@ -824,6 +864,14 @@ static void h2fmi_write_check(H2FMIBus *b)
         if (ce >= 0) {
             uint32_t offset = ppn_boot ? b->wpage_len[ce & 7] : 0;
             if (offset > H2FMI_BUF || page_bytes > H2FMI_BUF - offset) return;
+            if (getenv("LT_TRACE_CMD")) {
+                static unsigned n;
+                if (n++ < 20) {
+                    fprintf(stderr, "[copy] ce=%d offset=%u page_bytes=%u wdata=%u first=%02x %02x %02x %02x\n",
+                            ce, offset, page_bytes, b->wdata_len, b->wdata[0], b->wdata[1], b->wdata[2],
+                            b->wdata[3]);
+                }
+            }
             memcpy(b->wpage[ce & 7] + offset, b->wdata, page_bytes);
             memset(b->wpmeta[ce & 7], 0, META_BYTES);
             memcpy(b->wpmeta[ce & 7], b->wmeta, MIN(mper, META_BYTES));
@@ -1263,6 +1311,13 @@ static void h2fmi_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
             b->fmi[off / 4] &= ~v;
             break;
         case FMI_DATA:
+            if (getenv("LT_TRACE_CMD") && b->wdata_len > 8000 && (b->wdata_len % 4096) < 8) {
+                static unsigned n;
+                if (n++ < 20) {
+                    fprintf(stderr, "[wdata] len=%u mode=%u ctrl=%u\n", b->wdata_len, b->mode,
+                            b->fmi[FMI_CONTROL / 4] & 7);
+                }
+            }
             if (b->wdata_len + size <= sizeof(b->wdata)) {
                 for (unsigned i = 0; i < size; i++) {
                     b->wdata[b->wdata_len++] = v >> (8 * i);
@@ -1334,6 +1389,11 @@ static uint32_t h2fmi_fifo_avail(void *opaque, hwaddr addr, bool to_device)
     hwaddr reg = (addr - s->mmio_base) % H2FMI_WINDOW;
 
     if (to_device) {    /* room for a write */
+        /* Only while the FMI is armed to take data (control 5): this is what lets the CDMA tell a
+         * program's feed from a read's drain when the channel's own direction bit is clear. */
+        if ((b->fmi[FMI_CONTROL / 4] & 7) != 5) {
+            return 0;
+        }
         return reg == FMI_DATA ? sizeof(b->wdata) - b->wdata_len
              : reg == FMI_META ? sizeof(b->wmeta) - b->wmeta_len : ~0u;
     }

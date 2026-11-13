@@ -547,6 +547,20 @@ static void cdma_run(S5L8930CDMAState *s, int ch)
     bool feeds = aes != NULL;                   /* memory -> AES engine */
     bool drains = !feeds && !c->fifo && !c->settings;   /* engine -> memory */
     bool to_device = feeds || (c->settings & SET_TO_DEVICE);
+    /* A device FIFO decides the direction by what it has: the settings bit is not the only
+     * signal on this SoC (the A6's NAND channels carry it clear while they program the media), so
+     * when it is clear and the target is a device FIFO, ask the device -- room to take means the
+     * transfer is *into* it, bytes to give means it is out of it. */
+    if (!to_device && dev_fifo) {
+        CDMASource *src = cdma_src(s, dev);
+        if (src) {
+            uint32_t out = src->avail(src->opaque, dev, false);
+            uint32_t in = src->avail(src->opaque, dev, true);
+            if (in && !out) {
+                to_device = true;
+            }
+        }
+    }
     bool uart_counter = s->version >= 2 && cdma_waits_for_uart(s, c);
     uint32_t width = 1u << ((c->settings >> 2) & 3);
     uint32_t error = 0;
