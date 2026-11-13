@@ -1728,7 +1728,8 @@ static void a6_init(MachineState *machine)
         qdev_prop_set_string(nand_store, "nand", s->nand);
     if (s->ppn) {
         qdev_prop_set_uint32(nand_store, "nand-id", 0x014e5050);
-        qdev_prop_set_uint8(nand_store, "nand-ce-mask", 1);
+        qdev_prop_set_uint8(nand_store, "nand-ce-mask", 3);   /* two chip enables a bus: the media's */
+
     }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(nand_store), &error_fatal);
     DeviceState *fmi = qdev_new(TYPE_S5L8930_H2FMI);

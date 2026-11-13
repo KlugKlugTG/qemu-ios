@@ -411,6 +411,15 @@ static uint32_t nand_erase_block(S5L8930IOPState *s, int bus, uint32_t ce, uint3
 uint32_t s5l8930_iop_nand_program(DeviceState *dev, int bus, uint32_t ce, uint32_t page,
                                   const uint8_t *data, uint32_t len, const uint8_t *meta)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n;
+        if (n++ < 30) {
+            fprintf(stderr, "[store] program bus=%d ce=%u page=%u len=%u first=%02x %02x %02x %02x\n",
+                    bus, ce, page, len, len > 0 ? data[0] : 0, len > 1 ? data[1] : 0,
+                    len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
+        }
+    }
+
     return nand_program_page(S5L8930_IOP(dev), bus, ce, page, data, len, meta);
 }
 

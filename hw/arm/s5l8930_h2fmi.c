@@ -95,7 +95,7 @@ OBJECT_DECLARE_SIMPLE_TYPE(S5L8930H2FMIState, S5L8930_H2FMI)
 /* A PPN part answers with its own status byte: bit 6 ready, bit 7 not write-protected. Clearing bit
  * 7 makes the FTL treat the media as write-protected (its own bWPDisabled assert), and a media that
  * is never written never appears: no format, no block device. */
-#define PPN_STATUS_READY 0xc0
+#define PPN_STATUS_READY 0x40
 #define META_BYTES      10              /* what the store keeps per page */
 
 typedef enum { MODE_NONE, MODE_ID, MODE_PAGE, MODE_PPN_FEATURE_WRITE, MODE_PPN_AUX_READ } H2FMIMode;
@@ -883,6 +883,14 @@ static void h2fmi_write(void *opaque, hwaddr off, uint64_t val, unsigned size);
  * first 1024 bytes, before the remaining data bytes of that logical page. */
 static bool h2fmi_seq_task(H2FMIBus *b)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n;
+        if (n++ < 60) {
+            fprintf(stderr, "[seq] task bus=%d mode=%u row=0x%08x writing=%d\n", b->n, b->mode, b->row,
+                    b->writing);
+        }
+    }
+
     uint32_t bytes = (h2fmi_format(b) & 0xff) * 1024;
     uint32_t meta = (h2fmi_format(b) >> 19) & 0x3f;
     int ce = h2fmi_ce(b);
@@ -1101,6 +1109,21 @@ static uint64_t h2fmi_read(void *opaque, hwaddr off, unsigned size)
 static void h2fmi_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
 {
     H2FMIBus *b = opaque;
+
+    if (getenv("LT_TRACE_RESTORE") && off < 0x1000) {
+        static unsigned n;
+        if (n++ < 40) {
+            fprintf(stderr, "[fmi] write off=0x%03x val=0x%08x size=%u\n", (unsigned)off, (unsigned)val,
+                    size);
+        }
+    }
+    if (getenv("LT_TRACE_RESTORE") && b->s->ppn && off >= 0xc0000 && off < 0xc1400) {
+        static unsigned n;
+        if (n++ < 60) {
+            fprintf(stderr, "[seq] write off=0x%05x val=0x%08x size=%u code_n=%u\n", (unsigned)off,
+                    (unsigned)val, size, b->seq_code_n);
+        }
+    }
     uint32_t v = val;
 
     if (b->s->ppn && off >= 0xc1000 && off < 0xc1400) {
