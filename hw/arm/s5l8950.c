@@ -663,8 +663,17 @@ static void a6_aic_write(void *opaque, hwaddr offset, uint64_t value,
     if (offset == 0x10)
         s->global_config = value;
     else if (offset == 0x2008) {
-        if (value & 0x80000000u)
-            s->ipi[cpu] |= 0x80000000u;
+        /* SOFTINT's top bit is "the OTHER processors", not the writer: bits 0..1 name a CPU, bit 31
+         * its complement, and the kernel uses it exactly that way. Delivering it back to the writer
+         * made a CPU take an "other vector" it had asked the other one to take, and its
+         * AppleInterruptController panicked on it. */
+        if (value & 0x80000000u) {
+            for (int target = 0; target < 2; target++) {
+                if (target != cpu) {
+                    s->ipi[target] |= 0x80000000u;
+                }
+            }
+        }
         for (int target = 0; target < 2; target++)
             if (value & (1u << target))
                 s->ipi[target] |= 1;

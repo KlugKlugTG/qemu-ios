@@ -379,3 +379,14 @@ vector it did not set up. The IOP's own AIC shares those offsets, and its writes
 the AP's state, but the panic survives -- so the next thing to establish is who *raises* that bit
 (the kernel's own self-IPI, or a line this model raises on its behalf) and which class the A6's AIC v1
 puts an IPI in. The kernel's AIC symbols are at caller 0x80a7868f in the 6.1.4 kernelcache.
+
+#### AIC, second pass (the trace)
+
+`-d int` names the writes: the guest itself writes SOFTINT (`+0x2008`) with `0x00000001`, `0x00000002`
+and `0x80000000` (104 times in one run), and the model answers the top bit as "other vector 2"
+(`0x40002`). The kernel uses that bit as "the other processors" -- it is modelled that way now -- and the
+panic survived, so what is left is the *class* the A6's AIC puts an IPI in: this model invented
+`0x40000 | vector` (and `0x10000 | vector` for device lines) for the A4-era VIC world, and the A6's
+AppleInterruptController expects something else. The way to settle it is the guest's own kext
+(`AppleInterruptController`, caller 0x80a7868f in the 6.1.4 kernelcache): disassemble around that
+caller and read which class bits it switches on before it calls the unexpected-vector panic.
