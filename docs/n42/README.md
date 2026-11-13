@@ -363,3 +363,19 @@ panic(cpu 1 caller 0x80a7868f): "AppleInterruptController::callPlatformFunction:
 That is a *new* wall, past the NAND: an interrupt the guest's controller does not expect, most likely
 the CDMA's or the FMI's own line raised while the media is mid-format. Next: trace which line fires
 with vector 2 (the AIC's log and the deliver path), and keep the model from raising it in that state.
+
+### The AIC wall, with its exact shape
+
+Past the NAND, the guest panics inside its own interrupt controller:
+
+```
+panic(cpu 0 caller 0x80a7868f): "AppleInterruptController::callPlatformFunction:
+                                   unexepcted other vector number: 0x00000002"
+```
+
+The model's AIC read (offset 0x2004) answers `0x40002` for its IPI bit 31 and `0x40001` for bit 0, and
+`0x10000 | vector` for device lines; the guest takes the `0x40000` class as "other" and panics on a
+vector it did not set up. The IOP's own AIC shares those offsets, and its writes are now kept out of
+the AP's state, but the panic survives -- so the next thing to establish is who *raises* that bit
+(the kernel's own self-IPI, or a line this model raises on its behalf) and which class the A6's AIC v1
+puts an IPI in. The kernel's AIC symbols are at caller 0x80a7868f in the 6.1.4 kernelcache.

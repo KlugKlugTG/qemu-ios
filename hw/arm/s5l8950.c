@@ -646,6 +646,15 @@ static void a6_aic_write(void *opaque, hwaddr offset, uint64_t value,
         a6_iop_timer_write(s, offset, value)) {
         return;
     }
+    /* The IOP's own AIC has its IPI registers at the same offsets, and its firmware rings itself
+     * through them. They belong to the IOP's window: letting them fall through to the AP's state
+     * handed the application processor an "other vector" nobody had asked it for, and the kernel's
+     * AppleInterruptController panicked on it ("unexpected other vector number: 0x00000002") right in
+     * the middle of the FTL's format. */
+    if (current_cpu == CPU(s->iop_cpu) &&
+        (offset == 0x2008 || offset == 0x200c || (offset >= 0x2020 && offset <= 0x2028))) {
+        return;
+    }
     int cpu = a6_aic_cpu(s, &offset);
     qemu_log_mask(CPU_LOG_INT,
                   "A6 AIC CPU%d write +0x%04" HWADDR_PRIx " = 0x%08" PRIx64
