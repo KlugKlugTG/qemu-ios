@@ -243,6 +243,16 @@ static void h2fmi_fmc_events(H2FMIBus *b, uint32_t ev)
 
 static void h2fmi_command(H2FMIBus *b, uint8_t cmd)
 {
+    if (getenv("LT_TRACE_CMD") && b->s->ppn) {
+        static unsigned n;
+        if (n++ < 200) {
+            uint32_t r = b->fmc[FMC_ADDR0 / 4] & 0x7fffff;
+            fprintf(stderr, "[cmd] cmd=0x%02x addr0=0x%08x addr1=0x%08x count=%u -> page=%u block=%u cau=%u\n",
+                    cmd, b->fmc[FMC_ADDR0 / 4], b->fmc[FMC_ADDR1 / 4], b->fmc[0x20 / 4] & 0xf, r & 0xff,
+                    (r >> 8) & 0x7ff, (r >> 19) & 0xf);
+        }
+    }
+
     S5L8930H2FMIState *s = b->s;
 
     if (getenv("LT_TRACE_RESTORE")) {

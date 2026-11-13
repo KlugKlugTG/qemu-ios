@@ -246,6 +246,7 @@ struct S5L8950State {
     bool battery_probe;
     bool backlight_probe;
     bool hsic_ready_probe;
+    uint8_t nand_ce_mask;   /* chip enables a bus the store is expected to hold */
     bool baseband;
     DeviceState *baseband_usb;
     USBBus *hsic_bus;
@@ -1728,7 +1729,7 @@ static void a6_init(MachineState *machine)
         qdev_prop_set_string(nand_store, "nand", s->nand);
     if (s->ppn) {
         qdev_prop_set_uint32(nand_store, "nand-id", 0x014e5050);
-        qdev_prop_set_uint8(nand_store, "nand-ce-mask", 3);   /* two chip enables a bus: the media's */
+        qdev_prop_set_uint8(nand_store, "nand-ce-mask", 3);   /* the four-chip media */
 
     }
     sysbus_realize_and_unref(SYS_BUS_DEVICE(nand_store), &error_fatal);
