@@ -276,3 +276,33 @@ The store this tree reads is the Swift A6NAND one (16 KiB pages, 64-byte spare, 
 packing it into `nand.qcow2`. The store's *size* is validated against the geometry
 ("NAND file size differs from geometry"), so a half-sized store cannot be used to test a different
 `blocks_per_ce`.
+
+## Where the install boot stands (2026-11-13)
+
+With the device tree's own geometry filled (blocks-cau 1064, caus-ce 1, cau-bits 0, page-bits 8,
+block-bits 11, ce-bitmap 0x0303, #ce 2 a bus, #ce-blocks 1064, default-ftl-version 1, whitening and
+the 4 KiB AES chain), and a media of four chips (two CEs a bus, 1064 blocks each, whose factory header
+and geometry.json carry the same numbers), the FTL does what a real one does on a factory-blank part:
+
+```
+FIL_Init [OK]
+_ppnfpartReadSpecialBlock: Read: failed to locate special blocks (type = 0xC101)
+WMR_Start:237 No signature found.
+_DestructiveFormat: Starting VFL Format
+_ppnvflFormat: dwKeepout:19, dwOptions:0x20000
+_ppnvflFormat: testing special block - failed reading (0x0, 0x427, 0x0)
+_fillVFLCxtBlockList: failed allocating vfl info blocks
+WMR_Initial_Format failed 0x40000006
+```
+
+It **writes** the special blocks (the store trace shows programs at row 272128 on bus0's two CEs,
+the top block) and its own test of them fails. What the traces say about the write path: the CDMA
+channels that feed the FMI are running (ch5 16384 bytes to FMI+0x14, ch6 40 bytes to FMI+0x18, their
+remainders falling 16384/40 -> 12288/32 -> 8192/20), the model accumulates them into its page buffer,
+and every program carries zeros -- which is plausible for an info block, so the write itself may be
+fine and the failure is in what the FTL reads back: it reads row 16432 (block 64), never the row it
+wrote, so the difference is in the address each side computes for a *read*, not in the data.
+
+Next: compare the row the guest asks for against the (cau, block, page) it means -- the row formula is
+`(cau * blocks_per_cau + block) * pages_per_block + page`, and the read the format fails on names block
+0x427 while the model sees row 16432.

@@ -519,6 +519,14 @@ static void cdma_fifo_xfer(uint32_t fifo, uint32_t width, uint8_t *buf,
 
 static void cdma_run(S5L8930CDMAState *s, int ch)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n;
+        CDMAChannel *c0 = &s->ch[ch];
+        if (n++ < 40) {
+            fprintf(stderr, "[cdma] run ch=%d fifo=0x%08x remain=%u settings=0x%x ctrl=0x%x\n", ch,
+                    c0->fifo, c0->remain, c0->settings, c0->ctrl);
+        }
+    }
     if (s->in_run[ch]) {
         qemu_bh_schedule(s->kick_bh);
         return;
@@ -769,6 +777,15 @@ out:
 void s5l8930_cdma_sink_done(DeviceState *dev, uint32_t fifo_base, uint32_t size)
 {
     S5L8930CDMAState *s = S5L8930_CDMA(dev);
+
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n;
+        if (n++ < 24) {
+            fprintf(stderr, "[cdma] sink_done base=0x%08x size=%u ch1{fifo=0x%08x run=%d pend=%d} "
+                            "ch6{fifo=0x%08x run=%d pend=%d}\n", fifo_base, size, s->ch[1].fifo,
+                    s->in_run[1], s->sink_pending[1], s->ch[6].fifo, s->in_run[6], s->sink_pending[6]);
+        }
+    }
 
     for (int ch = 1; ch < CDMA_CHANNELS; ch++) {
         CDMAChannel *c = &s->ch[ch];

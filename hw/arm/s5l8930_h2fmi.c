@@ -751,6 +751,20 @@ static void h2fmi_seq_run(H2FMIBus *b);
 
 static void h2fmi_write_check(H2FMIBus *b)
 {
+    if (getenv("LT_TRACE_RESTORE")) {
+        static unsigned n;
+        uint32_t pb = 0, id = 0;
+        uint8_t m = 0;
+        if (b->s->iop) {
+            s5l8930_iop_nand_info(b->s->iop, &id, &m, &pb);
+        }
+        if (n++ < 30) {
+            fprintf(stderr, "[chk] ctrl=%u wdata=%u wmeta=%u page_bytes=%u mper=%u mode=%u\n",
+                    b->fmi[FMI_CONTROL / 4] & 7, b->wdata_len, b->wmeta_len, pb,
+                    h2fmi_meta_per_page(b), b->mode);
+        }
+    }
+
     uint32_t page_bytes = 0, id = 0, mper = h2fmi_meta_per_page(b);
     uint8_t mask;
     hwaddr base = b->s->mmio_base + b->n * H2FMI_WINDOW;
@@ -1111,10 +1125,19 @@ static void h2fmi_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
     H2FMIBus *b = opaque;
 
     if (getenv("LT_TRACE_RESTORE") && off < 0x1000) {
-        static unsigned n;
-        if (n++ < 40) {
-            fprintf(stderr, "[fmi] write off=0x%03x val=0x%08x size=%u\n", (unsigned)off, (unsigned)val,
-                    size);
+        /* Every register write, counted by offset: a page's 16 KiB arrive as thousands of writes to
+         * FMI_DATA, so a first-N trace hides exactly the traffic that matters. */
+        static unsigned long counts[0x400];
+        if (off / 4 < ARRAY_SIZE(counts)) {
+            counts[off / 4]++;
+        }
+        if (getenv("LT_TRACE_FMI_SUM")) {
+            static bool shown;
+            if (!shown && counts[FMI_DATA / 4] > 100) {
+                shown = true;
+                fprintf(stderr, "[fmi] data writes so far: %lu, meta: %lu\n", counts[FMI_DATA / 4],
+                        counts[FMI_META / 4]);
+            }
         }
     }
     if (getenv("LT_TRACE_RESTORE") && b->s->ppn && off >= 0xc0000 && off < 0xc1400) {
