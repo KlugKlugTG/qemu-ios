@@ -617,6 +617,9 @@ static uint64_t a6_aic_read(void *opaque, hwaddr offset, unsigned size)
         }
         uint32_t ipi = s->ipi[cpu] & ~s->ipi_mask[cpu];
         if (ipi & 0x80000000u) {
+            /* The vector number this model invented for the top bit (0x40002) was tried against the
+             * guest's own IPI vector (0x40001) and the panic did not move: the class/vector encoding
+             * of this AIC is what has to be read out of the guest, not guessed. */
             s->ipi_mask[cpu] |= 0x80000000u;
             a6_irq_update(s);
             return 0x40002;

@@ -390,3 +390,10 @@ panic survived, so what is left is the *class* the A6's AIC puts an IPI in: this
 AppleInterruptController expects something else. The way to settle it is the guest's own kext
 (`AppleInterruptController`, caller 0x80a7868f in the 6.1.4 kernelcache): disassemble around that
 caller and read which class bits it switches on before it calls the unexpected-vector panic.
+
+Tried afterwards and rejected: handing the top SOFTINT bit the per-CPU IPI's own vector (`0x40001`)
+did not move the panic either, which says the *encoding itself* (this model's `0x10000 | vector` for
+device lines and `0x40000 | vector` for IPIs, invented for the A4-era VIC world) is what the A6's AIC
+does not share. Read it out of the guest: the panic's caller is 0x80a7868f in 6.1.4, and the kext's
+text sits above the kernelcache's own `__TEXT` (0x80001000..0x802d2000), so disassemble it from the
+segment that covers 0x80a7xxxx (the cache's later mappings) rather than the first segment.
