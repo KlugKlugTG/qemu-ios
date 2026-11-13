@@ -306,3 +306,17 @@ wrote, so the difference is in the address each side computes for a *read*, not 
 Next: compare the row the guest asks for against the (cau, block, page) it means -- the row formula is
 `(cau * blocks_per_cau + block) * pages_per_block + page`, and the read the format fails on names block
 0x427 while the model sees row 16432.
+
+### The failure, exactly (model trace `s5l8930_h2fmi_log`)
+
+```
+h1 program ce 0 row 0x42700 len 16424 lpn 0x0 data 00000000     <- the format writes block 0x427
+h1 PPN read  row 0x4030 off0 bytes4096 meta10 ok0 data ffffffff  <- and reads block 0x40, blank
+```
+
+So the format's special-block test fails because the row it *reads* is not the row it *wrote*: it programs
+block 0x427 (the top block of a 1064-block CE) and verifies block 0x40. The model serves both exactly as
+asked (the write lands, the read returns the blank page), so the difference is the address the FTL
+computes for a read -- the same DT geometry that made its write land where it did. Decoding the two rows
+against the device tree's own knobs (blocks-cau, caus-ce, cau-bits, page-bits, block-bits, dwKeepout 19)
+is what is left here.
