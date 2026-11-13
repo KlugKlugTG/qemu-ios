@@ -897,6 +897,7 @@ static void h2fmi_write(void *opaque, hwaddr off, uint64_t val, unsigned size);
  * first 1024 bytes, before the remaining data bytes of that logical page. */
 static bool h2fmi_seq_task(H2FMIBus *b)
 {
+
     if (getenv("LT_TRACE_RESTORE")) {
         static unsigned n;
         if (n++ < 60) {
@@ -1123,6 +1124,15 @@ static uint64_t h2fmi_read(void *opaque, hwaddr off, unsigned size)
 static void h2fmi_write(void *opaque, hwaddr off, uint64_t val, unsigned size)
 {
     H2FMIBus *b = opaque;
+
+    if (getenv("LT_TRACE_RESTORE") && off >= b->s->fmc_off && off < b->s->fmc_off + 0x20) {
+        static unsigned n;
+        if (n++ < 60) {
+            fprintf(stderr, "[fmc] write reg=0x%02x val=0x%08x\n", (unsigned)(off - b->s->fmc_off),
+                    (unsigned)val);
+        }
+    }
+
 
     if (getenv("LT_TRACE_RESTORE") && off < 0x1000) {
         /* Every register write, counted by offset: a page's 16 KiB arrive as thousands of writes to
