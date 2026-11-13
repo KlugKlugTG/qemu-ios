@@ -515,7 +515,13 @@ static void h2fmi_go(H2FMIBus *b, uint32_t go)
             }
             b->row = b->fmc[FMC_ADDR0 / 4] & 0xffffff;
         } else if (b->s->ppn && ((cmds & 0xff) == 0x0a || (cmds & 0xff) == 0x07 ||
-                                  (cmds & 0xff) == 0x8a || (cmds & 0xff) == 0x87 || (cmds & 0xff) == 0x6a || (cmds & 0xff) == 0x67)) {
+                                  (cmds & 0xff) == 0x8a || (cmds & 0xff) == 0x87 || (cmds & 0xff) == 0x6a ||
+                                  (cmds & 0xff) == 0x67 || (cmds & 0xff) == 0x00 || (cmds & 0xff) == 0x30)) {
+            /* A PPN part's page reads carry the same packed row as its programs -- page in the low
+             * byte, block above it, the CAU above that. Decoding a read with the A4's
+             * (ADDR0 >> 16) | (ADDR1 << 16) form gives a row nobody wrote, which is exactly how a
+             * format that programs block 0x427 ends up verifying block 0x40. */
+
             /* Multi-read's eight address bytes include its status/column
              * fields first; the packed PPN row is the second word. */
             /* bounded: the index selects only FMC_ADDR0 or FMC_ADDR1. */

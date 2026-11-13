@@ -320,3 +320,17 @@ asked (the write lands, the read returns the blank page), so the difference is t
 computes for a read -- the same DT geometry that made its write land where it did. Decoding the two rows
 against the device tree's own knobs (blocks-cau, caus-ce, cau-bits, page-bits, block-bits, dwKeepout 19)
 is what is left here.
+
+### The row mismatch: where it actually comes from
+
+The reads the FTL's format makes do not arrive as a command 0x30 at all: they are served from the
+model's read queue (`ppn_read_row`/`ppn_read_column`), which `h2fmi_command`'s 0x7a pops. That queue is
+filled at the model's *own* reads -- and the guest's own postings go through `0xb0`/`0xb8`
+("PPN sequenced management-data input"), which this model treats as a *feature* write
+(`MODE_PPN_FEATURE_WRITE`, `ppn_features[feature] = value`) and therefore drops as a queue entry. So a
+row the FTL believes it posted is never the row the read uses, and the format verifies block 0x40 after
+programming block 0x427.
+
+Two things follow, in order: teach 0xb0/0xb8 what its payload actually carries per use (feature,
+factory BBT entry, read-queue row), and only then judge the address decode -- the PPN read decode
+(0x00/0x30 through the packed row) is now correct but inert on this path.
