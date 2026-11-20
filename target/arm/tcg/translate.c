@@ -23,6 +23,7 @@
 
 #include "translate.h"
 #include "translate-a32.h"
+#include "ir-cache.h"
 #include "qemu/log.h"
 #include "arm_ldst.h"
 #include "semihosting/semihost.h"
@@ -30,7 +31,6 @@
 #include "exec/target_page.h"
 #include "helper.h"
 #include "helper-mve.h"
-#include "exec/translation-block.h"
 
 #define ENABLE_ARCH_4T    arm_dc_feature(s, ARM_FEATURE_V4T)
 #define ENABLE_ARCH_5     arm_dc_feature(s, ARM_FEATURE_V5)
@@ -233,9 +233,12 @@ static inline int get_a32_user_mem_index(DisasContext *s)
     case ARMMMUIdx_E30_3_PAN:
         return arm_to_core_mmu_idx(ARMMMUIdx_E30_0);
     case ARMMMUIdx_E2:        /* this one is UNPREDICTABLE */
-    case ARMMMUIdx_E10_0:
     case ARMMMUIdx_E10_1:
     case ARMMMUIdx_E10_1_PAN:
+        /* The EL0 index may still hold another ASID's pages here. */
+        gen_helper_el0_tlb_sync(tcg_env);
+        /* fall through */
+    case ARMMMUIdx_E10_0:
         return arm_to_core_mmu_idx(ARMMMUIdx_E10_0);
     case ARMMMUIdx_MUser:
     case ARMMMUIdx_MPriv:
@@ -356,11 +359,15 @@ void gen_set_cpsr(TCGv_i32 var, uint32_t mask)
 }
 
 /*
- * The flags from bits 31..28 of var (VMRS APSR_nzcv, MRC to r15) straight into the flag globals,
- * as A64 does, instead of through the cpsr_write helper.
+ * The four flags from bits 31..28 of var (VMRS APSR_nzcv, fpscr after every VFP compare; MSR
+ * APSR_nzcv) straight into the flag globals, as A64 does, not through the cpsr_write helper.
  */
 void gen_set_nzcv(TCGv_i32 var)
 {
+    if (!arm_psr_fast()) {
+        gen_set_cpsr(var, CPSR_NZCV);
+        return;
+    }
     tcg_gen_andi_i32(cpu_NF, var, CPSR_N);
     tcg_gen_andi_i32(cpu_ZF, var, CPSR_Z);
     tcg_gen_setcondi_i32(TCG_COND_EQ, cpu_ZF, cpu_ZF, 0);
@@ -1326,46 +1333,73 @@ static void gen_goto_ptr(void)
 }
 
 /*
- * The next TB's lookup for an exit that leaves the CPU state as this TB found
- * it but for the PC, the Thumb bit and the IT bits: a branch, a call or a
- * return. Anything that changes the rest of the state ends its TB otherwise
- * (DISAS_UPDATE_*, DISAS_EXIT), so the next TB has this TB's flags and cflags,
- * and its cs_base is this TB's with THUMB and CONDEXEC read back from env, as
- * arm_get_tb_cpu_state reads them; only the jump cache probe is left for
- * tcg_gen_lookup_and_goto_ptr_probe. Like a goto_tb chain, the probe trusts
- * that cflags did not change under the TB.
+ * The exit of an insn that only wrote the PC (and with BX the Thumb bit):
+ * every other part of the next TB's flags is this TB's, so the PC and Thumb
+ * bit key a cache of this exit's last target. Not inside an IT block, whose
+ * state the key would also need, and not for M-profile, where a branch can be
+ * an exception return.
  */
-static void gen_goto_ptr_probe(DisasContext *s)
+/*
+ * Return prediction (tcg_gen_ras_push): calls push their TB's slot, returns
+ * pop one and try it before the site cache. ~95% of site-cache misses were
+ * returns, which go back to a different caller each time. LT_RAS=off for A/B.
+ */
+static bool arm_ras_enabled(DisasContext *s)
 {
-    TranslationBlock *tb = s->base.tb;
-    uint32_t cf = tb_cflags(tb);
-    uint32_t keep = ~(R_TBFLAG_AM32_THUMB_MASK | R_TBFLAG_AM32_CONDEXEC_MASK);
-    TCGv_i32 cs, t;
-    TCGv_i64 pc64, cs64;
+    static int on = -1;
 
-    if ((cf & (CF_COUNT_MASK | CF_NO_GOTO_TB | CF_NO_GOTO_PTR |
-               CF_SINGLE_STEP | CF_NOIRQ | CF_BP_PAGE | CF_STEP_ATOMIC |
-               CF_USE_ICOUNT | CF_MEMI_ONLY)) ||
-        s->ss_active || (tb->cs_base >> 32) ||
-        arm_dc_feature(s, ARM_FEATURE_M) ||
-        !QTAILQ_EMPTY(&current_cpu->breakpoints)) {
-        gen_goto_ptr();
-        return;
+    if (on < 0) {
+        const char *v = getenv("LT_RAS");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
     }
-    cs = tcg_temp_new_i32();
-    t = tcg_temp_new_i32();
-    pc64 = tcg_temp_new_i64();
-    cs64 = tcg_temp_new_i64();
+    return on && translator_use_indirect_cache(&s->base) && !arm_dc_feature(s, ARM_FEATURE_M);
+}
 
-    tcg_gen_ld8u_i32(t, tcg_env, offsetof(CPUARMState, thumb));
-    tcg_gen_shli_i32(t, t, R_TBFLAG_AM32_THUMB_SHIFT);
-    tcg_gen_ld_i32(cs, tcg_env, offsetof(CPUARMState, condexec_bits));
-    tcg_gen_shli_i32(cs, cs, R_TBFLAG_AM32_CONDEXEC_SHIFT);
-    tcg_gen_or_i32(cs, cs, t);
-    tcg_gen_ori_i32(cs, cs, (uint32_t)tb->cs_base & keep);
-    tcg_gen_extu_i32_i64(cs64, cs);
-    tcg_gen_extu_i32_i64(pc64, cpu_R[15]);
-    tcg_gen_lookup_and_goto_ptr_probe(pc64, cs64, tb->flags, cf);
+static void gen_ras_push(DisasContext *s)
+{
+    if (arm_ras_enabled(s)) {
+        tcg_gen_ras_push();
+    }
+}
+
+/* The insn just translated returns: BX LR, MOV PC, LR, or a pop of PC off SP. */
+static bool arm_insn_is_return(DisasContext *s)
+{
+    uint32_t i = s->insn;
+
+    if (s->thumb) {
+        if (i < 0x10000) {
+            return i == 0x4770 || (i & 0xff00) == 0xbd00;           /* bx lr; pop {..., pc} */
+        }
+        return ((i >> 16) == 0xe8bd && (i & 0x8000)) ||           /* ldmia.w sp!, {..., pc} */
+               i == 0xf85dfb04;                                    /* ldr.w pc, [sp], #4 */
+    }
+    return (i & 0x0fffffff) == 0x012fff1e ||                       /* bx lr */
+           (i & 0x0fffffff) == 0x01a0f00e ||                       /* mov pc, lr */
+           (i & 0x0fff8000) == 0x08bd8000 ||                       /* ldmia sp!, {..., pc} */
+           (i & 0x0fffffff) == 0x049df004;                         /* ldr pc, [sp], #4 */
+}
+
+static void gen_goto_ptr_indirect(DisasContext *s)
+{
+    if (translator_use_indirect_cache(&s->base) && !s->condexec_mask &&
+        !arm_dc_feature(s, ARM_FEATURE_M)) {
+        TCGv_i32 key = tcg_temp_new_i32();
+        QEMU_BUILD_BUG_ON(sizeof_field(CPUARMState, thumb) != 1);
+        tcg_gen_ld8u_i32(key, tcg_env, offsetof(CPUARMState, thumb));
+        tcg_gen_or_i32(key, key, cpu_R[15]);
+        if (arm_ras_enabled(s) && arm_insn_is_return(s)) {
+            /* What the target TB inherits from this one: all but PC, Thumb and IT state (none at this exit). */
+            uint64_t am32 = s->base.tb->cs_base &
+                            ~(uint64_t)(R_TBFLAG_AM32_THUMB_MASK | R_TBFLAG_AM32_CONDEXEC_MASK);
+
+            tcg_gen_lookup_and_goto_ptr_ras(key, (uint32_t)s->base.tb->flags | am32 << 32);
+        } else {
+            tcg_gen_lookup_and_goto_ptr_cached(key);
+        }
+    } else {
+        gen_goto_ptr();
+    }
 }
 
 /* This will end the TB but doesn't guarantee we'll return to
@@ -1393,7 +1427,7 @@ static void gen_goto_tb(DisasContext *s, unsigned tb_slot_idx, int64_t diff)
         tcg_gen_exit_tb(s->base.tb, tb_slot_idx);
     } else {
         gen_update_pc(s, diff);
-        gen_goto_ptr_probe(s);
+        gen_goto_ptr();
     }
     s->base.is_jmp = DISAS_NORETURN;
 }
@@ -1507,10 +1541,34 @@ static int gen_set_psr(DisasContext *s, uint32_t mask, int spsr, TCGv_i32 t0)
         tcg_gen_andi_i32(t0, t0, mask);
         tcg_gen_or_i32(tmp, tmp, t0);
         store_cpu_field(tmp, spsr);
+        /* Nothing a TB is translated for, and nothing to unmask: carry on (LT_PSR_CHAIN). */
+        if (!arm_psr_chain()) {
+            gen_lookup_tb(s);
+        }
     } else {
         gen_set_cpsr(t0, mask);
+        /*
+         * iOS restores the CPSR at every lock release and switches modes at every kernel entry,
+         * ~35K main-loop returns a second in a game. Chain to the next instruction instead: the
+         * helper requests an exit when the flags changed or a pending interrupt was unmasked,
+         * taken here, before the chain, so that the jump is never patched to a TB translated for
+         * other flags. A conditional write (one goto_tb slot per path) returns as before.
+         */
+        if (arm_psr_chain() && !s->condjmp) {
+            TCGLabel *stay = gen_new_label();
+            TCGv_i32 t = tcg_temp_new_i32();
+
+            tcg_gen_ld_i32(t, tcg_env, offsetof(CPUState, neg.icount_decr.u32) - sizeof(CPUState));
+            tcg_gen_brcondi_i32(TCG_COND_GE, t, 0, stay);
+            /* The PC on this path only: pc_save stays what the fall-through path has. */
+            gen_pc_plus_diff(s, cpu_R[15], curr_insn_len(s));
+            tcg_gen_exit_tb(NULL, 0);
+            gen_set_label(stay);
+            s->base.is_jmp = DISAS_TOO_MANY;
+        } else {
+            gen_lookup_tb(s);
+        }
     }
-    gen_lookup_tb(s);
     return 0;
 }
 
@@ -1739,6 +1797,15 @@ static void store_pc_exc_ret(DisasContext *s, TCGv_i32 pc)
     tcg_gen_mov_i32(cpu_R[15], pc);
 }
 
+static void gen_cpsr_write_eret_selected(TCGv_i32 cpsr)
+{
+    if (arm_alignment_path_mode() & 2) {
+        gen_helper_cpsr_write_eret_path(tcg_env, cpsr);
+    } else {
+        gen_helper_cpsr_write_eret(tcg_env, cpsr);
+    }
+}
+
 /* Generate a v6 exception return.  Marks both values as dead.  */
 static void gen_rfe(DisasContext *s, TCGv_i32 pc, TCGv_i32 cpsr)
 {
@@ -1748,7 +1815,7 @@ static void gen_rfe(DisasContext *s, TCGv_i32 pc, TCGv_i32 cpsr)
      * be called after storing the new PC.
      */
     translator_io_start(&s->base);
-    gen_helper_cpsr_write_eret(tcg_env, cpsr);
+    gen_cpsr_write_eret_selected(cpsr);
     /* Must exit loop to check un-masked IRQs */
     s->base.is_jmp = DISAS_EXIT;
 }
@@ -1773,6 +1840,28 @@ static bool aa32_cpreg_encoding_in_impdef_space(uint8_t crn, uint8_t crm)
     return false;
 }
 
+static bool arm_cp_hflags_skip(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_CP_HFLAGS_SKIP");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
+static bool arm_cp_chain(void)
+{
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_CP_CHAIN");
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
+    }
+    return on;
+}
+
 static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
                            int opc1, int crn, int crm, int opc2,
                            bool isread, int rt, int rt2)
@@ -1781,6 +1870,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
     const ARMCPRegInfo *ri = get_arm_cp_reginfo(s->cp_regs, key);
     TCGv_ptr tcg_ri = NULL;
     bool need_exit_tb = false;
+    bool chain = false;
     uint32_t syndrome;
 
     /*
@@ -1900,10 +1990,17 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
         gen_set_condexec(s);
         gen_update_pc(s, 0);
         tcg_ri = tcg_temp_new_ptr();
-        gen_helper_access_check_cp_reg(tcg_ri, tcg_env,
-                                       tcg_constant_i32(key),
-                                       tcg_constant_i32(syndrome),
-                                       tcg_constant_i32(isread));
+        if (cp_reginfo_const_ok(&s->base)) {
+            gen_helper_access_check_cp_reg_ri(tcg_ri, tcg_env,
+                                              tcg_constant_ptr(ri),
+                                              tcg_constant_i32(syndrome),
+                                              tcg_constant_i32(isread));
+        } else {
+            gen_helper_access_check_cp_reg(tcg_ri, tcg_env,
+                                           tcg_constant_i32(key),
+                                           tcg_constant_i32(syndrome),
+                                           tcg_constant_i32(isread));
+        }
     } else if (ri->type & ARM_CP_RAISES_EXC) {
         /*
          * The readfn or writefn might raise an exception;
@@ -1945,7 +2042,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
                 tmp64 = tcg_constant_i64(ri->resetvalue);
             } else if (ri->readfn) {
                 if (!tcg_ri) {
-                    tcg_ri = gen_lookup_cp_reg(key);
+                    tcg_ri = gen_cp_reginfo(&s->base, ri, key);
                 }
                 tmp64 = tcg_temp_new_i64();
                 gen_helper_get_cp_reg64(tmp64, tcg_env, tcg_ri);
@@ -1965,7 +2062,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
                 tmp = tcg_constant_i32(ri->resetvalue);
             } else if (ri->readfn) {
                 if (!tcg_ri) {
-                    tcg_ri = gen_lookup_cp_reg(key);
+                    tcg_ri = gen_cp_reginfo(&s->base, ri, key);
                 }
                 tmp = tcg_temp_new_i32();
                 gen_helper_get_cp_reg(tmp, tcg_env, tcg_ri);
@@ -1996,7 +2093,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
             tcg_gen_concat_i32_i64(tmp64, tmplo, tmphi);
             if (ri->writefn) {
                 if (!tcg_ri) {
-                    tcg_ri = gen_lookup_cp_reg(key);
+                    tcg_ri = gen_cp_reginfo(&s->base, ri, key);
                 }
                 gen_helper_set_cp_reg64(tcg_env, tcg_ri, tmp64);
             } else {
@@ -2006,7 +2103,7 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
             TCGv_i32 tmp = load_reg(s, rt);
             if (ri->writefn) {
                 if (!tcg_ri) {
-                    tcg_ri = gen_lookup_cp_reg(key);
+                    tcg_ri = gen_cp_reginfo(&s->base, ri, key);
                 }
                 gen_helper_set_cp_reg(tcg_env, tcg_ri, tmp);
             } else {
@@ -2018,9 +2115,25 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
     if (!isread && !(ri->type & ARM_CP_SUPPRESS_TB_END)) {
         /*
          * A write to any coprocessor register that ends a TB
-         * must rebuild the hflags for the next TB.
+         * must rebuild the hflags for the next TB -- except the CP15
+         * groups no A32 hflag reads: translation table bases and control
+         * (c2), cache and address-translation operations (c7), TLB
+         * maintenance (c8), process and thread IDs (c13). The iOS kernel
+         * writes those on every context switch and pmap change, and the
+         * rebuild was ~1% of the Poco's vCPU. LT_CP_HFLAGS_SKIP=off for A/B.
          */
-        gen_rebuild_hflags(s, ri->type & ARM_CP_NEWEL);
+        if (cpnum == 15 && !is64 && !(ri->type & ARM_CP_NEWEL) &&
+            (crn == 2 || crn == 7 || crn == 8 || crn == 13) && arm_cp_hflags_skip()) {
+            /*
+             * Nor do they unmask an interrupt, so the TB can chain to the next instruction
+             * like an ISB's, instead of a main-loop return per TTBR and CONTEXTIDR write
+             * (~6 per iOS syscall); not a conditional one, which has a goto_tb slot per
+             * path. LT_CP_CHAIN=off returns as before.
+             */
+            chain = !(ri->type & ARM_CP_IO) && !s->condjmp && arm_cp_chain();
+        } else {
+            gen_rebuild_hflags(s, ri->type & ARM_CP_NEWEL);
+        }
         /*
          * We default to ending the TB on a coprocessor register write,
          * but allow this to be suppressed by the register definition
@@ -2029,7 +2142,11 @@ static void do_coproc_insn(DisasContext *s, int cpnum, int is64,
         need_exit_tb = true;
     }
     if (need_exit_tb) {
-        gen_lookup_tb(s);
+        if (chain) {
+            s->base.is_jmp = DISAS_TOO_MANY;
+        } else {
+            gen_lookup_tb(s);
+        }
     }
 }
 
@@ -2299,7 +2416,10 @@ static void gen_srs(DisasContext *s,
         tcg_gen_addi_i32(addr, addr, offset);
         gen_helper_set_r13_banked(tcg_env, tcg_constant_i32(mode), addr);
     }
-    s->base.is_jmp = DISAS_UPDATE_EXIT;
+    /* Two stores and a banked SP: nothing to leave the TB for (iOS's syscall entry; LT_PSR_CHAIN). */
+    if (!arm_psr_chain()) {
+        s->base.is_jmp = DISAS_UPDATE_EXIT;
+    }
 }
 
 /* Skip this instruction if the ARM condition is false */
@@ -3573,6 +3693,7 @@ static bool trans_BLX_r(DisasContext *s, arg_BLX_r *a)
     }
     tmp = load_reg(s, a->rm);
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | s->thumb);
+    gen_ras_push(s);
     gen_bx(s, tmp);
     return true;
 }
@@ -5179,30 +5300,59 @@ static void op_addr_block_post(DisasContext *s, arg_ldst_block *a,
 }
 
 /*
- * How many of the n - j words left of an LDM or STM to move in one access:
- * four as one 128-bit access, two as one 64-bit, so the fast path checks
- * the TLB once for them. MO_SPLIT_UL has the slow path move them as words,
- * as one access each would; that is the whole of the architected behavior
- * but for an LDM that faults part way leaving more of its registers as
- * they were, which the architecture leaves UNKNOWN (the base register and
- * the PC are written after every load, as before). Each word stays
- * single-copy atomic: the halves of an access are, and on a host with
- * FEAT_LSE2 (TCG's aarch64 backend) an access at a 4-aligned address is
- * atomic or splits at a 16-byte boundary. Little-endian data only, so that
- * the word at the lower address is the low half.
+ * LT: an LDM/STM (push, pop) moves its words in pairs, one 64-bit access each (each word
+ * single-copy atomic, MO_ATOM_IFALIGN_PAIR, 4-alignment checked): half the softmmu TLB
+ * checks, which were ~9 host instructions a word. Not for BE32 (SCTLR.B), whose 64-bit
+ * accesses swap differently. LT_LDM_PAIR=off for A/B.
  */
-static int ldst_block_words(DisasContext *s, int n, int j)
+static bool ldm_pair(DisasContext *s, int n)
 {
-    if (s->be_data != MO_LE || s->sctlr_b || arm_dc_feature(s, ARM_FEATURE_M)) {
-        return 1;
+    static int on = -1;
+
+    if (on < 0) {
+        const char *v = getenv("LT_LDM_PAIR");
+
+        on = !(v && (!strcmp(v, "off") || !strcmp(v, "0")));
     }
-    return n - j >= 4 ? 4 : n - j >= 2 ? 2 : 1;
+    return on && n > 1 && !s->sctlr_b;
 }
 
-static MemOp ldst_block_memop(int words)
+/*
+ * A misaligned LDM/STM faults on an ARM1176 whatever the guest's SCTLR.A says, and iOS's handler
+ * then performs the transfer itself, one word at a time. A CoreAudio converter whose output lands
+ * at 2 mod 4 pays ~420 us a call against 25 us aligned, and those calls run in front of most of
+ * the >30 ms gaps in Jetpack on the Poco (PERFORMANCE.md, "Hitches in Jetpack's title").
+ *
+ * With SCTLR.A clear -- iOS 3 through 6 never set it -- the bytes a split access produces are the
+ * bytes that handler writes, so let the softmmu do the transfer and keep the check for the pages
+ * that need it (MO_ALIGN_TLB_ONLY: Device memory). Android runs it by default; IT_LDM_UNALIGNED=off
+ * restores the fault for an A/B run, and a guest with SCTLR.A set keeps the fault either way.
+ */
+static int ldm_unaligned_enabled(void)
 {
-    return (words == 4 ? MO_128 : MO_64) | MO_ALIGN_4 | MO_ATOM_IFALIGN_PAIR |
-           MO_SPLIT_UL | MO_LE;
+    static int enabled = -1;
+
+    if (enabled < 0) {
+        const char *v = getenv("IT_LDM_UNALIGNED");
+#ifdef __ANDROID__
+        const bool fallback = true;
+#else
+        const bool fallback = false;
+#endif
+        enabled = v ? !(!strcmp(v, "off") || !strcmp(v, "0")) : fallback;
+    }
+    return enabled;
+}
+
+static MemOp ldm_align(DisasContext *s)
+{
+    return ldm_unaligned_enabled() && !s->align_mem ? MO_ALIGN_TLB_ONLY : MO_ALIGN;
+}
+
+static MemOp ldm_pair_align(DisasContext *s)
+{
+    return ldm_unaligned_enabled() && !s->align_mem
+           ? (MO_ALIGN_4 | MO_ALIGN_TLB_ONLY) : MO_ALIGN_4;
 }
 
 static bool op_stm(DisasContext *s, arg_ldst_block *a)
@@ -5239,52 +5389,56 @@ static bool op_stm(DisasContext *s, arg_ldst_block *a)
     addr = op_addr_block_pre(s, a, n);
     mem_idx = get_mem_index(s);
 
-    for (i = j = 0; i < 16; i++) {
-        TCGv_i32 w[4];
-        int k, words;
+    if (ldm_pair(s, n)) {
+        TCGv_i32 val[16];
 
+        for (i = j = 0; i < 16; i++) {
+            if (list & (1 << i)) {
+                if (user && i != 15) {
+                    val[j] = tcg_temp_new_i32();
+                    gen_helper_get_user_reg(val[j], tcg_env, tcg_constant_i32(i));
+                } else {
+                    val[j] = load_reg(s, i);
+                }
+                j++;
+            }
+        }
+        for (j = 0; j < n; j += 2) {
+            TCGv_i32 a1 = tcg_temp_new_i32();
+
+            tcg_gen_addi_i32(a1, addr, j * 4);
+            if (j + 1 < n) {
+                MemOp opc = MO_64 | ldm_pair_align(s) | MO_ATOM_IFALIGN_PAIR | s->be_data;
+                TCGv_i64 t64 = tcg_temp_new_i64();
+
+                if (s->be_data == MO_BE) {
+                    tcg_gen_concat_i32_i64(t64, val[j + 1], val[j]);
+                } else {
+                    tcg_gen_concat_i32_i64(t64, val[j], val[j + 1]);
+                }
+                tcg_gen_qemu_st_i64(t64, gen_aa32_addr(s, a1, opc), mem_idx, opc);
+            } else {
+                gen_aa32_st_i32(s, val[j], a1, mem_idx, MO_UL | MO_ALIGN);
+            }
+        }
+        tcg_gen_addi_i32(addr, addr, (n - 1) * 4);
+    } else for (i = j = 0; i < 16; i++) {
         if (!(list & (1 << i))) {
             continue;
         }
 
-        words = user ? 1 : ldst_block_words(s, n, j);
-        for (k = 0; k < words; i++) {
-            if (!(list & (1 << i))) {
-                continue;
-            }
-            if (user && i != 15) {
-                tmp = tcg_temp_new_i32();
-                gen_helper_get_user_reg(tmp, tcg_env, tcg_constant_i32(i));
-            } else {
-                tmp = load_reg(s, i);
-            }
-            w[k++] = tmp;
-        }
-        i--;
-
-        if (words == 1) {
-            gen_aa32_st_i32(s, w[0], addr, mem_idx, MO_UL | MO_ALIGN);
+        if (user && i != 15) {
+            tmp = tcg_temp_new_i32();
+            gen_helper_get_user_reg(tmp, tcg_env, tcg_constant_i32(i));
         } else {
-            MemOp opc = ldst_block_memop(words);
-            TCGv taddr = gen_aa32_addr(s, addr, opc);
-            TCGv_i64 lo = tcg_temp_new_i64();
-
-            tcg_gen_concat_i32_i64(lo, w[0], w[1]);
-            if (words == 2) {
-                tcg_gen_qemu_st_i64(lo, taddr, mem_idx, opc);
-            } else {
-                TCGv_i64 hi = tcg_temp_new_i64();
-                TCGv_i128 t128 = tcg_temp_new_i128();
-
-                tcg_gen_concat_i32_i64(hi, w[2], w[3]);
-                tcg_gen_concat_i64_i128(t128, lo, hi);
-                tcg_gen_qemu_st_i128(t128, taddr, mem_idx, opc);
-            }
+            tmp = load_reg(s, i);
         }
+        gen_aa32_st_i32(s, tmp, addr, mem_idx, MO_UL | ldm_align(s));
 
-        /* Leave addr at the last word, as op_addr_block_post expects.  */
-        j += words;
-        tcg_gen_addi_i32(addr, addr, j != n ? 4 * words : 4 * (words - 1));
+        /* No need to add after the last transfer.  */
+        if (++j != n) {
+            tcg_gen_addi_i32(addr, addr, 4);
+        }
     }
 
     op_addr_block_post(s, a, addr, n);
@@ -5355,59 +5509,59 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
     loaded_base = false;
     loaded_var = NULL;
 
-    for (i = j = 0; i < 16; i++) {
-        TCGv_i32 w[4];
-        int k, words;
+    TCGv_i32 pair_hi = NULL;
+    bool pair = ldm_pair(s, n);
 
+    for (i = j = 0; i < 16; i++) {
         if (!(list & (1 << i))) {
             continue;
         }
 
-        words = user || exc_return ? 1 : ldst_block_words(s, n, j);
-        for (k = 0; k < words; k++) {
-            w[k] = tcg_temp_new_i32();
-        }
-        if (words == 1) {
-            gen_aa32_ld_i32(s, w[0], addr, mem_idx, MO_UL | MO_ALIGN);
+        if (pair && pair_hi) {
+            tmp = pair_hi;                  /* the second word of the last pair */
+            pair_hi = NULL;
+        } else if (pair && j + 1 < n) {
+            MemOp opc = MO_64 | ldm_pair_align(s) | MO_ATOM_IFALIGN_PAIR | s->be_data;
+            TCGv_i64 t64 = tcg_temp_new_i64();
+            TCGv_i32 a1 = tcg_temp_new_i32();
+
+            tmp = tcg_temp_new_i32();
+            pair_hi = tcg_temp_new_i32();
+            tcg_gen_addi_i32(a1, addr, j * 4);
+            tcg_gen_qemu_ld_i64(t64, gen_aa32_addr(s, a1, opc), mem_idx, opc);
+            if (s->be_data == MO_BE) {
+                tcg_gen_extr_i64_i32(pair_hi, tmp, t64);
+            } else {
+                tcg_gen_extr_i64_i32(tmp, pair_hi, t64);
+            }
+        } else if (pair) {
+            TCGv_i32 a1 = tcg_temp_new_i32();
+
+            tmp = tcg_temp_new_i32();
+            tcg_gen_addi_i32(a1, addr, j * 4);
+            gen_aa32_ld_i32(s, tmp, a1, mem_idx, MO_UL | ldm_align(s));
         } else {
-            MemOp opc = ldst_block_memop(words);
-            TCGv taddr = gen_aa32_addr(s, addr, opc);
-            TCGv_i64 lo = tcg_temp_new_i64();
-
-            if (words == 2) {
-                tcg_gen_qemu_ld_i64(lo, taddr, mem_idx, opc);
-            } else {
-                TCGv_i64 hi = tcg_temp_new_i64();
-                TCGv_i128 t128 = tcg_temp_new_i128();
-
-                tcg_gen_qemu_ld_i128(t128, taddr, mem_idx, opc);
-                tcg_gen_extr_i128_i64(lo, hi, t128);
-                tcg_gen_extr_i64_i32(w[2], w[3], hi);
-            }
-            tcg_gen_extr_i64_i32(w[0], w[1], lo);
+            tmp = tcg_temp_new_i32();
+            gen_aa32_ld_i32(s, tmp, addr, mem_idx, MO_UL | ldm_align(s));
+        }
+        if (user) {
+            gen_helper_set_user_reg(tcg_env, tcg_constant_i32(i), tmp);
+        } else if (i == a->rn) {
+            loaded_var = tmp;
+            loaded_base = true;
+        } else if (i == 15 && exc_return) {
+            store_pc_exc_ret(s, tmp);
+        } else {
+            store_reg_from_load(s, i, tmp);
         }
 
-        for (k = 0; k < words; i++) {
-            if (!(list & (1 << i))) {
-                continue;
-            }
-            tmp = w[k++];
-            if (user) {
-                gen_helper_set_user_reg(tcg_env, tcg_constant_i32(i), tmp);
-            } else if (i == a->rn) {
-                loaded_var = tmp;
-                loaded_base = true;
-            } else if (i == 15 && exc_return) {
-                store_pc_exc_ret(s, tmp);
-            } else {
-                store_reg_from_load(s, i, tmp);
-            }
+        /* No need to add after the last transfer.  */
+        if (++j != n && !pair) {
+            tcg_gen_addi_i32(addr, addr, 4);
         }
-        i--;
-
-        /* Leave addr at the last word, as op_addr_block_post expects.  */
-        j += words;
-        tcg_gen_addi_i32(addr, addr, j != n ? 4 * words : 4 * (words - 1));
+    }
+    if (pair) {
+        tcg_gen_addi_i32(addr, addr, (n - 1) * 4);
     }
 
     op_addr_block_post(s, a, addr, n);
@@ -5421,7 +5575,7 @@ static bool do_ldm(DisasContext *s, arg_ldst_block *a)
         /* Restore CPSR from SPSR.  */
         tmp = load_cpu_field(spsr);
         translator_io_start(&s->base);
-        gen_helper_cpsr_write_eret(tcg_env, tmp);
+        gen_cpsr_write_eret_selected(tmp);
         /* Must exit loop to check un-masked IRQs */
         s->base.is_jmp = DISAS_EXIT;
     }
@@ -5526,6 +5680,7 @@ static bool trans_B_cond_thumb(DisasContext *s, arg_ci *a)
 static bool trans_BL(DisasContext *s, arg_i *a)
 {
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | s->thumb);
+    gen_ras_push(s);
     gen_jmp(s, jmp_diff(s, a->imm));
     return true;
 }
@@ -5546,6 +5701,7 @@ static bool trans_BLX_i(DisasContext *s, arg_BLX_i *a)
     }
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | s->thumb);
     store_cpu_field_constant(!s->thumb, thumb);
+    gen_ras_push(s);
     /* This jump is computed from an aligned PC: subtract off the low bits. */
     gen_jmp(s, jmp_diff(s, a->imm - (s->pc_curr & 3)));
     return true;
@@ -5565,6 +5721,7 @@ static bool trans_BL_suffix(DisasContext *s, arg_BL_suffix *a)
     assert(!arm_dc_feature(s, ARM_FEATURE_THUMB2));
     tcg_gen_addi_i32(tmp, cpu_R[14], (a->imm << 1) | 1);
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | 1);
+    gen_ras_push(s);
     gen_bx(s, tmp);
     return true;
 }
@@ -5581,6 +5738,7 @@ static bool trans_BLX_suffix(DisasContext *s, arg_BLX_suffix *a)
     tcg_gen_addi_i32(tmp, cpu_R[14], a->imm << 1);
     tcg_gen_andi_i32(tmp, tmp, 0xfffffffc);
     gen_pc_plus_diff(s, cpu_R[14], curr_insn_len(s) | 1);
+    gen_ras_push(s);
     gen_bx(s, tmp);
     return true;
 }
@@ -6041,10 +6199,10 @@ static bool trans_CPS(DisasContext *s, arg_CPS *a)
         mask |= CPSR_M;
         val |= a->mode;
     }
-    if (mask && !(mask & ~(CPSR_A | CPSR_I | CPSR_F)) && val == mask) {
+    if (mask && !(mask & ~(CPSR_A | CPSR_I | CPSR_F)) && val == mask && arm_psr_fast()) {
         /*
-         * cpsid: masking makes no interrupt pending and changes nothing the block was
-         * translated for, so keep translating instead of ending the block.
+         * cpsid: masking makes no interrupt pending and changes nothing the TB was translated
+         * for, so keep translating instead of ending the TB (iOS's kernel does it at every lock).
          */
         gen_set_cpsr(tcg_constant_i32(val), mask);
         return true;
@@ -6630,6 +6788,10 @@ static void arm_tr_tb_start(DisasContextBase *dcbase, CPUState *cpu)
     }
 }
 
+extern uint32_t lt_pc_hook_pcs[16];
+extern int lt_pc_hook_n;
+void lt_pc_hook_init(void);
+
 static void arm_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
 {
     DisasContext *dc = container_of(dcbase, DisasContext, base);
@@ -6651,6 +6813,16 @@ static void arm_tr_insn_start(DisasContextBase *dcbase, CPUState *cpu)
     }
     tcg_gen_insn_start(pc_arg, condexec_bits, 0);
     dc->insn_start_updated = false;
+    if (unlikely(lt_pc_hook_n)) {
+        if (lt_pc_hook_n < 0) {
+            lt_pc_hook_init();
+        }
+        for (int i = 0; i < lt_pc_hook_n; i++) {
+            if (lt_pc_hook_pcs[i] == (uint32_t)dc->base.pc_next) {
+                gen_helper_lt_pc_hook(tcg_env, tcg_constant_i32(dc->base.pc_next));
+            }
+        }
+    }
 }
 
 static bool arm_check_kernelpage(DisasContext *dc)
@@ -6739,6 +6911,9 @@ static void arm_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     dc->insn = insn;
     dc->base.pc_next = pc + 4;
 
+    if (unlikely(arm_guest_pc_selected(pc))) {
+        gen_helper_guest_pc_trace(tcg_env, tcg_constant_i32(pc));
+    }
     if (unlikely(dc->idle_loop_pc && pc == dc->idle_loop_pc)) {
         gen_update_pc(dc, 0);       /* a halt resumes on this branch */
         gen_helper_idle_loop(tcg_env);
@@ -6828,6 +7003,9 @@ static void thumb_tr_translate_insn(DisasContextBase *dcbase, CPUState *cpu)
     dc->base.pc_next = pc;
     dc->insn = insn;
 
+    if (unlikely(arm_guest_pc_selected(dc->pc_curr | 1))) {
+        gen_helper_guest_pc_trace(tcg_env, tcg_constant_i32(dc->pc_curr | 1));
+    }
     if (dc->pstate_il) {
         /*
          * Illegal execution state. This has priority over BTI
@@ -6996,7 +7174,7 @@ static void arm_tr_tb_stop(DisasContextBase *dcbase, CPUState *cpu)
             gen_goto_ptr();
             break;
         case DISAS_JUMP:
-            gen_goto_ptr_probe(dc);
+            gen_goto_ptr_indirect(dc);
             break;
         case DISAS_UPDATE_EXIT:
             gen_update_pc(dc, curr_insn_len(dc));
@@ -7076,6 +7254,11 @@ void arm_translate_code(CPUState *cpu, TranslationBlock *tb,
     DisasContext dc = { };
     const TranslatorOps *ops = &arm_translator_ops;
     CPUARMTBFlags tb_flags = arm_tbflags_from_tb(tb);
+    ARMTcgIRCacheKey cache_key;
+
+    if (arm_tcg_ir_cache_load(cpu, tb, *max_insns, pc, host_pc, &cache_key)) {
+        return;
+    }
 
     if (EX_TBFLAG_AM32(tb_flags, THUMB)) {
         ops = &thumb_translator_ops;
@@ -7087,4 +7270,5 @@ void arm_translate_code(CPUState *cpu, TranslationBlock *tb,
 #endif
 
     translator_loop(cpu, tb, max_insns, pc, host_pc, ops, &dc.base);
+    arm_tcg_ir_cache_save(cpu, tb, pc, host_pc, &cache_key);
 }
