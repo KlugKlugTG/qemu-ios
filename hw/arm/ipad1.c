@@ -1546,7 +1546,7 @@ static void ipad1_init(MachineState *machine)
             /* Wi-Fi is the iPad's network: with no backend given, NAT it, off
              * the Mac's LAN (lan=off) so macOS never asks for Local Network. */
             QemuOpts *o = qemu_opts_parse_noisily(qemu_find_opts("netdev"),
-                                                  "type=user,id=wifi0,lan=off", false);
+                                                  "type=user,id=wifi0,lan=off,ipv6=off", false);
             Error *err = NULL;
             if (o) {
                 netdev_add(o, &err);

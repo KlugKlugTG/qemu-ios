@@ -1,13 +1,20 @@
 /*
- * macOS: answer the guest's DNS through the system resolver (mDNSResponder).
+ * Answer the guest's DNS on a loopback resolver instead of the host's nameserver.
  *
- * With lan=off, slirp would otherwise send the guest's queries as raw UDP to
- * the Mac's DNS server -- usually the LAN router -- and that one datagram is a
- * Local Network access: macOS asks the user for permission although the guest
- * is kept off the LAN. A resolver on 127.0.0.1 (slirp_set_dns_forward) takes
- * the queries instead and asks DNSServiceQueryRecord, which is exempt. Names
- * only multicast DNS answers (.local, link-local reverse zones) are refused:
- * resolving them is itself a local-network operation.
+ * macOS: with lan=off, slirp would otherwise send the guest's queries as raw UDP
+ * to the Mac's DNS server -- usually the LAN router -- and that one datagram is a
+ * Local Network access: macOS asks the user for permission although the guest is
+ * kept off the LAN. A resolver on 127.0.0.1 (slirp_set_dns_forward) takes the
+ * queries instead and asks DNSServiceQueryRecord, which is exempt.
+ *
+ * Android: there is nothing else to ask. slirp's own resolver reads the host's
+ * nameserver from /etc/resolv.conf, and Android has no such file: a guest on a
+ * user netdev got DHCP and TCP but every name lookup failed, which a browser
+ * reports as "no connection". This loopback socket answers those queries through
+ * getaddrinfo, whose resolver (netd) works inside an app.
+ *
+ * Names only multicast DNS answers (.local, link-local reverse zones) are
+ * refused: there is no multicast responder behind this socket.
  *
  * This work is licensed under the terms of the GNU GPL, version 2 or later.
  */
@@ -18,8 +25,11 @@
 #include "qemu/thread.h"
 #include "net/slirp.h"
 #include "qemu/sockets.h"
+#include <netdb.h>
+#ifdef CONFIG_DARWIN
 #include <dns_sd.h>
 #include <poll.h>
+#endif
 
 #define DNS_MAX 512                 /* a UDP answer without EDNS */
 #define DNS_TIMEOUT_MS 5000
@@ -32,7 +42,7 @@ typedef struct DNSJob {
     struct sockaddr_in from;
     uint8_t buf[DNS_MAX];
     size_t len;         /* the reply so far: header, question, answers */
-    uint16_t qtype, answers;
+    uint16_t qtype, qclass, answers;
     int rcode;
     bool done, truncated;
 } DNSJob;
@@ -55,6 +65,7 @@ static bool mdns_only(const char *name)
     return false;
 }
 
+#ifdef CONFIG_DARWIN
 static void DNSSD_API dns_record(DNSServiceRef ref, DNSServiceFlags flags,
                                  uint32_t ifindex, DNSServiceErrorType err,
                                  const char *fullname, uint16_t rrtype,
@@ -92,6 +103,72 @@ static void DNSSD_API dns_record(DNSServiceRef ref, DNSServiceFlags flags,
         j->done = true;
     }
 }
+#endif /* CONFIG_DARWIN */
+
+#ifdef __ANDROID__
+/* One answer record. Every record's name is a pointer to the question's (0xc00c): a
+ * CNAME chain the resolver followed reads as the final addresses. */
+static void dns_add_answer(DNSJob *j, uint16_t type, const void *rdata, size_t rdlen)
+{
+    if (j->len + 12 + rdlen > DNS_MAX) {
+        j->truncated = true;
+        return;
+    }
+    uint8_t *p = j->buf + j->len;
+    p[0] = 0xc0;
+    p[1] = 12;
+    stw_be_p(p + 2, type);
+    stw_be_p(p + 4, j->qclass ? j->qclass : 1);   /* the class the question asked */
+    stl_be_p(p + 6, 300);
+    stw_be_p(p + 10, rdlen);
+    memcpy(p + 12, rdata, rdlen);
+    j->len += 12 + rdlen;
+    j->answers++;
+}
+
+/* The Android answer: getaddrinfo in netd, which is what every app on the phone uses.
+ * Runs on the job's own thread, so a slow lookup delays no other query. */
+static void dns_resolve_android(DNSJob *j, const char *name, uint16_t qtype)
+{
+    /* getaddrinfo supplies addresses, not fabricated MX/TXT answers. */
+    if (j->qclass != 1 || (qtype != 1 && qtype != 28 && qtype != 255)) {
+        j->rcode = 0;
+        return;
+    }
+    struct addrinfo hints = {
+        .ai_family = qtype == 28 ? AF_INET6 : qtype == 1 ? AF_INET : AF_UNSPEC,
+        .ai_socktype = SOCK_STREAM,
+    }, *res = NULL;
+    int rc = getaddrinfo(name, NULL, &hints, &res);
+
+    if (rc != 0) {
+        /* A name that exists but has no record of this type (a phone with no IPv6, say) is an
+         * empty answer, not a failure: asking again for any family tells the two apart. Only a
+         * resolver that failed is a SERVFAIL. EAI_NODATA is not in every libc's headers. */
+        struct addrinfo any = { .ai_socktype = SOCK_STREAM }, *found = NULL;
+        bool exists = getaddrinfo(name, NULL, &any, &found) == 0;
+
+        if (found) {
+            freeaddrinfo(found);
+        }
+        bool missing = rc == EAI_NONAME;
+#ifdef EAI_NODATA
+        missing = missing || rc == EAI_NODATA;
+#endif
+        j->rcode = exists ? 0 : missing ? 3 : 2;
+        return;
+    }
+    j->rcode = 0;
+    for (const struct addrinfo *a = res; a; a = a->ai_next) {
+        if (a->ai_family == AF_INET6) {
+            dns_add_answer(j, 28, &((const struct sockaddr_in6 *)a->ai_addr)->sin6_addr, 16);
+        } else if (a->ai_family == AF_INET) {
+            dns_add_answer(j, 1, &((const struct sockaddr_in *)a->ai_addr)->sin_addr, 4);
+        }
+    }
+    freeaddrinfo(res);
+}
+#endif
 
 static void *dns_answer(void *opaque)
 {
@@ -99,7 +176,6 @@ static void *dns_answer(void *opaque)
     uint8_t *b = j->buf;
     char name[256];
     size_t at = 12, n = 0;
-    uint16_t qclass = 0;
 
     j->rcode = 1;                                       /* FORMERR */
     if ((b[2] & 0x78) != 0) {
@@ -116,7 +192,7 @@ static void *dns_answer(void *opaque)
         if (at + 5 <= j->len && !b[at]) {
             name[n ? n - 1 : 0] = '\0';
             j->qtype = lduw_be_p(b + at + 1);
-            qclass = lduw_be_p(b + at + 3);
+            j->qclass = lduw_be_p(b + at + 3);
             at += 5;
             j->rcode = 2;                               /* SERVFAIL until answered */
         } else {
@@ -130,10 +206,13 @@ static void *dns_answer(void *opaque)
     if (at && mdns_only(name)) {
         j->rcode = 3;
     } else if (at) {
+#ifdef __ANDROID__
+        dns_resolve_android(j, name, j->qtype);
+#else
         DNSServiceRef ref;
         if (DNSServiceQueryRecord(&ref, kDNSServiceFlagsReturnIntermediates,
                                   kDNSServiceInterfaceIndexAny, name, j->qtype,
-                                  qclass, dns_record, j) == kDNSServiceErr_NoError) {
+                                  j->qclass, dns_record, j) == kDNSServiceErr_NoError) {
             struct pollfd pfd = { .fd = DNSServiceRefSockFD(ref), .events = POLLIN };
             int64_t deadline = g_get_monotonic_time() + DNS_TIMEOUT_MS * 1000;
             j->rcode = 0;
@@ -149,6 +228,7 @@ static void *dns_answer(void *opaque)
             }
             DNSServiceRefDeallocate(ref);
         }
+#endif /* __ANDROID__ */
     }
 
     b[2] = 0x80 | (b[2] & 0x79) | (j->truncated ? 0x02 : 0);   /* QR, RD */
@@ -192,7 +272,10 @@ bool net_slirp_dns_forward(struct sockaddr_in *addr)
         int fd = qemu_socket(AF_INET, SOCK_DGRAM, 0);
         socklen_t l = sizeof(bound);
         bound = (struct sockaddr_in) {
-            .sin_len = sizeof(bound), .sin_family = AF_INET,
+#ifdef __APPLE__
+            .sin_len = sizeof(bound),
+#endif
+            .sin_family = AF_INET,
             .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
         };
         if (fd < 0 || bind(fd, (struct sockaddr *)&bound, sizeof(bound)) ||
