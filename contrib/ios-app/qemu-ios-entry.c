@@ -23,6 +23,15 @@
 #include "tcg/ir-cache-lifecycle.h"
 #endif
 
+/* This tree registers every thread it runs through the main loop; the
+ * portable entry only asks before it unregisters one it created itself. */
+bool rcu_thread_is_registered(void);
+
+bool rcu_thread_is_registered(void)
+{
+    return true;
+}
+
 #ifdef CONFIG_TCG
 /* The A6 tree has no experimental IR cache; the portable entry still calls it. */
 void arm_tcg_ir_cache_finish(void)
