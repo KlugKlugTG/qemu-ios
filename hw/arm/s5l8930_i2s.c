@@ -38,6 +38,7 @@
 #include "qemu/osdep.h"
 #include <math.h>
 #include "qemu/log.h"
+#include "qemu/host-utils.h"
 #include "qemu/module.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
@@ -106,7 +107,7 @@ struct S5L8930I2SState {
      * format (0x78057805); the A4's starts with TXCOM = 6. */
     bool ctrl_run;
     bool host_mic;                  /* property: the frontend's microphone is this port's input */
-    bool mca;                       /* property: the A6's MCA register layout (accepted; the A6 codec path is not ported) */
+    bool mca;                       /* property: the A6 MCA register layout (AppleAE2MCA FIFO/command block) */
     bool audio_in;                  /* property: this port's capture side reaches the host */
     uint32_t frame_rate;            /* property: the A6 machine's fixed frame rate */
     uint8_t port;                   /* property: i2s<port>, selects its NCO */
@@ -135,7 +136,19 @@ struct S5L8930I2SState {
 
 /* Each port's block, for the CDMA's pacing. ponytail: one machine per process;
  * a link property from the CDMA if that ever changes. */
-static S5L8930I2SState *i2s_ports[3];
+static S5L8930I2SState *i2s_ports[8];
+
+/* Original AppleAE2MCA programs +8 with TX/RX padding and +24/+38
+ * with the active channel masks (11A465, 80bd5ace/5c7c/5d00). */
+static unsigned i2s_channels(S5L8930I2SState *s, bool input)
+{
+    return s->mca ? MAX(1, ctpop32(s->regs[(input ? 0x38 : 0x24) >> 2])) : 2;
+}
+
+static unsigned i2s_sample_bytes(S5L8930I2SState *s, bool input)
+{
+    return s->mca && ((s->regs[8 >> 2] >> (input ? 8 : 0)) & 0xff) < 16 ? 4 : 2;
+}
 
 /*
  * The S5L8920's frame rate: the audio complex's NCO makes MCLK from its
@@ -329,6 +342,9 @@ static void i2s_out_cb(void *opaque, int free_bytes)
 
 static bool i2s_tx_running(S5L8930I2SState *s)
 {
+    if (s->mca) {
+        return s->regs[0x18 >> 2] & 1;
+    }
     return s->ctrl_run ? s->regs[I2S_CTRL >> 2] & 1 : s->regs[I2S_TXCOM >> 2] == I2S_CMD_RUN;
 }
 
@@ -387,6 +403,12 @@ static uint64_t i2s_read(void *opaque, hwaddr offset, unsigned size)
 {
     S5L8930I2SState *s = opaque;
 
+    if (s->mca) {
+        if (offset == 0x3c) {
+            return s->audio_in && (s->regs[0x2c >> 2] & 1) ? i2s_rx_read(s, size) : 0;
+        }
+        return offset == 0x28 ? 0 : s->regs[offset >> 2];
+    }
     if (offset == I2S_CTRL) {
         /* Bit 1: TX drained. The stop path (7B500 c086f5ae) writes 0x300 to
          * +0x810 and spins on it; our FIFO never holds anything. The power-down
@@ -422,6 +444,11 @@ static void i2s_lrclk_update(void *opaque, ClockEvent event)
  * the one narrow/wide slot the Android perf branch's CDMA pacing knows. */
 unsigned s5l8930_i2s_frame_bytes(unsigned port, bool input)
 {
+    S5L8930I2SState *s = port < ARRAY_SIZE(i2s_ports) ? i2s_ports[port] : NULL;
+
+    if (s && s->mca) {
+        return i2s_channels(s, input) * i2s_sample_bytes(s, input);
+    }
     if (port == 6) {
         return input ? 8 : 2;
     }
@@ -444,6 +471,60 @@ static void i2s_write(void *opaque, hwaddr offset, uint64_t value,
 {
     S5L8930I2SState *s = opaque;
 
+    if (s->mca) {
+        if (offset == 0x28) {
+            if (s->voice && i2s_tx_running(s)) {
+                i2s_push(s, value, size);
+            }
+            return;
+        }
+        if (offset == 0x40) { /* native interrupt handler uses W1C */
+            s->regs[offset >> 2] &= ~value;
+            return;
+        }
+        if (offset == 0x44 || offset == 0x48) {
+            /* Native setup writes 301 to +44 and waits for zero; TX stop
+             * writes 1 (80bd60ba). Reset the FIFO, retaining format words. */
+            if ((offset == 0x48 && (value & 1)) ||
+                (offset == 0x44 && (value & 0x101))) {
+                s->regs[0x18 >> 2] &= ~1u;
+                s->head = s->tail = s->level = 0;
+                if (s->voice) {
+                    audio_be_set_active_out(s->audio_be, s->voice, false);
+                }
+            }
+            if ((offset == 0x48 && (value & 1)) ||
+                (offset == 0x44 && (value & 0x202))) {
+                s->regs[0x2c >> 2] &= ~1u;
+                s->in_head = s->in_tail = s->in_level = s->rx_pos = 0;
+                if (s->voice_in) {
+                    audio_be_set_active_in(s->audio_be, s->voice_in, false);
+                }
+            }
+            return;
+        }
+        s->regs[offset >> 2] = value;
+        if (offset == 0x2c && s->audio_in) {
+            bool run = value & 1;
+
+            if (run) {
+                i2s_set_in_rate(s, s5l8930_i2s_rate(s->port));
+                s->rx_pos = 0;
+            }
+            if (s->voice_in) {
+                audio_be_set_active_in(s->audio_be, s->voice_in, run);
+            }
+        }
+        if (offset == 0x18 && s->audio_out) {
+            if (i2s_tx_running(s)) {
+                i2s_set_rate(s, s5l8930_i2s_rate(s->port));
+            }
+            if (s->voice) {
+                audio_be_set_active_out(s->audio_be, s->voice, i2s_tx_running(s));
+            }
+        }
+        return;
+    }
     if (offset == I2S_TXFIFO) {
         if (s->voice && i2s_tx_running(s)) {
             i2s_push(s, value, size);
