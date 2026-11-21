@@ -379,3 +379,17 @@ out:
     qemu_mutex_unlock(&a->lock);
     return result;
 }
+
+/* The A6 tree has no shutdown-trace store; the portable app's queries answer "none". */
+bool ipod_agent_cancel_diagnostic(IPodAgent *a, const char *id, bool record)
+{
+    return false;
+}
+
+bool ipod_agent_shutdown_trace(IPodAgent *a, IPodShutdownCancelTrace *out)
+{
+    if (out) {
+        *out = (IPodShutdownCancelTrace) { 0 };
+    }
+    return false;
+}

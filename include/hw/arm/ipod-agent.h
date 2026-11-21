@@ -1,4 +1,6 @@
 #ifndef HW_ARM_IPOD_AGENT_H
+
+#include "hw/arm/ipod-shutdown-diagnostics.h"
 #define HW_ARM_IPOD_AGENT_H
 
 /* Local host/guest RPC. Tokens identify a daemon session, not a security boundary. */
@@ -41,4 +43,6 @@ int64_t ipod_agent_call(IPodAgent *a, unsigned op, uint64_t token,
                        uint32_t address, uint32_t offset, uint32_t length,
                        int64_t now_ms, uint64_t candidate_token,
                        IPodAgentCopy copy, void *opaque);
+bool ipod_agent_cancel_diagnostic(IPodAgent *a, const char *id, bool record);
+bool ipod_agent_shutdown_trace(IPodAgent *a, IPodShutdownCancelTrace *out);
 #endif
