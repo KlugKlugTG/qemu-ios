@@ -3,7 +3,10 @@
 #include "hw/core/qdev-properties.h"
 #include "hw/arm/ipod_touch_sha1.h"
 #include "qemu/log.h"
+#include "hw/arm/portable-crypto.h"
+#ifndef QEMU_IOS_PORTABLE_CRYPTO
 #include <openssl/bn.h>
+#endif
 
 /*
  * Forging an img3 signature check.
@@ -77,42 +80,34 @@ static void pke_execute(IPodTouchPKEState *s, uint32_t command)
         return;
     }
     uint8_t result[256], expected[256];
+    unsigned bits = ((s->key_len & 3) + 1) * ((((s->key_len >> 3) & 15) + 1) * 32 + 16);
+#ifdef QEMU_IOS_PORTABLE_CRYPTO
+    bool ok = portable_pke_product(s->modulus, s->segments + a * size,
+        one ? NULL : s->segments + b * size, size, bits,
+        s->seg_sign & (1u << a), !one && (s->seg_sign & (1u << b)),
+        one, result);
+#else
     BIGNUM *mod = BN_lebin2bn(s->modulus, size, NULL);
     BIGNUM *left = BN_lebin2bn(s->segments + a * size, size, NULL);
     BIGNUM *right = one ? BN_new() : BN_lebin2bn(s->segments + b * size, size, NULL);
-    BIGNUM *value = BN_new();
+    BIGNUM *radix = BN_new(), *inverse = BN_new(), *value = BN_new();
     BN_CTX *ctx = BN_CTX_new();
-    unsigned bits = ((s->key_len & 3) + 1) * ((((s->key_len >> 3) & 15) + 1) * 32 + 16);
-    bool ok = mod && left && right && value && ctx;
+    bool ok = mod && left && right && radix && inverse && value && ctx;
     if (ok) {
         if (s->seg_sign & (1u << a)) { BN_set_negative(left, 1); }
         if (one) { ok = BN_one(right); }
         else if (s->seg_sign & (1u << b)) { BN_set_negative(right, 1); }
-        ok = ok && BN_is_odd(mod) && !BN_is_one(mod);
-        /* R^-1 depends only on the modulus and the width: keep the last one. */
-        if (ok && !(s->radix_inverse && s->inverse_size == size && s->inverse_bits == bits &&
-                    !memcmp(s->inverse_modulus, s->modulus, size))) {
-            BIGNUM *radix = BN_new();
-            BN_free(s->radix_inverse);
-            s->radix_inverse = BN_new();
-            ok = radix && s->radix_inverse && BN_set_bit(radix, bits) &&
-                 BN_mod_inverse(s->radix_inverse, radix, mod, ctx);
-            BN_free(radix);
-            if (ok) {
-                memcpy(s->inverse_modulus, s->modulus, size);
-                s->inverse_size = size;
-                s->inverse_bits = bits;
-            } else {
-                BN_free(s->radix_inverse);
-                s->radix_inverse = NULL;
-            }
-        }
-        ok = ok && BN_mod_mul(value, left, right, mod, ctx) &&
-             BN_mod_mul(value, value, s->radix_inverse, mod, ctx) &&
+        /* ponytail: compute the radix inverse per operation; cache only if
+         * boot profiling shows a cost, and invalidate on modulus reload. */
+        ok = ok && BN_is_odd(mod) && !BN_is_one(mod) && BN_set_bit(radix, bits) &&
+             BN_mod_inverse(inverse, radix, mod, ctx) &&
+             BN_mod_mul(value, left, right, mod, ctx) &&
+             BN_mod_mul(value, value, inverse, mod, ctx) &&
              BN_bn2binpad(value, result, size) == size;
     }
-    BN_free(mod); BN_free(left); BN_free(right);
-    BN_free(value); BN_CTX_free(ctx);
+    BN_free(mod); BN_free(left); BN_free(right); BN_free(radix);
+    BN_free(inverse); BN_free(value); BN_CTX_free(ctx);
+#endif
     if (!ok) {
         qemu_log_mask(LOG_GUEST_ERROR, "[PKE] Montgomery operation failed\n");
         return;
