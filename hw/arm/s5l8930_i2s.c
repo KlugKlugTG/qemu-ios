@@ -106,6 +106,9 @@ struct S5L8930I2SState {
      * format (0x78057805); the A4's starts with TXCOM = 6. */
     bool ctrl_run;
     bool host_mic;                  /* property: the frontend's microphone is this port's input */
+    bool mca;                       /* property: the A6's MCA register layout (accepted; the A6 codec path is not ported) */
+    bool audio_in;                  /* property: this port's capture side reaches the host */
+    uint32_t frame_rate;            /* property: the A6 machine's fixed frame rate */
     uint8_t port;                   /* property: i2s<port>, selects its NCO */
     Clock *lrclk;                   /* in: the codec's frame clock, followed while the port is the slave */
     CS42L58State *codec;            /* link: the codec this port feeds, whose output volume the host hears */
@@ -575,6 +578,9 @@ static const Property s5l8930_i2s_properties[] = {
     DEFINE_PROP_BOOL("audio-out", S5L8930I2SState, audio_out, false),
     DEFINE_PROP_BOOL("ctrl-run", S5L8930I2SState, ctrl_run, false),
     DEFINE_PROP_BOOL("host-mic", S5L8930I2SState, host_mic, false),
+    DEFINE_PROP_BOOL("mca", S5L8930I2SState, mca, false),
+    DEFINE_PROP_BOOL("audio-in", S5L8930I2SState, audio_in, false),
+    DEFINE_PROP_UINT32("frame-rate", S5L8930I2SState, frame_rate, 48000),
     DEFINE_PROP_UINT8("port", S5L8930I2SState, port, 0),
     DEFINE_PROP_UINT64("nco-base", S5L8930I2SState, nco_base, 0),
     DEFINE_PROP_UINT32("nco-ref-hz", S5L8930I2SState, nco_ref_hz, 0),
