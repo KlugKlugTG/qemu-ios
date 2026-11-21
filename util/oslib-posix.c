@@ -1006,7 +1006,8 @@ void qemu_close_all_open_fd(const int *skip, unsigned int nskip)
 }
 
 int qemu_shm_alloc(size_t size, Error **errp)
-{#ifdef __ANDROID__
+{
+#ifdef __ANDROID__
     /* Bionic has no POSIX shm namespace or librt: an anonymous memfd keeps the same
      * caller-owned fd semantics without a public filesystem name. */
     return qemu_memfd_create("qemu-shm", size, false, 0, 0, errp);
