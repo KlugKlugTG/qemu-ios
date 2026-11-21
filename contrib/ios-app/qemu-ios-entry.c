@@ -23,6 +23,13 @@
 #include "tcg/ir-cache-lifecycle.h"
 #endif
 
+#ifdef CONFIG_TCG
+/* The A6 tree has no experimental IR cache; the portable entry still calls it. */
+void arm_tcg_ir_cache_finish(void)
+{
+}
+#endif
+
 #include "qemu-ios-ui.h"
 
 #if defined(__linux__)
