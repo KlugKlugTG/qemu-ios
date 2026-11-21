@@ -16,6 +16,8 @@
 
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
+#include "qemu-ios-input.h"
+#include "qemu-ios-input.c.inc"
 #include "qemu/timer.h"
 #include "qemu/seqlock.h"
 #include "qemu/aio.h"
