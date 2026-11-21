@@ -59,7 +59,9 @@ if ! ARMV6_SDK="$ARMV6_SDK" bash "$OUT/src/contrib/launchd-cache/build.sh" "$A6T
 fi
 for pair in "it_agent:$OUT/src/contrib/it-agent/it_agent" \
             "httpget-armv7:$OUT/src/contrib/it-proxy/httpget-armv7" \
-            "libappsync.dylib:$OUT/src/build/appsync/libappsync.dylib"; do
+            "libappsync.dylib:$OUT/src/build/appsync/libappsync.dylib" \
+            "OpenGLES:$OUT/src/contrib/gles-public/OpenGLES" \
+            "OpenGLES-1x:$OUT/src/contrib/it-gles/OpenGLES-1x"; do
     name="${pair%%:*}"; source="${pair#*:}"
     [ -f "$source" ] && cp "$source" "$A6TOOLS/$name"
 done
