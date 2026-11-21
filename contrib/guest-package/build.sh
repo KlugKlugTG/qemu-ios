@@ -43,6 +43,28 @@ for c in $COMPONENTS; do
         echo "guest-package: warning: $c/build.sh failed (log: $OUT/logs/$c.log)" >&2
     fi
 done
+# A6 (iPhone 5) preparation tools: the N42 recipe's restore initializer, its
+# MobileGestalt worker, the launchd-cache dylib and the guest tools it bakes in.
+# They are not guest packages (the A6 system gets them from --guest-tools), so
+# they are collected in OUT/a6-tools for the app's firmware-tools folder.
+A6TOOLS="$OUT/a6-tools"
+mkdir -p "$A6TOOLS"
+if ! LEGACY_LINK=0 ARMV6_SDK="$ARMV6_SDK" bash "$OUT/src/contrib/it-restore/build.sh" "$A6TOOLS" \
+        >"$OUT/logs/it-restore.log" 2>&1; then
+    echo "guest-package: warning: it-restore/build.sh failed (log: $OUT/logs/it-restore.log)" >&2
+fi
+if ! ARMV6_SDK="$ARMV6_SDK" bash "$OUT/src/contrib/launchd-cache/build.sh" "$A6TOOLS/launchd-cache-template" \
+        >"$OUT/logs/launchd-cache.log" 2>&1; then
+    echo "guest-package: warning: launchd-cache/build.sh failed (log: $OUT/logs/launchd-cache.log)" >&2
+fi
+for pair in "it_agent:$OUT/src/contrib/it-agent/it_agent" \
+            "httpget-armv7:$OUT/src/contrib/it-proxy/httpget-armv7" \
+            "libappsync.dylib:$OUT/src/build/appsync/libappsync.dylib"; do
+    name="${pair%%:*}"; source="${pair#*:}"
+    [ -f "$source" ] && cp "$source" "$A6TOOLS/$name"
+done
+ls -la "$A6TOOLS" || true
+
 # armv7 on 3.0 (k48-ios30): the iPad helpers again, legacy-linked against the 3.1.3 SDK for 3.0's dyld.
 if ! LEGACY_LINK=1 IPAD_SDK="$ARMV6_SDK" bash "$OUT/src/contrib/ipad1-guest/build.sh" "$OUT/src/build/ipad1-guest-legacy" \
         >"$OUT/logs/ipad1-guest-legacy.log" 2>&1; then
