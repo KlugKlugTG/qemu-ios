@@ -415,6 +415,16 @@ static void i2s_lrclk_update(void *opaque, ClockEvent event)
  * start, the voice kept the old rate while the CDMA paced the new one, and the
  * speech played twice as fast, then the next sounds half as fast.
  */
+/* Bytes one port's frame carries (see include/hw/arm/s5l8930.h): stereo S16 everywhere but
+ * the one narrow/wide slot the Android perf branch's CDMA pacing knows. */
+unsigned s5l8930_i2s_frame_bytes(unsigned port, bool input)
+{
+    if (port == 6) {
+        return input ? 8 : 2;
+    }
+    return 4;
+}
+
 unsigned s5l8930_i2s_sync_rate(unsigned port)
 {
     S5L8930I2SState *s = port < ARRAY_SIZE(i2s_ports) ? i2s_ports[port] : NULL;
