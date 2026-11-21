@@ -1997,3 +1997,9 @@ bool ipod_touch_multitouch_can_queue(struct IPodTouchMultitouchState *s, unsigne
 {
     return true;
 }
+
+/* The A6 tree has no perf accounting: the portable profiler reads zeros. */
+bool it_profile_on;
+void it_profile_cb_enable(void) { }
+void it_acct_frame_snapshot(int64_t v[6]) { memset(v, 0, 6 * sizeof(v[0])); }
+void it_acct_vcpu_sched(int64_t v[3]) { memset(v, 0, 3 * sizeof(v[0])); }
