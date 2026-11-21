@@ -57,7 +57,7 @@ if ! ARMV6_SDK="$ARMV6_SDK" bash "$OUT/src/contrib/launchd-cache/build.sh" "$A6T
         >"$OUT/logs/launchd-cache.log" 2>&1; then
     echo "guest-package: warning: launchd-cache/build.sh failed (log: $OUT/logs/launchd-cache.log)" >&2
 fi
-for pair in "it_agent:$OUT/src/contrib/it-agent/it_agent" \
+for pair in "it_agent:$OUT/src/build/ipad1-guest/it_agent" \
             "httpget-armv7:$OUT/src/contrib/it-proxy/httpget-armv7" \
             "libappsync.dylib:$OUT/src/build/appsync/libappsync.dylib" \
             "OpenGLES:$OUT/src/contrib/gles-public/OpenGLES" \
