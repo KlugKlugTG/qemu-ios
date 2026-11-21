@@ -16,8 +16,6 @@
 
 #include "qemu/osdep.h"
 #include "qemu/main-loop.h"
-#include "qemu-ios-input.h"
-#include "qemu-ios-input.c.inc"
 #include "qemu/timer.h"
 #include "qemu/seqlock.h"
 #include "qemu/aio.h"
@@ -1064,4 +1062,18 @@ void qemu_ios_set_foreground(bool foreground)
     if (foreground && qemu_ios_ui_ready()) {
         aio_bh_schedule_oneshot(qemu_get_aio_context(), ios_resume_bh, NULL);
     }
+}
+
+/* The portable input FIFO's entry point: this tree keeps its own queue, so a
+ * request is admitted only while a guest is up and scheduled on the main loop. */
+bool ios_input_enqueue(QEMUBHFunc *callback, void *opaque, GDestroyNotify discard)
+{
+    if (!qemu_ios_ui_ready()) {
+        if (discard) {
+            discard(opaque);
+        }
+        return false;
+    }
+    aio_bh_schedule_oneshot(qemu_get_aio_context(), callback, opaque);
+    return true;
 }
