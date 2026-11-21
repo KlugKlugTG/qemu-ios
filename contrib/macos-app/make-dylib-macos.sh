@@ -61,7 +61,8 @@ ARGS+=(-dynamiclib -o "$OUT" -install_name "@rpath/$LIBNAME"
 printf '%q ' "${ARGS[@]}" > macos-link-dylib.sh
 echo >> macos-link-dylib.sh
 
-# Only what the app calls; everything else stays private.
+# Only what the app calls; everything else stays private. The qemu_ios_portable_*, profile and paused
+# entries are the portable ABI LightTouch's shared core (Portable/) uses on every host.
 cat > macos-exports.syms <<'SYMS'
 _qemu_ios_main
 _qemu_ios_device_info
@@ -96,9 +97,7 @@ _qemu_ios_agent_cancel
 _qemu_ios_agent_result
 _qemu_ios_agent_free_result
 _qemu_ios_agent_status
-_qemu_ios_agent_report
 _qemu_ios_gles_contexts
-_qemu_ios_gles_refusals
 _qemu_ios_guest_package_report
 _qemu_ios_gles_protocol
 _qemu_ios_build_id
@@ -114,14 +113,26 @@ _qemu_ios_ui_net_restrict
 _qemu_ios_ui_net_lan
 _qemu_ios_ui_ready
 _qemu_ios_ui_storage_failed
+_qemu_ios_storage_stats
 _qemu_ios_ui_guest_shutdown_confirmed
 _qemu_ios_ui_display_sleeping
 _qemu_ios_ui_backlight_level
 _qemu_ios_ui_vibrator
-_qemu_ios_ui_touch_waiting
 _qemu_ios_snapshot_save2
 _qemu_ios_snapshot_status
 _qemu_ios_snapshot_resume
+_qemu_ios_portable_version
+_qemu_ios_portable_board
+_qemu_ios_portable_board_at
+_qemu_ios_portable_frame_copy
+_qemu_ios_portable_touch
+_qemu_ios_portable_input_status
+_qemu_ios_portable_cancel_input
+_qemu_ios_portable_motion
+_qemu_ios_profile_start
+_qemu_ios_profile_stop
+_qemu_ios_profile_status
+_qemu_ios_ui_paused
 SYMS
 
 bash macos-link-dylib.sh

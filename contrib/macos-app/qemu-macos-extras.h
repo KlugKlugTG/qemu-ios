@@ -71,13 +71,6 @@ bool qemu_ios_ui_orientation(int value);
  * starts since the process began, so a buzz shorter than the caller's poll still shows. Always false
  * on a machine without one (the iPods, the iPad). API 2.2. */
 bool qemu_ios_ui_vibrator(uint64_t *pulses);
-/* Whether the guest's digitizer driver has yet to read a press or lift the host sent (qemu_ios_ui_touch, _touch2, an
- * input sequence's): true while a touch report that begins or ends a contact waits for it. reads (may be NULL) counts
- * the ones it has read since the process began. A touch has reached the driver once reads has grown and nothing
- * waits, within a report or two (the digitizer's 60 Hz) on a running guest; a guest that isn't reading (its digitizer
- * powered down behind a dark lock screen, its driver not up yet, the machine paused) leaves them waiting. What iOS
- * then does with the touch is the guest's business: the agent's report tells. Any thread. API 2.4. */
-bool qemu_ios_ui_touch_waiting(uint64_t *reads);
 /* 44100 Hz stereo S16LE mixer packets; read needs 16384 bytes of capacity.
  * A generation owns one recording. Empty read = 0; failed/expired = -1.
  * Empty reads with seconds >= 0 mark silence through that capture time.
@@ -86,18 +79,6 @@ uint64_t qemu_ios_audio_capture_start(void);
 int qemu_ios_audio_capture_read(uint64_t generation, void *buffer, int capacity, double *seconds);
 double qemu_ios_audio_capture_time(uint64_t generation);
 void qemu_ios_audio_capture_stop(uint64_t generation);
-
-/* The host's microphone into the guest's capture port (hw/arm/host-mic.h): interleaved stereo S16 at
- * HOST_MIC_RATE (44100), mono sources duplicated by the caller, `bytes` a multiple of 4. Returns the
- * frames accepted; a shorter count means the guest was not reading and the ring dropped the rest. The
- * guest hears silence while nothing is pushed, and a stopped capture leaves nothing for the next one.
- * Any thread. API 2.4. */
-int qemu_ios_microphone_write(const void *frames, int bytes);
-void qemu_ios_microphone_flush(void);
-/* 1 while a capture port has asked for input since the last flush, else 0. rate is the port's rate
- * (0 before one starts), queued the frames waiting, pushed/dropped the totals since the process
- * began; every out pointer may be NULL. */
-int qemu_ios_microphone_state(uint32_t *rate, uint32_t *queued, uint64_t *pushed, uint64_t *dropped);
 
 /* Queue UTF-8 text for the guest pasteboard (machine property "pasteboard"). */
 void qemu_ios_ui_paste(const char *utf8);
@@ -116,12 +97,6 @@ char *qemu_ios_agent_result(void);
 void qemu_ios_agent_free_result(char *result);
 /* 0 absent/not running, 1 alive, 2 stale. */
 int qemu_ios_agent_status(void);
-/* What the guest agent says of the guest, sent with each of its polls (contrib/it-agent/README.md, "State report"):
- * UTF-8 `key value` lines, at most 1 KiB, when they changed since *serial (0 at first), which this updates; "" once
- * the session that sent them ended (the guest reset, the agent restarted or went silent for its lease), so a reader
- * never takes an old report for the guest's state now. NULL when nothing changed, and always from an agent before v6.
- * The guest wrote it: parse it as untrusted. Free it with free(). Any thread. API 2.4. */
-char *qemu_ios_agent_report(uint64_t *serial);
 
 /* it_boot's last QC_PKG_REPORT since the guest last reset: the serial now
  * current and its result code (contrib/it-boot/it_boot.c R_*; negative = an
@@ -134,40 +109,14 @@ int32_t qemu_ios_gles_protocol(int64_t *serial);
 
 /* Live host GL contexts cannot be included in a snapshot. */
 int qemu_ios_gles_contexts(void);
-/* The GL bridge's refusals (the machine's gles-rejects, under gles-host.c's own lock): every name whose
- * count moved since *serial (0 at first), which this updates, as "NAME\tCOUNT\tCALL\n" lines sorted by
- * name, COUNT the calls refused under it since the emulator started and CALL the GL function it is
- * about, or empty (gles_host_refusals). NULL when nothing moved. A name is "KIND:FIELD:..." built by
- * the host from numbers and its own words, except a guest shim's (shim:...), which the guest wrote:
- * parse it as untrusted. Free it with free(). Any thread. API 2.5. */
-char *qemu_ios_gles_refusals(uint64_t *serial);
 /* Loaded Mach-O UUID; NULL if unavailable. */
 const char *qemu_ios_build_id(void);
 
 /* This C API's version, major << 16 | minor. A minor bump only adds entry points;
  * a major bump removes or changes one, and a host built for another major refuses
  * the dylib. */
-#define QEMU_IOS_API_VERSION ((2u << 16) | 5u)
+#define QEMU_IOS_API_VERSION ((2u << 16) | 3u)
 uint32_t qemu_ios_api_version(void);
-
-/*
- * The phone's camera into the emulated device. sensor is 0 for the back one and 1 for the front;
- * nv12 is one frame, luma then interleaved chroma, no padding, at width x height, and it is
- * copied, so the caller keeps its buffer. 1 when accepted, 0 when this engine has no A4 ISP, and
- * -1 for something that is not a frame.
- *
- * The newest frame wins: a write over a frame nobody has drawn replaces it, which is what a
- * viewfinder does and why a slow guest costs a drop rather than a delay. qemu_ios_camera_sensor is
- * the camera the guest's driver last named.
- */
-int qemu_ios_camera_write(int sensor, const void *nv12, uint32_t width, uint32_t height);
-/* Drop the held frame; the ISP's own test pattern resumes until the next write. */
-void qemu_ios_camera_flush(void);
-int32_t qemu_ios_camera_sensor(void);
-/* Frames written, frames the ISP drew, frames replaced before anything drew them, and the size of
- * the picture being held. Every out pointer may be NULL. */
-void qemu_ios_camera_state(int sensor, uint64_t *pushed, uint64_t *taken, uint64_t *replaced,
-                           uint32_t *width, uint32_t *height);
 
 /* Machine controls. */
 void qemu_ios_ui_pause(void);
