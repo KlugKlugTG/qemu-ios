@@ -934,15 +934,13 @@ bool qemu_ios_ui_storage_failed(void)
 
 void qemu_ios_storage_stats(QemuIosStorageStats *out)
 {
-    NANDStorageStats s;
-
-    nand_storage_stats(&s);
-    *out = (QemuIosStorageStats) {
-        .read_ops = s.ops[NAND_STAT_READ], .read_bytes = s.bytes[NAND_STAT_READ], .read_ns = s.ns[NAND_STAT_READ],
-        .write_ops = s.ops[NAND_STAT_WRITE], .write_bytes = s.bytes[NAND_STAT_WRITE],
-        .write_ns = s.ns[NAND_STAT_WRITE],
-        .erase_ops = s.ops[NAND_STAT_ERASE], .erase_ns = s.ns[NAND_STAT_ERASE],
-    };
+    /*
+     * The A6 tree has no NAND counter store yet: the app's storage rates read
+     * zero until the perf branch's counters are ported. The ABI stays.
+     */
+    if (out) {
+        *out = (QemuIosStorageStats) { 0 };
+    }
 }
 
 void qemu_ios_ui_vm_stopped(void)
