@@ -48,6 +48,10 @@
 __thread int qemu_jit_state;
 #endif
 
+#ifdef __ANDROID__
+#include "qemu/memfd.h"
+#endif
+
 #ifdef CONFIG_LINUX
 #include <sys/syscall.h>
 #endif
