@@ -42,6 +42,17 @@ bool s5l8930_iop_io_failed(void);
 bool ipod_touch_mipi_dsi_panel_off(void);
 bool s5l8930_d1815_guest_shutdown_confirmed(void);
 
+
+/* A6 compatibility: the portable UI asks for counters/hooks this tree does not model. */
+extern void (*ipod_lcd_vsync_due)(int64_t realtime_ns);
+bool ipod_touch_ap_wake_reset_pending(void);
+void gles_host_prof(uint64_t *call_ns, uint64_t *present_ns);
+struct LIS302DLState;
+void lis302dl_set_host_motion(struct LIS302DLState *s, uint32_t fields, const double a[3], const double w[3]);
+void lis302dl_clear_host_motion(struct LIS302DLState *s);
+struct IPodTouchMultitouchState;
+bool ipod_touch_multitouch_can_queue(struct IPodTouchMultitouchState *s, unsigned begins, unsigned ends, unsigned moves);
+
 #include "qemu-ios-ui.h"
 #include "virtual-input.h"
 #include "qemu-ios-input.h"
@@ -1970,4 +1981,19 @@ bool qemu_ios_ui_modem_write(const char *property, const char *value)
     }
     modem = object_resolve_path_component(qdev_get_machine(), "baseband-modem");
     return portable_prop_write(modem, property, g_strdup(value));
+}
+
+/* Definitions for the A6 compatibility layer above. */
+void (*ipod_lcd_vsync_due)(int64_t realtime_ns);
+bool ipod_touch_ap_wake_reset_pending(void) { return false; }
+void gles_host_prof(uint64_t *call_ns, uint64_t *present_ns)
+{
+    if (call_ns) *call_ns = 0;
+    if (present_ns) *present_ns = 0;
+}
+void lis302dl_set_host_motion(struct LIS302DLState *s, uint32_t fields, const double a[3], const double w[3]) { }
+void lis302dl_clear_host_motion(struct LIS302DLState *s) { }
+bool ipod_touch_multitouch_can_queue(struct IPodTouchMultitouchState *s, unsigned begins, unsigned ends, unsigned moves)
+{
+    return true;
 }
