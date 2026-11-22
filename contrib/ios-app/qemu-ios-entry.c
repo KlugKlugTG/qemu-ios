@@ -82,12 +82,66 @@ static void guest_gdb_init(void)
  */
 #include <signal.h>
 #include <ucontext.h>
+#if defined(__ANDROID__)
+#include <dlfcn.h>
+#include <unwind.h>
+#else
 #include <execinfo.h>
+#endif
 
-static void qemu_ios_crash_handler(int sig, siginfo_t *info, void *ctx)
+#if defined(__ANDROID__)
+typedef struct CrashFrames {
+    void *pc[16];
+    unsigned count;
+} CrashFrames;
+
+static _Unwind_Reason_Code crash_frame(struct _Unwind_Context *ctx, void *opaque)
+{
+    CrashFrames *f = opaque;
+
+    if (f->count < ARRAY_SIZE(f->pc)) {
+        f->pc[f->count++] = (void *)_Unwind_GetIP(ctx);
+    }
+    return f->count < ARRAY_SIZE(f->pc) ? _URC_NO_REASON : _URC_END_OF_STACK;
+}
+
+/* Bionic has no execinfo; the unwinder plus dladdr names what it can and prints the rest as addresses. */
+static void crash_backtrace(void)
+{
+    CrashFrames f = { 0 };
+    char line[256];
+
+    _Unwind_Backtrace(crash_frame, &f);
+    for (unsigned i = 0; i < f.count; i++) {
+        Dl_info d = { 0 };
+        int len;
+
+        if (dladdr(f.pc[i], &d) && d.dli_sname) {
+            len = snprintf(line, sizeof(line), "#%u %p %s+0x%lx\n", i, f.pc[i], d.dli_sname,
+                           (unsigned long)((uintptr_t)f.pc[i] - (uintptr_t)d.dli_saddr));
+        } else {
+            len = snprintf(line, sizeof(line), "#%u %p\n", i, f.pc[i]);
+        }
+        if (len > 0) {
+            ssize_t ignored = write(STDERR_FILENO, line, (size_t)len);
+            (void)ignored;
+        }
+    }
+}
+#else
+static void crash_backtrace(void)
 {
     void *frames[16];
     int n = backtrace(frames, (int)ARRAY_SIZE(frames));
+
+    if (n > 0) {
+        backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    }
+}
+#endif
+
+static void qemu_ios_crash_handler(int sig, siginfo_t *info, void *ctx)
+{
     char line[512];
     int len = snprintf(line, sizeof(line), "\nqemu: fatal signal %d at %p (si_code %d)\n",
                        sig, info ? info->si_addr : NULL, info ? info->si_code : 0);
@@ -106,9 +160,7 @@ static void qemu_ios_crash_handler(int sig, siginfo_t *info, void *ctx)
         }
     }
 #endif
-    if (n > 0) {
-        backtrace_symbols_fd(frames, n, STDERR_FILENO);
-    }
+    crash_backtrace();
     signal(sig, SIG_DFL);
     raise(sig);
 }
