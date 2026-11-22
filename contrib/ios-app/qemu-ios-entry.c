@@ -73,6 +73,66 @@ static void guest_gdb_init(void)
     fprintf(stderr, "[guest-gdb] listening 127.0.0.1:%u; attach after capture\n", port);
 }
 
+
+/*
+ * A crash inside the engine is otherwise invisible on a phone: the embedding host sees only the
+ * process disappear, and the signal number is all it can report. Print the signal, the faulting
+ * address and a short backtrace on stderr, which the host already captures, so a report says where
+ * it died instead of guessing. Only the embeddings that ask for it get the handler.
+ */
+#include <signal.h>
+#include <ucontext.h>
+#include <execinfo.h>
+
+static void qemu_ios_crash_handler(int sig, siginfo_t *info, void *ctx)
+{
+    void *frames[16];
+    int n = backtrace(frames, (int)ARRAY_SIZE(frames));
+    char line[512];
+    int len = snprintf(line, sizeof(line), "\nqemu: fatal signal %d at %p (si_code %d)\n",
+                       sig, info ? info->si_addr : NULL, info ? info->si_code : 0);
+    if (len > 0) {
+        ssize_t ignored = write(STDERR_FILENO, line, (size_t)len);
+        (void)ignored;
+    }
+#if defined(__aarch64__) || defined(__arm__)
+    if (ctx) {
+        ucontext_t *uc = ctx;
+        len = snprintf(line, sizeof(line), "qemu: pc %p lr %p\n",
+                       (void *)uc->uc_mcontext.pc, (void *)uc->uc_mcontext.regs[14]);
+        if (len > 0) {
+            ssize_t ignored = write(STDERR_FILENO, line, (size_t)len);
+            (void)ignored;
+        }
+    }
+#endif
+    if (n > 0) {
+        backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void qemu_ios_install_crash_handler(void)
+{
+    static bool installed;
+    static char altstack[64 * 1024];
+    stack_t ss = { .ss_sp = altstack, .ss_size = sizeof(altstack), .ss_flags = 0 };
+
+    if (installed || !getenv("LTM_CRASH_TRACE")) {
+        return;
+    }
+    installed = true;
+    sigaltstack(&ss, NULL);
+    struct sigaction sa = { 0 };
+    sa.sa_sigaction = qemu_ios_crash_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigaction(SIGILL, &sa, NULL);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+}
+
 int qemu_ios_main(int argc, char **argv)
 {
     int status;
@@ -97,6 +157,8 @@ int qemu_ios_main(int argc, char **argv)
      * look instant rather than look broken.
      */
     autostart = 1;
+
+    qemu_ios_install_crash_handler();
 
     /* Console and AIO context exist only now; the display attaches here. */
     qemu_ios_ui_vm_started();
