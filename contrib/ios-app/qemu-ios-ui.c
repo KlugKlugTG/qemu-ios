@@ -987,6 +987,12 @@ void qemu_ios_ui_vm_started(void)
      * display listener is not registered, and the guest's panel traffic never reaches a host callback.
      * A4 and A6 preparation both run this way; a device boot never sets it. */
     if (getenv("LTM_NO_UI") && *getenv("LTM_NO_UI") == '1') {
+        /* The panel's vsync hook stays a valid function: the display model calls it when the guest
+         * flips, and a NULL there would be worse than a no-op. No listener, no frame callback. */
+        ipod_lcd_vsync_due = ios_note_vsync_due;
+        qatomic_set(&portable_paused, !runstate_is_running());
+        qemu_add_vm_change_state_handler(portable_runstate_changed, NULL);
+        qatomic_set(&ios_vm_alive, 1);
         return;
     }
     ios.con = qemu_console_lookup_by_index(0);
