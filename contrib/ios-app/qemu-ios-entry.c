@@ -159,6 +159,13 @@ int qemu_ios_main(int argc, char **argv)
     autostart = 1;
 
     qemu_ios_install_crash_handler();
+    if (getenv("LTM_CRASH_TRACE")) {
+        fprintf(stderr, "qemu: argc %d", argc);
+        for (int i = 0; i < argc; i++) {
+            fprintf(stderr, " [%d]%s", i, argv[i]);
+        }
+        fprintf(stderr, "\n");
+    }
 
     /* Console and AIO context exist only now; the display attaches here. */
     qemu_ios_ui_vm_started();
