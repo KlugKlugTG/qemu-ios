@@ -18,7 +18,10 @@ if a.cpp_standard:
  if a.abi!='linux':p.error('--cpp-standard is a Linux packaging option')
  args+=['-Dcpp_std='+a.cpp_standard]
 if a.experimental_tb_cache_clear:
- args[args.index('--extra-cflags=-fPIC -DQEMU_IOS_PORTABLE_CRYPTO '+os.environ.get('LT_ENGINE_CFLAGS','').strip())]+=' -DQEMU_EXPERIMENTAL_TB_CACHE_STATS=1'
+ for i,arg in enumerate(args):
+  if arg.startswith('--extra-cflags='):
+   args[i]+=' -DQEMU_EXPERIMENTAL_TB_CACHE_STATS=1'
+   break
 if a.abi!='linux':
  if not a.ndk:raise RuntimeError('--ndk required')
  bin=a.ndk.resolve()/'toolchains/llvm/prebuilt/linux-x86_64/bin';arch='aarch64' if a.abi=='arm64-v8a' else 'x86_64';triple='aarch64-linux-android' if arch=='aarch64' else 'x86_64-linux-android'
