@@ -983,6 +983,12 @@ void qemu_ios_ui_vm_started(void)
     if (ios.attached) {
         return;
     }
+    /* A headless preparation boot wants no frames at all: firmwarekit's one-shots ask for this so the
+     * display listener is not registered, and the guest's panel traffic never reaches a host callback.
+     * A4 and A6 preparation both run this way; a device boot never sets it. */
+    if (getenv("LTM_NO_UI") && *getenv("LTM_NO_UI") == '1') {
+        return;
+    }
     ios.con = qemu_console_lookup_by_index(0);
     qatomic_set(&ios_is_ipad1, object_dynamic_cast(qdev_get_machine(),
                                                    MACHINE_TYPE_NAME("ipad1")) != NULL);
