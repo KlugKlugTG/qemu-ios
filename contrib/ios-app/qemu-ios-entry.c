@@ -89,77 +89,88 @@ static void guest_gdb_init(void)
 #include <execinfo.h>
 #endif
 
-#if defined(__ANDROID__)
 typedef struct CrashFrames {
-    void *pc[16];
+    uintptr_t pc[12];
     unsigned count;
 } CrashFrames;
 
+#if defined(__ANDROID__)
 static _Unwind_Reason_Code crash_frame(struct _Unwind_Context *ctx, void *opaque)
 {
     CrashFrames *f = opaque;
 
     if (f->count < ARRAY_SIZE(f->pc)) {
-        f->pc[f->count++] = (void *)_Unwind_GetIP(ctx);
+        f->pc[f->count++] = (uintptr_t)_Unwind_GetIP(ctx);
     }
     return f->count < ARRAY_SIZE(f->pc) ? _URC_NO_REASON : _URC_END_OF_STACK;
 }
+#endif
 
-/* Bionic has no execinfo; the unwinder plus dladdr names what it can and prints the rest as addresses. */
+/* Hex without snprintf: a signal handler must not take the library's locks, and a crash inside a crash
+ * report is worse than no report. */
+static void crash_hex(const char *label, uint64_t value)
+{
+    static const char digits[] = "0123456789abcdef";
+    char line[64];
+    size_t at = 0;
+
+    while (*label) {
+        line[at++] = *label++;
+    }
+    line[at++] = ' ';
+    line[at++] = '0';
+    line[at++] = 'x';
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        line[at++] = digits[(value >> shift) & 0xf];
+    }
+    line[at++] = '\n';
+    ssize_t ignored = write(STDERR_FILENO, line, at);
+    (void)ignored;
+}
+
 static void crash_backtrace(void)
 {
+#if defined(__ANDROID__)
     CrashFrames f = { 0 };
-    char line[256];
 
     _Unwind_Backtrace(crash_frame, &f);
     for (unsigned i = 0; i < f.count; i++) {
-        Dl_info d = { 0 };
-        int len;
-
-        if (dladdr(f.pc[i], &d) && d.dli_sname) {
-            len = snprintf(line, sizeof(line), "#%u %p %s+0x%lx\n", i, f.pc[i], d.dli_sname,
-                           (unsigned long)((uintptr_t)f.pc[i] - (uintptr_t)d.dli_saddr));
-        } else {
-            len = snprintf(line, sizeof(line), "#%u %p\n", i, f.pc[i]);
-        }
-        if (len > 0) {
-            ssize_t ignored = write(STDERR_FILENO, line, (size_t)len);
-            (void)ignored;
-        }
+        crash_hex("#", f.pc[i]);
     }
-}
 #else
-static void crash_backtrace(void)
-{
-    void *frames[16];
+    void *frames[12];
     int n = backtrace(frames, (int)ARRAY_SIZE(frames));
 
-    if (n > 0) {
-        backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    for (int i = 0; i < n; i++) {
+        crash_hex("#", (uintptr_t)frames[i]);
     }
-}
 #endif
+}
 
 static void qemu_ios_crash_handler(int sig, siginfo_t *info, void *ctx)
 {
-    char line[512];
-    int len = snprintf(line, sizeof(line), "\nqemu: fatal signal %d at %p (si_code %d)\n",
-                       sig, info ? info->si_addr : NULL, info ? info->si_code : 0);
-    if (len > 0) {
-        ssize_t ignored = write(STDERR_FILENO, line, (size_t)len);
-        (void)ignored;
-    }
-#if defined(__aarch64__) || defined(__arm__)
+    crash_hex("qemu: fatal signal", (uint64_t)sig);
+    crash_hex("qemu: fault address", (uintptr_t)(info ? info->si_addr : NULL));
+    crash_hex("qemu: si_code", (uint64_t)(info ? info->si_code : 0));
     if (ctx) {
         ucontext_t *uc = ctx;
-        len = snprintf(line, sizeof(line), "qemu: pc %p lr %p\n",
-                       (void *)uc->uc_mcontext.pc, (void *)uc->uc_mcontext.regs[14]);
-        if (len > 0) {
-            ssize_t ignored = write(STDERR_FILENO, line, (size_t)len);
-            (void)ignored;
+#if defined(__aarch64__)
+        const mcontext_t *mc = &uc->uc_mcontext;
+
+        crash_hex("qemu: pc", (uintptr_t)mc->pc);
+        crash_hex("qemu: sp", (uintptr_t)mc->sp);
+        crash_hex("qemu: lr", (uintptr_t)mc->regs[30]);
+        for (int i = 0; i < 8; i++) {
+            crash_hex("qemu: x", (uintptr_t)mc->regs[i]);
         }
-    }
+#elif defined(__arm__)
+        crash_hex("qemu: pc", (uintptr_t)uc->uc_mcontext.arm_pc);
+        crash_hex("qemu: sp", (uintptr_t)uc->uc_mcontext.arm_sp);
+        crash_hex("qemu: lr", (uintptr_t)uc->uc_mcontext.arm_lr);
+#else
+        (void)uc;
 #endif
+    }
     crash_backtrace();
     signal(sig, SIG_DFL);
     raise(sig);
